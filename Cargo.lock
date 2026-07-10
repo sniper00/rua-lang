@@ -138,6 +138,7 @@ dependencies = [
 name = "rua-analysis"
 version = "0.1.0"
 dependencies = [
+ "rowan",
  "rua-syntax",
 ]
 

@@ -32,6 +32,10 @@ impl TextRange {
     pub const fn is_empty(self) -> bool {
         self.start == self.end
     }
+
+    pub const fn contains(self, offset: u32) -> bool {
+        self.start <= offset && offset < self.end
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -19,4 +19,5 @@ pub use hir::{
     ModuleKind, TextRange, Visibility,
 };
 pub use ide::{Analysis, AnalysisHost};
+pub use semantic::{FilePosition, Semantics};
 pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};

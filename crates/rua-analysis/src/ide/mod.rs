@@ -10,6 +10,7 @@ use crate::{
     BaseDb,
     diagnostic::Diagnostic,
     hir::{DefMap, ItemTree, module_resolution::resolve_module_file},
+    semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
 
@@ -66,6 +67,10 @@ impl Analysis {
 
     pub fn def_map(&self, root_file: FileId) -> Arc<DefMap> {
         self.db.def_map(root_file)
+    }
+
+    pub fn semantics(&self, root_file: FileId) -> Semantics {
+        Semantics::new(Rc::clone(&self.db), self.db.def_map(root_file))
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {
