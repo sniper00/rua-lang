@@ -56,6 +56,7 @@ The shared parser corpus and CST byte-range snapshots are checked with:
 
 ```sh
 cargo test -p rua-syntax --test parser_goldens parser_conformance -- --exact
+cargo test -p rua-syntax range_conformance
 cargo test -p rua-syntax --test parser_goldens range_golden -- --exact
 ```
 

@@ -18,6 +18,8 @@ jobs:
           rustup default stable
       - name: Parser conformance
         run: cargo test --locked -p rua-syntax parser_conformance
+      - name: Range conformance
+        run: cargo test --locked -p rua-syntax range_conformance
       - name: Compiler oracle
         run: cargo test --locked -p ruac
       - name: Workspace
