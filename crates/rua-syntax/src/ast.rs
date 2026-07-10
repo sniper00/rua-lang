@@ -1069,6 +1069,9 @@ impl MethodCallExpr {
     pub fn method_name(&self) -> Option<SyntaxToken> {
         name_token(&self.syntax)
     }
+    pub fn type_args(&self) -> Option<TypeArgs> {
+        child(&self.syntax)
+    }
     pub fn arg_list(&self) -> Option<ArgList> {
         child(&self.syntax)
     }

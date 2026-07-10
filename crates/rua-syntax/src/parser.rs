@@ -883,6 +883,13 @@ impl<'a> Parser<'a> {
                 K::Dot => {
                     self.bump();
                     self.expect_ident();
+                    if self.accept(K::ColonColon) {
+                        if self.at(K::Lt) {
+                            self.type_args();
+                        } else {
+                            self.error("expected `<` after method `::`");
+                        }
+                    }
                     if self.at(K::LParen) {
                         self.arg_list();
                         self.wrap(cp, K::MethodCallExpr);

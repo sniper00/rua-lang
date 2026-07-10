@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/iterator_filter_not_bool.rua:4: iterator filter predicate must be `bool`, found `i64`

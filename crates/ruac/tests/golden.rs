@@ -40,14 +40,15 @@ const PHASE4A_TODO_PASS_CASES: &[&str] = &[
     "iterator_fold",
 ];
 const PHASE4A_TODO_FAIL_CASES: &[&str] = &[
-    "iterator_non_iterable_source",
-    "iterator_filter_not_bool",
     "iterator_escape_unsupported",
 ];
 const PHASE4A_ACTIVE_FAIL_CASES: &[&str] = &[
     "closure_param_cannot_infer",
     "closure_mut_capture_invalid",
     "closure_escape_unsupported",
+    "iterator_non_iterable_source",
+    "iterator_filter_not_bool",
+    "iterator_collect_mismatch",
 ];
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",

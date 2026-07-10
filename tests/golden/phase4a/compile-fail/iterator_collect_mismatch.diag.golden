@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/iterator_collect_mismatch.rua:2: collect target element type `String` is incompatible with iterator item `i64`

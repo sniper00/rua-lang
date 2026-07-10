@@ -15,6 +15,67 @@ use crate::diag::{Diag, render_all};
 use crate::token::SourceRange;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IterSourceKind {
+    ExclusiveRange,
+    InclusiveRange,
+    Vec,
+    VecIter,
+    VecIntoIter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IterAdapterKind {
+    Map,
+    Filter,
+    FilterMap,
+    Enumerate,
+    Take,
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IterConsumerKind {
+    For,
+    CollectVec,
+    Fold,
+    Count,
+    Any,
+    All,
+    Find,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IterSource {
+    pub kind: IterSourceKind,
+    pub range: SourceRange,
+    pub item_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IterAdapter {
+    pub kind: IterAdapterKind,
+    pub range: SourceRange,
+    pub input_type: String,
+    pub output_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IterPlan {
+    pub source: IterSource,
+    pub adapters: Vec<IterAdapter>,
+    pub consumer: IterConsumerKind,
+    pub consumer_range: SourceRange,
+    pub item_type: String,
+    pub output_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IterDraft {
+    source: IterSource,
+    adapters: Vec<IterAdapter>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Ty {
     I64,
@@ -34,7 +95,9 @@ enum Ty {
     Map(Box<Ty>, Box<Ty>),
     /// A lazy iterator item type. Step 4A.5 attaches the corresponding IterPlan;
     /// this slot already supplies closure context without materializing values.
-    Iter(Box<Ty>),
+    Iter(Box<Ty>, Box<IterDraft>),
+    /// `(A, B, ...)`, currently introduced by `enumerate()`.
+    Tuple(Vec<Ty>),
     /// A Phase 4A closure signature. Unknown parameter/return slots preserve
     /// the checker's zero-false-positive behavior until context proves them.
     Closure(Vec<Ty>, Box<Ty>),
@@ -67,7 +130,11 @@ impl Ty {
             Ty::Option(t) => format!("Option<{}>", t.name()),
             Ty::Result(t, e) => format!("Result<{}, {}>", t.name(), e.name()),
             Ty::Map(k, v) => format!("HashMap<{}, {}>", k.name(), v.name()),
-            Ty::Iter(item) => format!("Iterator<{}>", item.name()),
+            Ty::Iter(item, _) => format!("Iterator<{}>", item.name()),
+            Ty::Tuple(items) => format!(
+                "({})",
+                items.iter().map(Ty::name).collect::<Vec<_>>().join(", ")
+            ),
             Ty::Closure(params, ret) => format!(
                 "fn({}) -> {}",
                 params.iter().map(Ty::name).collect::<Vec<_>>().join(", "),
@@ -94,7 +161,10 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Option(x), Ty::Option(y)) => compatible(x, y),
         (Ty::Result(x1, e1), Ty::Result(x2, e2)) => compatible(x1, x2) && compatible(e1, e2),
         (Ty::Map(k1, v1), Ty::Map(k2, v2)) => compatible(k1, k2) && compatible(v1, v2),
-        (Ty::Iter(x), Ty::Iter(y)) => compatible(x, y),
+        (Ty::Iter(x, _), Ty::Iter(y, _)) => compatible(x, y),
+        (Ty::Tuple(x), Ty::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| compatible(a, b))
+        }
         (Ty::Closure(p1, r1), Ty::Closure(p2, r2)) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2).all(|(x, y)| compatible(x, y))
@@ -239,6 +309,13 @@ fn collect_calls_on_else<'a>(
 struct ClosureUsage<'a> {
     calls: Vec<&'a [Expr]>,
     escapes: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ClosureContext<'a> {
+    expected: &'a [Ty],
+    report_unknown_params: bool,
+    allow_mutable_capture: bool,
 }
 
 fn collect_closure_usage_stmt<'a>(name: &str, stmt: &'a Stmt, usage: &mut ClosureUsage<'a>) {
@@ -414,7 +491,12 @@ fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) {
             unify_generic(k1, k2, subst);
             unify_generic(v1, v2, subst);
         }
-        (Ty::Iter(p), Ty::Iter(a)) => unify_generic(p, a, subst),
+        (Ty::Iter(p, _), Ty::Iter(a, _)) => unify_generic(p, a, subst),
+        (Ty::Tuple(p), Ty::Tuple(a)) if p.len() == a.len() => {
+            for (p, a) in p.iter().zip(a) {
+                unify_generic(p, a, subst);
+            }
+        }
         (Ty::Closure(p1, r1), Ty::Closure(p2, r2)) if p1.len() == p2.len() => {
             for (p, a) in p1.iter().zip(p2) {
                 unify_generic(p, a, subst);
@@ -434,7 +516,8 @@ fn subst_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Option(t) => Ty::Option(Box::new(subst_ty(t, subst))),
         Ty::Result(t, e) => Ty::Result(Box::new(subst_ty(t, subst)), Box::new(subst_ty(e, subst))),
         Ty::Map(k, v) => Ty::Map(Box::new(subst_ty(k, subst)), Box::new(subst_ty(v, subst))),
-        Ty::Iter(item) => Ty::Iter(Box::new(subst_ty(item, subst))),
+        Ty::Iter(item, draft) => Ty::Iter(Box::new(subst_ty(item, subst)), draft.clone()),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|item| subst_ty(item, subst)).collect()),
         Ty::Closure(params, ret) => Ty::Closure(
             params.iter().map(|param| subst_ty(param, subst)).collect(),
             Box::new(subst_ty(ret, subst)),
@@ -458,7 +541,6 @@ struct FnSig {
 fn builtin_method_ret(recv: &Ty, method: &str) -> Ty {
     match (recv, method) {
         (Ty::Vec(t), "get" | "pop") => Ty::Option(t.clone()),
-        (Ty::Vec(t), "iter" | "into_iter") => Ty::Iter(t.clone()),
         (Ty::Vec(_), "len") => Ty::I64,
         (Ty::Vec(_), "push" | "set") => Ty::Unit,
         (Ty::Map(_, v), "get" | "remove") => Ty::Option(v.clone()),
@@ -602,6 +684,7 @@ pub struct TypeInfo {
     /// First closure encountered during type checking. The compiler entry point
     /// uses this as a temporary backend gate until fused closure codegen lands.
     first_closure: Option<SourceRange>,
+    iter_plans: HashMap<(u32, usize, usize), IterPlan>,
 }
 
 impl TypeInfo {
@@ -623,6 +706,28 @@ impl TypeInfo {
 
     pub fn first_closure(&self) -> Option<SourceRange> {
         self.first_closure
+    }
+
+    pub fn iter_plan(&self, file: u32, start: usize, len: usize) -> Option<&IterPlan> {
+        self.iter_plans.get(&(file, start, len))
+    }
+
+    pub fn iter_plans(&self) -> impl Iterator<Item = &IterPlan> {
+        self.iter_plans.values()
+    }
+
+    pub fn pending_iter_codegen(&self) -> Option<SourceRange> {
+        self.iter_plans
+            .values()
+            .filter(|plan| {
+                !plan.adapters.is_empty()
+                    || plan.consumer != IterConsumerKind::For
+                    || !matches!(plan.source.kind, IterSourceKind::ExclusiveRange
+                        | IterSourceKind::InclusiveRange
+                        | IterSourceKind::Vec)
+            })
+            .map(|plan| plan.consumer_range)
+            .min_by_key(|range| (range.file, range.start))
     }
 }
 
@@ -897,6 +1002,7 @@ pub fn check(prog: &Program, files: &[String]) -> Result<TypeInfo, String> {
             str_methods: tc.str_methods,
             str_concats: tc.str_concats,
             first_closure: tc.first_closure,
+            iter_plans: tc.iter_plans,
         })
     } else {
         Err(render_all(&tc.errs, files))
@@ -975,6 +1081,7 @@ struct Tc {
     /// Scope-count boundaries for nested closures. Assignments resolving below
     /// the innermost boundary mutate an enclosing capture.
     closure_boundaries: Vec<usize>,
+    closure_mutable_capture_allowed: Vec<bool>,
     /// Explicit return expression types for the currently inferred closure.
     closure_returns: Vec<Vec<Ty>>,
     errs: Vec<Diag>,
@@ -1001,6 +1108,7 @@ struct Tc {
     /// so `v.` / `s.` completion lists built-in methods.
     builtin_type_members: HashMap<String, Vec<CompletionMember>>,
     first_closure: Option<SourceRange>,
+    iter_plans: HashMap<(u32, usize, usize), IterPlan>,
 }
 
 impl Tc {
@@ -1056,6 +1164,7 @@ impl Tc {
             scopes: Vec::new(),
             mutable_scopes: Vec::new(),
             closure_boundaries: Vec::new(),
+            closure_mutable_capture_allowed: Vec::new(),
             closure_returns: Vec::new(),
             errs: Vec::new(),
             int_divs: std::collections::HashSet::new(),
@@ -1068,6 +1177,7 @@ impl Tc {
             enum_variants: HashMap::new(),
             builtin_type_members: HashMap::new(),
             first_closure: None,
+            iter_plans: HashMap::new(),
         };
         // Second pass: field types, free-fn signatures, and trait method sigs
         // (now that names resolve).
@@ -1677,8 +1787,17 @@ impl Tc {
                         collect_closure_usage_expr(name, tail, &mut usage);
                     }
                     let expected = self.closure_params_from_calls(params.len(), &usage.calls);
-                    let closure_ty =
-                        self.infer_closure(init.span, params, ret.as_ref(), body, &expected, true);
+                    let closure_ty = self.infer_closure(
+                        init.span,
+                        params,
+                        ret.as_ref(),
+                        body,
+                        ClosureContext {
+                            expected: &expected,
+                            report_unknown_params: true,
+                            allow_mutable_capture: false,
+                        },
+                    );
                     let has_unknown_param = matches!(
                         &closure_ty,
                         Ty::Closure(params, _) if params.iter().any(|ty| matches!(ty, Ty::Unknown))
@@ -1750,16 +1869,39 @@ impl Tc {
                 self.block(body);
             }
             Stmt::For { var, var_span, iter, body } => {
-                // `for i in a..b` gives an integer; `for x in vec` gives the Vec
-                // element type; other iterables are unknown.
-                let elem = if matches!(iter.kind, ExprKind::Range { .. }) {
-                    self.infer(iter);
-                    Ty::I64
-                } else {
-                    match self.infer(iter) {
-                        Ty::Vec(t) => *t,
-                        _ => Ty::Unknown,
+                let iter_ty = self.infer(iter);
+                let elem = match iter_ty {
+                    Ty::Iter(item, draft) => {
+                        let item = *item;
+                        self.finish_iter_plan(
+                            &draft,
+                            IterConsumerKind::For,
+                            iter.span,
+                            &item,
+                            &Ty::Unit,
+                        );
+                        item
                     }
+                    Ty::Vec(item) => {
+                        let item = *item;
+                        let draft = self.iter_source(IterSourceKind::Vec, iter.span, &item);
+                        self.finish_iter_plan(
+                            &draft,
+                            IterConsumerKind::For,
+                            iter.span,
+                            &item,
+                            &Ty::Unit,
+                        );
+                        item
+                    }
+                    ty if ty.is_concrete() => {
+                        self.err(
+                            iter.span,
+                            format!("type `{}` is not iterable", ty.name()),
+                        );
+                        Ty::Unknown
+                    }
+                    _ => Ty::Unknown,
                 };
                 self.push();
                 self.record_binding(var_span, &elem, &format!("for {var}"));
@@ -1817,8 +1959,7 @@ impl Tc {
         params: &[ClosureParam],
         ret: Option<&Type>,
         body: &ClosureBody,
-        expected: &[Ty],
-        report_unknown_params: bool,
+        context: ClosureContext<'_>,
     ) -> Ty {
         self.first_closure.get_or_insert(span);
         let param_tys: Vec<Ty> = params
@@ -1829,11 +1970,17 @@ impl Tc {
                     .ty
                     .as_ref()
                     .map(|ty| self.ty_of(ty))
-                    .unwrap_or_else(|| expected.get(index).cloned().unwrap_or(Ty::Unknown))
+                    .unwrap_or_else(|| {
+                        context
+                            .expected
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(Ty::Unknown)
+                    })
             })
             .collect();
 
-        if report_unknown_params {
+        if context.report_unknown_params {
             for (param, ty) in params.iter().zip(&param_tys) {
                 if matches!(ty, Ty::Unknown) {
                     self.err(
@@ -1849,6 +1996,8 @@ impl Tc {
 
         let boundary = self.scopes.len();
         self.closure_boundaries.push(boundary);
+        self.closure_mutable_capture_allowed
+            .push(context.allow_mutable_capture);
         self.closure_returns.push(Vec::new());
         self.push();
         for (param, ty) in params.iter().zip(&param_tys) {
@@ -1866,6 +2015,7 @@ impl Tc {
         self.pop();
         let returns = self.closure_returns.pop().unwrap_or_default();
         self.closure_boundaries.pop();
+        self.closure_mutable_capture_allowed.pop();
 
         let mut inferred_ret = returns.first().cloned().unwrap_or_else(|| body_ty.clone());
         for return_ty in returns.iter().skip(1) {
@@ -1900,58 +2050,197 @@ impl Tc {
         Ty::Closure(param_tys, Box::new(inferred_ret))
     }
 
+    fn iter_source(&self, kind: IterSourceKind, range: SourceRange, item: &Ty) -> IterDraft {
+        IterDraft {
+            source: IterSource {
+                kind,
+                range,
+                item_type: item.name(),
+            },
+            adapters: Vec::new(),
+        }
+    }
+
+    fn finish_iter_plan(
+        &mut self,
+        draft: &IterDraft,
+        consumer: IterConsumerKind,
+        consumer_range: SourceRange,
+        item: &Ty,
+        output: &Ty,
+    ) {
+        self.iter_plans.insert(
+            (
+                consumer_range.file,
+                consumer_range.start,
+                consumer_range.len,
+            ),
+            IterPlan {
+                source: draft.source.clone(),
+                adapters: draft.adapters.clone(),
+                consumer,
+                consumer_range,
+                item_type: item.name(),
+                output_type: output.name(),
+            },
+        );
+    }
+
     fn infer_method_args(&mut self, recv: &Ty, method: &str, args: &[Expr]) -> Vec<Ty> {
-        let contextual_item = match recv {
-            Ty::Iter(item) if matches!(method, "map" | "filter" | "filter_map") => {
-                Some((**item).clone())
-            }
-            _ => None,
+        let Ty::Iter(item, _) = recv else {
+            return args.iter().map(|arg| self.infer(arg)).collect();
         };
-        args.iter()
-            .enumerate()
-            .map(|(index, arg)| {
-                if index == 0
-                    && let Some(item) = &contextual_item
-                    && let ExprKind::Closure { params, ret, body } = &arg.kind
-                {
-                    return self.infer_closure(
-                        arg.span,
-                        params,
-                        ret.as_ref(),
-                        body,
-                        std::slice::from_ref(item),
-                        false,
-                    );
+        let item = (**item).clone();
+        let mut inferred = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let expected = match (method, index) {
+                ("map" | "filter" | "filter_map" | "any" | "all" | "find", 0) => {
+                    Some(vec![item.clone()])
                 }
-                self.infer(arg)
-            })
-            .collect()
+                ("fold", 1) => Some(vec![
+                    inferred.first().cloned().unwrap_or(Ty::Unknown),
+                    item.clone(),
+                ]),
+                _ => None,
+            };
+            if let Some(expected) = expected
+                && let ExprKind::Closure { params, ret, body } = &arg.kind
+            {
+                inferred.push(self.infer_closure(
+                    arg.span,
+                    params,
+                    ret.as_ref(),
+                    body,
+                    ClosureContext {
+                        expected: &expected,
+                        report_unknown_params: false,
+                        allow_mutable_capture: true,
+                    },
+                ));
+            } else {
+                inferred.push(self.infer(arg));
+            }
+        }
+        inferred
     }
 
     fn infer_iterator_method(
         &mut self,
         recv: &Ty,
         method: &str,
+        type_args: &[Type],
         arg_tys: &[Ty],
         args: &[Expr],
         span: SourceRange,
     ) -> Option<Ty> {
-        let Ty::Iter(item) = recv else {
+        if let Ty::Vec(item) = recv
+            && matches!(method, "iter" | "into_iter")
+        {
+            if !type_args.is_empty() {
+                self.err(
+                    span,
+                    format!("iterator source `{method}` does not accept type arguments"),
+                );
+            }
+            if !args.is_empty() {
+                self.err(span, format!("iterator source `{method}` expects no arguments"));
+            }
+            let kind = if method == "iter" {
+                IterSourceKind::VecIter
+            } else {
+                IterSourceKind::VecIntoIter
+            };
+            return Some(Ty::Iter(
+                item.clone(),
+                Box::new(self.iter_source(kind, span, item)),
+            ));
+        }
+
+        let Ty::Iter(item, draft) = recv else {
+            if matches!(
+                method,
+                "iter"
+                    | "into_iter"
+                    | "map"
+                    | "filter"
+                    | "filter_map"
+                    | "enumerate"
+                    | "take"
+                    | "skip"
+                    | "collect"
+                    | "fold"
+                    | "count"
+                    | "any"
+                    | "all"
+                    | "find"
+            ) && recv.is_concrete()
+                && !matches!(recv, Ty::Named(_))
+            {
+                self.err(span, format!("type `{}` is not iterable", recv.name()));
+                return Some(Ty::Unknown);
+            }
             return None;
         };
+
+        if method != "collect" && !type_args.is_empty() {
+            self.err(
+                span,
+                format!("iterator method `{method}` does not accept explicit type arguments"),
+            );
+        }
         let closure_ret = |index: usize| match arg_tys.get(index) {
             Some(Ty::Closure(_, ret)) => Some((**ret).clone()),
             _ => None,
         };
+        let closure_arity = |index: usize| match arg_tys.get(index) {
+            Some(Ty::Closure(params, _)) => Some(params.len()),
+            _ => None,
+        };
+        let append = |kind: IterAdapterKind, output: Ty| {
+            let mut next = (**draft).clone();
+            next.adapters.push(IterAdapter {
+                kind,
+                range: span,
+                input_type: item.name(),
+                output_type: output.name(),
+            });
+            Ty::Iter(Box::new(output), Box::new(next))
+        };
+
         match method {
-            "map" if args.len() == 1 => Some(Ty::Iter(Box::new(
-                closure_ret(0).unwrap_or(Ty::Unknown),
-            ))),
+            "map" if args.len() == 1 => {
+                let output = closure_ret(0).unwrap_or_else(|| {
+                    self.err(args[0].span, "iterator map argument must be a closure".to_string());
+                    Ty::Unknown
+                });
+                if let Some(arity) = closure_arity(0)
+                    && arity != 1
+                {
+                    self.err(
+                        args[0].span,
+                        format!("iterator map closure expects 1 parameter, found {arity}"),
+                    );
+                }
+                Some(append(IterAdapterKind::Map, output))
+            }
             "filter" if args.len() == 1 => {
                 if let Some(ret) = closure_ret(0) {
                     self.expect_bool(&ret, args[0].span, "iterator filter predicate");
+                } else {
+                    self.err(
+                        args[0].span,
+                        "iterator filter argument must be a closure".to_string(),
+                    );
                 }
-                Some(Ty::Iter(item.clone()))
+                if let Some(arity) = closure_arity(0)
+                    && arity != 1
+                {
+                    self.err(
+                        args[0].span,
+                        format!("iterator filter closure expects 1 parameter, found {arity}"),
+                    );
+                }
+                Some(append(IterAdapterKind::Filter, (**item).clone()))
             }
             "filter_map" if args.len() == 1 => {
                 let mapped = match closure_ret(0) {
@@ -1966,16 +2255,185 @@ impl Tc {
                         );
                         Ty::Unknown
                     }
-                    _ => Ty::Unknown,
+                    _ => {
+                        self.err(
+                            args[0].span,
+                            "iterator filter_map argument must be a closure".to_string(),
+                        );
+                        Ty::Unknown
+                    }
                 };
-                Some(Ty::Iter(Box::new(mapped)))
+                if let Some(arity) = closure_arity(0)
+                    && arity != 1
+                {
+                    self.err(
+                        args[0].span,
+                        format!("iterator filter_map closure expects 1 parameter, found {arity}"),
+                    );
+                }
+                Some(append(IterAdapterKind::FilterMap, mapped))
             }
-            "map" | "filter" | "filter_map" => {
+            "enumerate" if args.is_empty() => Some(append(
+                IterAdapterKind::Enumerate,
+                Ty::Tuple(vec![Ty::I64, (**item).clone()]),
+            )),
+            "take" | "skip" if args.len() == 1 => {
+                let count = &arg_tys[0];
+                if count.is_concrete() && *count != Ty::I64 {
+                    self.err(
+                        args[0].span,
+                        format!("iterator {method} count must be `i64`, found `{}`", count.name()),
+                    );
+                }
+                if matches!(
+                    args[0].kind,
+                    ExprKind::Unary {
+                        op: UnOp::Neg,
+                        ..
+                    }
+                ) {
+                    self.err(
+                        args[0].span,
+                        format!("iterator {method} count must be non-negative"),
+                    );
+                }
+                let kind = if method == "take" {
+                    IterAdapterKind::Take
+                } else {
+                    IterAdapterKind::Skip
+                };
+                Some(append(kind, (**item).clone()))
+            }
+            "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip" => {
                 self.err(
                     span,
-                    format!("iterator adapter `{method}` expects one closure argument"),
+                    format!("iterator adapter `{method}` has invalid arguments"),
                 );
-                Some(Ty::Iter(Box::new(Ty::Unknown)))
+                let kind = match method {
+                    "filter" => IterAdapterKind::Filter,
+                    "filter_map" => IterAdapterKind::FilterMap,
+                    "enumerate" => IterAdapterKind::Enumerate,
+                    "take" => IterAdapterKind::Take,
+                    "skip" => IterAdapterKind::Skip,
+                    _ => IterAdapterKind::Map,
+                };
+                Some(append(kind, Ty::Unknown))
+            }
+            "collect" if args.is_empty() => {
+                let output = if type_args.len() == 1 {
+                    match self.ty_of(&type_args[0]) {
+                        Ty::Vec(target) => {
+                            let target = if matches!(*target, Ty::Unknown) {
+                                Box::new((**item).clone())
+                            } else {
+                                target
+                            };
+                            if !compatible(&target, item) {
+                                self.err(
+                                    span,
+                                    format!(
+                                        "collect target element type `{}` is incompatible with iterator item `{}`",
+                                        target.name(),
+                                        item.name()
+                                    ),
+                                );
+                            }
+                            Ty::Vec(target)
+                        }
+                        target => {
+                            self.err(
+                                span,
+                                format!(
+                                    "iterator collect target must be `Vec<_>`, found `{}`",
+                                    target.name()
+                                ),
+                            );
+                            Ty::Vec(Box::new(Ty::Unknown))
+                        }
+                    }
+                } else {
+                    self.err(
+                        span,
+                        "iterator collect requires one explicit `Vec<_>` type argument".to_string(),
+                    );
+                    Ty::Vec(Box::new((**item).clone()))
+                };
+                self.finish_iter_plan(
+                    draft,
+                    IterConsumerKind::CollectVec,
+                    span,
+                    item,
+                    &output,
+                );
+                Some(output)
+            }
+            "fold" if args.len() == 2 => {
+                let accumulator = arg_tys[0].clone();
+                match (closure_arity(1), closure_ret(1)) {
+                    (Some(2), Some(ret)) => {
+                        if !compatible(&accumulator, &ret) {
+                            self.err(
+                                args[1].span,
+                                format!(
+                                    "iterator fold closure must return accumulator type `{}`, found `{}`",
+                                    accumulator.name(),
+                                    ret.name()
+                                ),
+                            );
+                        }
+                    }
+                    (Some(arity), _) => self.err(
+                        args[1].span,
+                        format!("iterator fold closure expects 2 parameters, found {arity}"),
+                    ),
+                    _ => self.err(
+                        args[1].span,
+                        "iterator fold second argument must be a closure".to_string(),
+                    ),
+                }
+                self.finish_iter_plan(
+                    draft,
+                    IterConsumerKind::Fold,
+                    span,
+                    item,
+                    &accumulator,
+                );
+                Some(accumulator)
+            }
+            "count" if args.is_empty() => {
+                self.finish_iter_plan(
+                    draft,
+                    IterConsumerKind::Count,
+                    span,
+                    item,
+                    &Ty::I64,
+                );
+                Some(Ty::I64)
+            }
+            "any" | "all" | "find" if args.len() == 1 => {
+                if closure_arity(0) != Some(1) {
+                    self.err(
+                        args[0].span,
+                        format!("iterator {method} argument must be a one-parameter closure"),
+                    );
+                }
+                if let Some(ret) = closure_ret(0) {
+                    self.expect_bool(&ret, args[0].span, &format!("iterator {method} predicate"));
+                }
+                let (consumer, output) = match method {
+                    "any" => (IterConsumerKind::Any, Ty::Bool),
+                    "all" => (IterConsumerKind::All, Ty::Bool),
+                    _ => (IterConsumerKind::Find, Ty::Option(item.clone())),
+                };
+                self.finish_iter_plan(draft, consumer, span, item, &output);
+                Some(output)
+            }
+            "collect" | "fold" | "count" | "any" | "all" | "find" => {
+                self.err(
+                    span,
+                    format!("iterator consumer `{method}` has invalid arguments"),
+                );
+                Some(Ty::Unknown)
             }
             _ => None,
         }
@@ -1989,7 +2447,17 @@ impl Tc {
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Closure { params, ret, body } => {
-                let ty = self.infer_closure(sp, params, ret.as_ref(), body, &[], true);
+                let ty = self.infer_closure(
+                    sp,
+                    params,
+                    ret.as_ref(),
+                    body,
+                    ClosureContext {
+                        expected: &[],
+                        report_unknown_params: true,
+                        allow_mutable_capture: false,
+                    },
+                );
                 self.err(sp, "closure escape is not supported yet".to_string());
                 ty
             }
@@ -2043,6 +2511,7 @@ impl Tc {
             ExprKind::MethodCall {
                 recv,
                 method,
+                type_args,
                 args,
                 method_span,
             } => {
@@ -2135,7 +2604,9 @@ impl Tc {
                         return ret;
                     }
                 }
-                if let Some(ret) = self.infer_iterator_method(&rt, method, &arg_tys, args, sp) {
+                if let Some(ret) =
+                    self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, sp)
+                {
                     return ret;
                 }
                 // Builtin methods on parameterized collection types: check the
@@ -2217,10 +2688,30 @@ impl Tc {
                     _ => Ty::Unknown,
                 }
             }
-            ExprKind::Range { start, end, .. } => {
-                self.infer(start);
-                self.infer(end);
-                Ty::Unknown
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let start_ty = self.infer(start);
+                let end_ty = self.infer(end);
+                for (bound, ty) in [(start.as_ref(), start_ty), (end.as_ref(), end_ty)] {
+                    if ty.is_concrete() && ty != Ty::I64 {
+                        self.err(
+                            bound.span,
+                            format!("range bound must be integer-compatible, found `{}`", ty.name()),
+                        );
+                    }
+                }
+                let kind = if *inclusive {
+                    IterSourceKind::InclusiveRange
+                } else {
+                    IterSourceKind::ExclusiveRange
+                };
+                Ty::Iter(
+                    Box::new(Ty::I64),
+                    Box::new(self.iter_source(kind, e.span, &Ty::I64)),
+                )
             }
             ExprKind::MacroCall { name, args } => {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
@@ -2304,6 +2795,11 @@ impl Tc {
                 if let ExprKind::Path(segments) = &target.kind
                     && segments.len() == 1
                     && let Some(&boundary) = self.closure_boundaries.last()
+                    && !self
+                        .closure_mutable_capture_allowed
+                        .last()
+                        .copied()
+                        .unwrap_or(false)
                     && let Some((scope, mutable)) = self.binding_scope(&segments[0])
                     && scope < boundary
                     && mutable
@@ -2390,8 +2886,11 @@ impl Tc {
                 params,
                 ret.as_ref(),
                 body,
-                &arg_tys,
-                true,
+                ClosureContext {
+                    expected: &arg_tys,
+                    report_unknown_params: true,
+                    allow_mutable_capture: false,
+                },
             );
             return self.check_closure_call("closure", &closure, &arg_tys, args, callee.span);
         }

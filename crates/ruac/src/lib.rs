@@ -60,7 +60,11 @@ pub fn compile_path(path: &Path) -> Result<String, String> {
 }
 
 fn reject_pending_closure_codegen(info: &typeck::TypeInfo, files: &[String]) -> Result<(), String> {
-    let Some(span) = info.first_closure() else {
+    let (span, message) = if let Some(span) = info.first_closure() {
+        (span, "closure codegen is not implemented yet")
+    } else if let Some(span) = info.pending_iter_codegen() {
+        (span, "iterator codegen is not implemented yet")
+    } else {
         return Ok(());
     };
     let diagnostic = Diag::new(
@@ -68,7 +72,7 @@ fn reject_pending_closure_codegen(info: &typeck::TypeInfo, files: &[String]) -> 
         span.start,
         span.len,
         span.line,
-        "closure codegen is not implemented yet".to_string(),
+        message.to_string(),
     );
     Err(diag::render_all(&[diagnostic], files))
 }

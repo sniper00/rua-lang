@@ -195,6 +195,165 @@ fn closure_typeck_reports_unknown_mutable_capture_and_escape() {
     }
 }
 
+fn iterator_type_info(source: &str) -> crate::typeck::TypeInfo {
+    let mut program = crate::parser::parse(source).expect("parse iterator source");
+    let mut files = vec![String::new()];
+    crate::resolve::resolve_modules(&mut program.items, None, &mut files)
+        .expect("resolve iterator source");
+    crate::resolve::resolve_uses(&mut program);
+    crate::check::check(&program, &files).expect("structurally check iterator source");
+    crate::typeck::check(&program, &files).expect("type-check iterator source")
+}
+
+#[test]
+fn iterator_typeck_supports_sources_adapters_and_consumers() {
+    use crate::typeck::{IterAdapterKind as A, IterConsumerKind as C, IterSourceKind as S};
+
+    let source = r#"
+fn main() {
+    let values = vec![1, 2, 3, 4];
+    let collected = values
+        .iter()
+        .map(|value| value + 1)
+        .filter(|value| value > 1)
+        .filter_map(|value| Some(value))
+        .enumerate()
+        .skip(1)
+        .take(2)
+        .collect::<Vec<_>>();
+    let total = values.into_iter().fold(0, |acc, value| acc + value);
+    let count = (0..4).count();
+    let any = (0..=4).any(|value| value == 3);
+    let all = values.iter().all(|value| value > 0);
+    let found = values.iter().find(|value| value == 2);
+    for value in values {}
+}
+"#;
+    let info = iterator_type_info(source);
+    let plans: Vec<_> = info.iter_plans().collect();
+    assert_eq!(plans.len(), 7);
+
+    let collect = plans
+        .iter()
+        .find(|plan| plan.consumer == C::CollectVec)
+        .expect("collect plan");
+    assert_eq!(collect.source.kind, S::VecIter);
+    assert_eq!(
+        collect.adapters.iter().map(|adapter| adapter.kind).collect::<Vec<_>>(),
+        [A::Map, A::Filter, A::FilterMap, A::Enumerate, A::Skip, A::Take]
+    );
+    assert_eq!(collect.item_type, "(i64, i64)");
+    assert_eq!(collect.output_type, "Vec<(i64, i64)>");
+
+    assert!(plans.iter().any(|plan| {
+        plan.source.kind == S::VecIntoIter
+            && plan.consumer == C::Fold
+            && plan.output_type == "i64"
+    }));
+    assert!(plans.iter().any(|plan| {
+        plan.source.kind == S::ExclusiveRange && plan.consumer == C::Count
+    }));
+    assert!(plans.iter().any(|plan| {
+        plan.source.kind == S::InclusiveRange && plan.consumer == C::Any
+    }));
+    assert!(plans.iter().any(|plan| plan.consumer == C::All));
+    assert!(plans.iter().any(|plan| {
+        plan.consumer == C::Find && plan.output_type == "Option<i64>"
+    }));
+    assert!(plans.iter().any(|plan| {
+        plan.source.kind == S::Vec && plan.consumer == C::For
+    }));
+}
+
+#[test]
+fn iterator_plan_is_lazy_until_a_consumer_is_known() {
+    let source = r#"
+fn main() {
+    let values = vec![1, 2, 3];
+    let pending = values.iter().map(|value| value + 1).skip(1);
+}
+"#;
+    let info = iterator_type_info(source);
+    assert_eq!(info.iter_plans().count(), 0);
+}
+
+#[test]
+fn iterator_plan_records_for_range_and_vec_iter_sources() {
+    use crate::typeck::{IterConsumerKind as C, IterSourceKind as S};
+
+    let source = r#"
+fn main() {
+    let values = vec![1, 2];
+    for left in 0..2 {}
+    for right in values.iter() {}
+}
+"#;
+    let info = iterator_type_info(source);
+    let plans: Vec<_> = info.iter_plans().collect();
+    assert_eq!(plans.len(), 2);
+    assert!(plans.iter().all(|plan| plan.consumer == C::For));
+    assert!(plans.iter().any(|plan| plan.source.kind == S::ExclusiveRange));
+    assert!(plans.iter().any(|plan| plan.source.kind == S::VecIter));
+}
+
+#[test]
+fn iterator_plan_does_not_fall_through_to_legacy_method_codegen() {
+    let error = crate::compile_str("fn main() -> i64 { (0..4).count() }")
+        .expect_err("iterator consumer codegen should remain gated until 4A.6");
+    assert!(error.contains("iterator codegen is not implemented yet"));
+}
+
+#[test]
+fn iterator_typeck_reports_invalid_sources_predicates_and_collects() {
+    let cases = [
+        (
+            "fn main() { for value in 42 {} }",
+            "type `i64` is not iterable",
+        ),
+        (
+            "fn main() { let values = vec![1]; let n = values.iter().filter(|value| value + 1).count(); }",
+            "iterator filter predicate must be `bool`, found `i64`",
+        ),
+        (
+            "fn main() { let values = vec![1]; let out = values.iter().collect::<Vec<String>>(); }",
+            "collect target element type `String` is incompatible with iterator item `i64`",
+        ),
+        (
+            "fn main() { let values = vec![1]; let out = values.iter().map(42).count(); }",
+            "iterator map argument must be a closure",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let (diagnostics, _) = crate::check_diags(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.msg.contains(expected)),
+            "missing {expected:?} in {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn iterator_typeck_allows_mutable_capture_in_consumed_plan() {
+    let source = r#"
+fn main() {
+    let mut total = 0;
+    let values = vec![1, 2, 3];
+    let count = values.iter().map(|value| {
+        total = total + value;
+        value
+    }).count();
+}
+"#;
+    let (diagnostics, _) = crate::check_diags(source);
+    assert!(
+        diagnostics.is_empty(),
+        "fused mutable capture should type-check: {diagnostics:?}"
+    );
+}
+
 fn compile(src: &str) -> String {
     compile_str(src).unwrap_or_else(|e| panic!("compile error: {}", e))
 }

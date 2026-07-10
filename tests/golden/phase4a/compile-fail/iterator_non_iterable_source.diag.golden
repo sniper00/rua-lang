@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/iterator_non_iterable_source.rua:2: type `i64` is not iterable

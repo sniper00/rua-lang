@@ -838,17 +838,31 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let member_span = self.lexer.current_range();
                     let name = self.expect_ident()?;
+                    let mut type_args = Vec::new();
+                    if self.accept(T::ColonColon)? {
+                        self.expect(T::Lt)?;
+                        while self.cur() != T::Gt {
+                            type_args.push(self.parse_type()?);
+                            if !self.accept(T::Comma)? {
+                                break;
+                            }
+                        }
+                        self.expect(T::Gt)?;
+                    }
                     if self.cur() == T::LParen {
                         let args = self.parse_call_args()?;
                         e = self.mk(
                             ExprKind::MethodCall {
                                 recv: Box::new(e),
                                 method: name,
+                                type_args,
                                 args,
                                 method_span: member_span,
                             },
                             start,
                         );
+                    } else if !type_args.is_empty() {
+                        return Err(self.err("method turbofish must be followed by `(...)`"));
                     } else {
                         e = self.mk(
                             ExprKind::Field {

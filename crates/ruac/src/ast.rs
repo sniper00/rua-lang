@@ -286,6 +286,9 @@ pub enum ExprKind {
     MethodCall {
         recv: Box<Expr>,
         method: String,
+        /// Explicit method type arguments from a turbofish, e.g. the
+        /// `Vec<i64>` in `.collect::<Vec<i64>>()`.
+        type_args: Vec<Type>,
         args: Vec<Expr>,
         /// Byte-span of the method name identifier (use site), for LSP member
         /// resolution. Not used by codegen/checks.
