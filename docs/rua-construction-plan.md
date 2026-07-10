@@ -522,7 +522,7 @@ cargo test -p ruac golden_compile_fail
 
 ```sh
 cd /Users/bruce/GitProjects/rua
-cargo test -p rua-syntax parser_golden
+cargo test -p rua-syntax parser_conformance
 cargo test -p rua-syntax range_golden
 ```
 
@@ -994,7 +994,7 @@ cargo test -p ruac parser_range
 
 ```sh
 cd /Users/bruce/GitProjects/rua
-cargo test -p rua-syntax parser_golden
+cargo test -p rua-syntax parser_conformance
 cargo test -p rua-syntax range_golden
 ```
 

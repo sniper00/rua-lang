@@ -55,7 +55,7 @@ cargo test -p ruac --test golden golden_ruai
 The shared parser corpus and CST byte-range snapshots are checked with:
 
 ```sh
-cargo test -p rua-syntax --test parser_goldens parser_golden -- --exact
+cargo test -p rua-syntax --test parser_goldens parser_conformance -- --exact
 cargo test -p rua-syntax --test parser_goldens range_golden -- --exact
 ```
 

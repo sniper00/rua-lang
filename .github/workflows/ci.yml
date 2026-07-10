@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+      - name: Parser conformance
+        run: cargo test --locked -p rua-syntax parser_conformance
+      - name: Compiler oracle
+        run: cargo test --locked -p ruac
+      - name: Workspace
+        run: cargo test --locked --workspace --features rua-lsp/lsp

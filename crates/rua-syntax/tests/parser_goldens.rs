@@ -11,7 +11,9 @@ use rua_syntax::{Parse, SyntaxElement, SyntaxNode, ast::SourceFile, parse_source
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test \
                               parser_goldens update_parser_range_snapshots -- --ignored --exact";
-const MIN_PARSER_RANGE_CASES: usize = 20;
+const MIN_ACCEPT_CASES: usize = 12;
+const MIN_REJECT_CASES: usize = 5;
+const MIN_RANGE_CASES: usize = 12;
 
 struct ParserCases {
     accept: Vec<PathBuf>,
@@ -71,10 +73,22 @@ fn parser_cases() -> Result<ParserCases, String> {
     let accept = discover_rua(&root.join("accept"))?;
     let reject = discover_rua(&root.join("reject"))?;
     let ranges = discover_rua(&root.join("ranges"))?;
-    let total = accept.len() + reject.len() + ranges.len();
-    if total < MIN_PARSER_RANGE_CASES {
+    if accept.len() < MIN_ACCEPT_CASES {
         return Err(format!(
-            "parser/range corpus has {total} cases; expected at least {MIN_PARSER_RANGE_CASES}"
+            "parser accept corpus has {} cases; expected at least {MIN_ACCEPT_CASES}",
+            accept.len()
+        ));
+    }
+    if reject.len() < MIN_REJECT_CASES {
+        return Err(format!(
+            "parser reject corpus has {} cases; expected at least {MIN_REJECT_CASES}",
+            reject.len()
+        ));
+    }
+    if ranges.len() < MIN_RANGE_CASES {
+        return Err(format!(
+            "parser range corpus has {} cases; expected at least {MIN_RANGE_CASES}",
+            ranges.len()
         ));
     }
     Ok(ParserCases {
@@ -95,7 +109,7 @@ fn assert_lossless(path: &Path, source: &str, parsed: &Parse<SourceFile>) -> Res
     Ok(())
 }
 
-fn run_parser_goldens() -> Result<(), String> {
+fn run_parser_conformance() -> Result<(), String> {
     let ParserCases { accept, reject, .. } = parser_cases()?;
 
     for path in accept {
@@ -117,6 +131,8 @@ fn run_parser_goldens() -> Result<(), String> {
     for path in reject {
         let source = read_source(&path)?;
         let parsed = parse_source_file(&source);
+        // Recovery details intentionally need not match the compiler parser:
+        // the IDE parser must retain every byte and report at least one error.
         assert_lossless(&path, &source, &parsed)?;
         if parsed.errors.is_empty() {
             return Err(format!(
@@ -264,8 +280,8 @@ fn run(result: Result<(), String>) {
 }
 
 #[test]
-fn parser_golden() {
-    run(run_parser_goldens());
+fn parser_conformance() {
+    run(run_parser_conformance());
 }
 
 #[test]
@@ -281,6 +297,6 @@ fn update_parser_range_snapshots() {
         Ok("1"),
         "refusing to update without {UPDATE_ENV}=1"
     );
-    run(run_parser_goldens());
+    run(run_parser_conformance());
     run(run_range_goldens(true));
 }
