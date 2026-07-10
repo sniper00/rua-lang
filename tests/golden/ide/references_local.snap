@@ -1,0 +1,4 @@
+query: value
+reference: 32..37 "value"
+reference: 47..52 "value"
+reference: 55..60 "value"

@@ -1,0 +1,1 @@
+<golden>/compile-fail/parse_missing_brace.rua: 3: expected `}`, found `<eof>`

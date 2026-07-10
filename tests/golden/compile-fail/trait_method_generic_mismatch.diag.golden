@@ -1,0 +1,1 @@
+<golden>/compile-fail/trait_method_generic_mismatch.rua:12: type `Plain` does not implement trait `Show` (required by bound `T: Show` of `Container::store`)

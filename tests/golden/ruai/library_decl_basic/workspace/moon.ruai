@@ -1,0 +1,4 @@
+extern "lua" {
+    pub fn log(message: String);
+    pub fn sleep_ms(milliseconds: i64);
+}

@@ -1,0 +1,5 @@
+mod moon;
+
+fn main() {
+    moon::log("hello");
+}

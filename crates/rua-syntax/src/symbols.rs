@@ -507,10 +507,10 @@ fn node_byte_range(node: &SyntaxNode) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::parse_source_file;
 
     fn file(src: &str) -> SourceFile {
-        SourceFile::cast(parse(src).green).expect("CST parser always produces SourceFile root")
+        parse_source_file(src).tree
     }
 
     fn syms(src: &str) -> Vec<Symbol> {

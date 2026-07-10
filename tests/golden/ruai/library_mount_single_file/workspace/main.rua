@@ -1,0 +1,5 @@
+mod clock;
+
+fn now() -> i64 {
+    clock::now_ms()
+}

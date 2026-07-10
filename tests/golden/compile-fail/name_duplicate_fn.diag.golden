@@ -1,0 +1,1 @@
+<golden>/compile-fail/name_duplicate_fn.rua: duplicate top-level definition `duplicate`

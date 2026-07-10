@@ -1,0 +1,4 @@
+query: job.
+completion: id Field "id: i64"
+completion: run Method "fn run(&self) -> i64"
+completion: stop Method "fn stop(&self)"

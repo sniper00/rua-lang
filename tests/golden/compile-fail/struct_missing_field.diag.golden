@@ -1,0 +1,1 @@
+<golden>/compile-fail/struct_missing_field.rua:4: struct `Point` is missing field `y`

@@ -1,0 +1,13 @@
+pub struct Client {
+    pub endpoint: String,
+    pub retries: i64,
+}
+
+impl Client {
+    pub fn close(&self) {}
+    pub fn request(&self, path: String) -> String { "" }
+}
+
+extern "lua" {
+    pub fn client() -> Client;
+}

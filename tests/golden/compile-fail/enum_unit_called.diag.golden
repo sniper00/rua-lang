@@ -1,0 +1,1 @@
+<golden>/compile-fail/enum_unit_called.rua:4: unit variant `State::Ready` is not called with `()`

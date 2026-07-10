@@ -1,0 +1,1 @@
+<golden>/compile-fail/pattern_unknown_struct_field.rua:5: variant `Message::Move` has no field `z`

@@ -1,0 +1,7 @@
+enum Pair { Values(i64, i64) }
+
+fn first(pair: Pair) -> i64 {
+    match pair {
+        Pair::Values(value) => value,
+    }
+}

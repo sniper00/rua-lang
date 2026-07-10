@@ -1,0 +1,1 @@
+<golden>/compile-fail/call_wrong_type_fn.rua:4: argument 1 of `require_bool` expects `bool`, found `i64`

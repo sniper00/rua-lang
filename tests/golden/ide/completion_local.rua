@@ -1,0 +1,5 @@
+fn main() {
+    let local_value = 1;
+    let enabled = true;
+    local_value;
+}

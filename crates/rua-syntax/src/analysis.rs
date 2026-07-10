@@ -6,7 +6,9 @@
 use crate::ast::{AstNode, SourceFile};
 use crate::symbols::{self, IdentHit, Symbol, SymbolKind};
 use crate::LineIndex;
-use ruac::typeck::{BindingTypes, CompletionMember, MemberIndex, MemberTarget};
+use crate::transition::BindingTypes;
+
+pub use crate::transition::{CompletionMember, MemberIndex, MemberKind, MemberTarget};
 
 /// One parse + derived indices for a single document version.
 ///
@@ -49,13 +51,12 @@ impl Analysis {
     /// original text, and owning it lets the [`Workspace`](crate::workspace)
     /// be the single owner of per-file state (no parallel text cache).
     pub fn new(src: &str) -> Analysis {
-        let file = SourceFile::cast_root(crate::parse(src).green)
-            .expect("CST parser always yields a SourceFile root");
+        let file = crate::parse_source_file(src).tree;
         let symbols = symbols::collect_symbols(&file);
         // Semantic member resolution comes from the compiler's type checker
         // (byte-span parity: both trees derive from the same lexer offsets).
-        let members = ruac::member_index(src);
-        let bindings = ruac::binding_types(src);
+        let members = crate::transition::member_index(src);
+        let bindings = crate::transition::binding_types(src);
         Analysis {
             text: src.to_string(),
             file,
@@ -140,11 +141,10 @@ impl Analysis {
     pub fn member_completions(&self, offset: usize) -> Option<Vec<CompletionMember>> {
         let ctx = crate::completion::completion_context(&self.file, offset)?;
         let repaired = crate::completion::repair(&self.text, &ctx);
-        let (tm, ri) = ruac::member_completion(&repaired);
-        Some(match ri.at_end(0, ctx.receiver_end) {
-            Some(rt) => tm.get(&rt.type_name).to_vec(),
-            None => Vec::new(),
-        })
+        Some(crate::transition::member_completions(
+            &repaired,
+            ctx.receiver_end,
+        ))
     }
 
     /// Path-context completions for `Type::` / `mod::` (`Enum::Variant`,
@@ -197,8 +197,8 @@ impl Analysis {
             .map(|(name, range)| {
                 let detail = self
                     .bindings
-                    .at(0, range.0)
-                    .map(|b| b.display.clone())
+                    .display_at(0, range.0)
+                    .map(str::to_owned)
                     .unwrap_or_else(|| format!("local {name}"));
                 LocalCompletion { name, detail }
             })
@@ -250,8 +250,8 @@ impl Analysis {
     /// unchanged.
     fn enrich_local(&self, mut res: crate::nameres::Resolution) -> crate::nameres::Resolution {
         if res.kind == crate::nameres::RefKind::Local {
-            if let Some(b) = self.bindings.at(0, res.target_range.0) {
-                res.detail = b.display.clone();
+            if let Some(display) = self.bindings.display_at(0, res.target_range.0) {
+                res.detail = display.to_owned();
             }
         }
         res

@@ -1,0 +1,3 @@
+fn main() {
+    let enabled: bool = 1;
+}

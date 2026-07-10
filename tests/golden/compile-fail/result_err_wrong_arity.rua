@@ -1,0 +1,3 @@
+fn value() -> Result<i64, String> {
+    Err()
+}

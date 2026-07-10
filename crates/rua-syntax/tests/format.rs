@@ -4,7 +4,7 @@
 //! Comments are preserved (B2), blank lines preserved (B3).
 
 use rua_syntax::format::{check_format, format_str};
-use rua_syntax::parse;
+use rua_syntax::parse_source_file;
 
 /// Example `.rua` sources that parse cleanly under the CST parser. Kept in sync
 /// with `tests/fixtures/examples/`.
@@ -30,11 +30,11 @@ fn formatted_output_reparses_clean() {
     for path in CORPUS {
         let Some(src) = read(path) else { continue };
         // Skip inputs the CST parser can't handle cleanly to begin with.
-        if !parse(&src).errors.is_empty() {
+        if !parse_source_file(&src).errors.is_empty() {
             continue;
         }
         let out = format_str(&src);
-        let errs = parse(&out).errors;
+        let errs = parse_source_file(&out).errors;
         assert!(
             errs.is_empty(),
             "formatted {path} has parse errors: {errs:?}\n---\n{out}"
@@ -46,7 +46,7 @@ fn formatted_output_reparses_clean() {
 fn formatting_is_idempotent() {
     for path in CORPUS {
         let Some(src) = read(path) else { continue };
-        if !parse(&src).errors.is_empty() {
+        if !parse_source_file(&src).errors.is_empty() {
             continue;
         }
         let once = format_str(&src);
@@ -70,7 +70,7 @@ fn formatting_preserves_token_kinds_modulo_trailing_commas() {
     }
     for path in CORPUS {
         let Some(src) = read(path) else { continue };
-        if !parse(&src).errors.is_empty() {
+        if !parse_source_file(&src).errors.is_empty() {
             continue;
         }
         let out = format_str(&src);
@@ -83,7 +83,7 @@ fn formatting_preserves_token_kinds_modulo_trailing_commas() {
 fn formatted_output_passes_check() {
     for path in CORPUS {
         let Some(src) = read(path) else { continue };
-        if !parse(&src).errors.is_empty() {
+        if !parse_source_file(&src).errors.is_empty() {
             continue;
         }
         let out = format_str(&src);
@@ -99,7 +99,7 @@ fn formatted_output_passes_check() {
 fn check_rejects_unformatted() {
     // Extra space before `{` — the formatter normalises this.
     let src = "fn foo()  {\n    let x = 1;\n}\n";
-    if parse(src).errors.is_empty() {
+    if parse_source_file(src).errors.is_empty() {
         assert!(!check_format(src), "unformatted source must fail check");
     }
 }

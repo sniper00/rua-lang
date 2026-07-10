@@ -2,10 +2,10 @@
 //! the lexer covers every byte across the whole example corpus.
 //!
 //! For every example the compiler ships, we assert two invariants:
-//!   1. **Lossless**: `parse(src).green.text() == src`.
+//!   1. **Lossless**: `parse_source_file(src).syntax_node().text() == src`.
 //!   2. **Total lexing**: the flat token stream covers every byte.
 
-use rua_syntax::{lex, parse};
+use rua_syntax::{lex, parse_source_file};
 
 /// Every `.rua` the compiler accepts; must also parse cleanly here.
 const CORPUS: &[&str] = &[
@@ -36,7 +36,7 @@ fn corpus_is_lossless() {
     for rel in CORPUS {
         let src = read_example(rel);
         assert_eq!(
-            parse(&src).green.text().to_string(),
+            parse_source_file(&src).syntax_node().text().to_string(),
             src,
             "round-trip failed for {rel}"
         );

@@ -1,0 +1,5 @@
+fn numbers() {
+    let zero = 0;
+    let integer = 12345;
+    let fraction = 3.14159;
+}

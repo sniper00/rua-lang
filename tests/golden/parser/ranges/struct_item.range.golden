@@ -1,0 +1,22 @@
+source_len: 49
+SourceFile 0..49
+  StructDecl 0..48
+    KwPub 0..3 "pub"
+    KwStruct 4..10 "struct"
+    Ident 11..16 "Point"
+    FieldList 16..48
+      LBrace 17..18 "{"
+      FieldDecl 18..33
+        KwPub 23..26 "pub"
+        Ident 27..28 "x"
+        Colon 28..29 ":"
+        PathType 30..33
+          Ident 30..33 "i64"
+      Comma 33..34 ","
+      FieldDecl 34..45
+        Ident 39..40 "y"
+        Colon 40..41 ":"
+        PathType 42..45
+          Ident 42..45 "i64"
+      Comma 45..46 ","
+      RBrace 47..48 "}"

@@ -4,7 +4,7 @@
 //! `ruac` (`src/parser.rs`) — same productions, same precedence
 //! (see [`binop`]), same `no_struct` rule for conditions/scrutinees — but instead
 //! of building a typed AST it emits a rowan green tree via [`TreeBuilder`], with
-//! **all trivia retained** so `parse(src).green.text() == src`.
+//! **all trivia retained** so `parse_source_file(src).syntax_node().text() == src`.
 //!
 //! Differences from the semantic parser, by design:
 //!   * error resilience: a parse error never aborts; it is recorded and the
@@ -16,6 +16,7 @@
 //! The two grammars are kept in sync by a conformance corpus (see tests + P6-4).
 
 use crate::TreeBuilder;
+use crate::ast::{AstNode, SourceFile};
 use crate::kind::{SyntaxKind, SyntaxNode};
 use crate::lexer::{LexToken, lex};
 
@@ -28,15 +29,49 @@ pub struct ParseError {
     pub offset: usize,
 }
 
-/// The result of parsing: the root CST node and any recovered errors.
-pub struct Parse {
-    pub green: SyntaxNode,
+/// A typed syntax tree plus every error recovered while parsing it.
+///
+/// The parser always returns a tree, including for malformed input. Consumers
+/// that require valid input should check [`errors`](Self::errors) or use
+/// [`ok`](Self::ok) before operating on the tree.
+#[derive(Debug, Clone)]
+#[must_use = "parse results contain a typed tree and recovered errors"]
+pub struct Parse<T> {
+    pub tree: T,
     pub errors: Vec<ParseError>,
+}
+
+impl<T> Parse<T> {
+    /// The typed root node.
+    pub fn tree(&self) -> &T {
+        &self.tree
+    }
+
+    /// Parse errors in source order. Empty means the parser accepted the input.
+    pub fn errors(&self) -> &[ParseError] {
+        &self.errors
+    }
+
+    /// Consume the parse result, returning the typed tree only when error-free.
+    pub fn ok(self) -> Result<T, Vec<ParseError>> {
+        if self.errors.is_empty() {
+            Ok(self.tree)
+        } else {
+            Err(self.errors)
+        }
+    }
+}
+
+impl<T: AstNode> Parse<T> {
+    /// The untyped rowan node backing the typed root.
+    pub fn syntax_node(&self) -> &SyntaxNode {
+        self.tree.syntax()
+    }
 }
 
 /// Parse Rua `src` into a lossless CST. Never panics; on malformed input the
 /// tree still covers the whole source and `errors` is non-empty.
-pub fn parse(src: &str) -> Parse {
+pub fn parse_source_file(src: &str) -> Parse<SourceFile> {
     let tokens = lex(src);
     let mut p = Parser {
         src,
@@ -50,10 +85,16 @@ pub fn parse(src: &str) -> Parse {
     let Parser {
         builder, errors, ..
     } = p;
-    Parse {
-        green: builder.finish(),
-        errors,
-    }
+    let syntax = builder.finish();
+    let tree = SourceFile::cast_root(syntax)
+        .expect("parser invariant: source_file always builds a SourceFile root");
+    Parse { tree, errors }
+}
+
+/// Compatibility shorthand for [`parse_source_file`]. New parser-facing code
+/// should prefer the explicit entry point.
+pub fn parse(src: &str) -> Parse<SourceFile> {
+    parse_source_file(src)
 }
 
 struct Parser<'a> {
@@ -1189,9 +1230,9 @@ mod tests {
     fn corpus_round_trips_without_errors() {
         for rel in CORPUS {
             let src = example(rel);
-            let parsed = parse(&src);
+            let parsed = parse_source_file(&src);
             assert_eq!(
-                parsed.green.text().to_string(),
+                parsed.syntax_node().text().to_string(),
                 src,
                 "CST must round-trip for {rel}"
             );
@@ -1204,9 +1245,9 @@ mod tests {
     }
 
     fn tree(src: &str) -> String {
-        let node = parse(src).green;
+        let parsed = parse_source_file(src);
         let mut out = String::new();
-        fmt_node(&node, 0, &mut out);
+        fmt_node(parsed.syntax_node(), 0, &mut out);
         out
     }
 
@@ -1221,7 +1262,7 @@ mod tests {
     #[test]
     fn simple_fn_structure() {
         let src = "fn add(a: i64, b: i64) -> i64 { a + b }";
-        let parsed = parse(src);
+        let parsed = parse_source_file(src);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let t = tree(src);
         assert!(t.contains("SourceFile"));
@@ -1234,7 +1275,7 @@ mod tests {
     #[test]
     fn struct_and_impl_structure() {
         let src = "struct P { x: i64 }\nimpl P {\n  fn get(&self) -> i64 { self.x }\n}\n";
-        let parsed = parse(src);
+        let parsed = parse_source_file(src);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let t = tree(src);
         assert!(t.contains("StructDecl"));
@@ -1246,8 +1287,8 @@ mod tests {
     #[test]
     fn comments_preserved_inside_fn() {
         let src = "fn f() {\n    // a line comment\n    let x = 1; /* inline */\n}\n";
-        let parsed = parse(src);
-        assert_eq!(parsed.green.text().to_string(), src);
+        let parsed = parse_source_file(src);
+        assert_eq!(parsed.syntax_node().text().to_string(), src);
         assert!(parsed.errors.is_empty());
     }
 
@@ -1262,7 +1303,7 @@ mod tests {
 
     #[test]
     fn call_and_method_chain() {
-        let parsed = parse("fn f() { a.b().c(1, 2)?; }");
+        let parsed = parse_source_file("fn f() { a.b().c(1, 2)?; }");
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let t = tree("fn f() { a.b().c(1, 2)?; }");
         assert!(t.contains("MethodCallExpr"));
@@ -1272,9 +1313,9 @@ mod tests {
     #[test]
     fn match_and_patterns() {
         let src = "fn f(x: i64) -> i64 {\n  match x {\n    0 => 1,\n    1..=9 => 2,\n    _ => 3,\n  }\n}\n";
-        let parsed = parse(src);
+        let parsed = parse_source_file(src);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-        assert_eq!(parsed.green.text().to_string(), src);
+        assert_eq!(parsed.syntax_node().text().to_string(), src);
         let t = tree(src);
         assert!(t.contains("MatchExpr"));
         assert!(t.contains("MatchArm"));
@@ -1284,10 +1325,10 @@ mod tests {
     #[test]
     fn struct_literal_vs_block_in_condition() {
         // `if cond { }` — the `{` is a block, not a struct literal.
-        let parsed = parse("fn f() { if x { 1 } else { 2 } }");
+        let parsed = parse_source_file("fn f() { if x { 1 } else { 2 } }");
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         // In an argument position a struct literal is allowed again.
-        let parsed2 = parse("fn f() { g(P { x: 1 }); }");
+        let parsed2 = parse_source_file("fn f() { g(P { x: 1 }); }");
         assert!(parsed2.errors.is_empty(), "{:?}", parsed2.errors);
         assert!(tree("fn f() { g(P { x: 1 }); }").contains("StructLitExpr"));
     }
@@ -1295,9 +1336,19 @@ mod tests {
     #[test]
     fn error_recovery_is_lossless_and_nonfatal() {
         let src = "fn f( { @@@ }";
-        let parsed = parse(src);
+        let parsed = parse_source_file(src);
         // Malformed, but the tree still covers every byte and does not panic.
-        assert_eq!(parsed.green.text().to_string(), src);
+        assert_eq!(parsed.syntax_node().text().to_string(), src);
         assert!(!parsed.errors.is_empty());
+        assert!(parsed.clone().ok().is_err());
+    }
+
+    #[test]
+    fn public_parse_api_returns_typed_source_file() {
+        let parsed: Parse<SourceFile> = parse_source_file("fn main() {}");
+        assert!(parsed.errors().is_empty());
+        assert_eq!(parsed.syntax_node().kind(), K::SourceFile);
+        assert_eq!(parsed.tree().items().count(), 1);
+        assert!(parsed.ok().is_ok());
     }
 }

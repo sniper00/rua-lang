@@ -5,6 +5,10 @@ future syntax, analysis, and IDE parity tests. Fixtures live outside individual
 crates so their paths and expected results remain stable while implementations
 change.
 
+The current feature-by-feature status and known gaps are tracked in
+[`COVERAGE.md`](COVERAGE.md). Every new language or IDE feature must update that
+matrix in the same change as its fixtures.
+
 ## Layout
 
 ```text
@@ -45,6 +49,26 @@ Focused compiler checks are available as:
 ```sh
 cargo test -p ruac --test golden golden_compile_pass
 cargo test -p ruac --test golden golden_compile_fail
+cargo test -p ruac --test golden golden_ruai
+```
+
+The shared parser corpus and CST byte-range snapshots are checked with:
+
+```sh
+cargo test -p rua-syntax --test parser_goldens parser_golden -- --exact
+cargo test -p rua-syntax --test parser_goldens range_golden -- --exact
+```
+
+Declaration-file IDE behavior has its own snapshot suite:
+
+```sh
+cargo test -p rua-syntax --test ruai_goldens ruai_ide_golden -- --exact
+```
+
+The general IDE query snapshots are checked with:
+
+```sh
+cargo test -p rua-syntax --test ide_goldens ide_snapshot_golden -- --exact
 ```
 
 Missing expected files and byte mismatches fail the test and print the explicit
@@ -56,7 +80,25 @@ To accept an intentional compiler-output change, review the diff produced by:
 RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden update_goldens -- --ignored --exact
 ```
 
-The update test is both ignored and guarded by `RUA_UPDATE_GOLDENS=1`; either
+Range snapshots have a separate guarded update target:
+
+```sh
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test parser_goldens update_parser_range_snapshots -- --ignored --exact
+```
+
+The `.ruai` IDE snapshots use the same guard:
+
+```sh
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test ruai_goldens update_ruai_ide_snapshots -- --ignored --exact
+```
+
+General IDE snapshots also require an explicit guarded update:
+
+```sh
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test ide_goldens update_ide_snapshots -- --ignored --exact
+```
+
+All update tests are ignored and guarded by `RUA_UPDATE_GOLDENS=1`; either
 mechanism alone is insufficient to write files.
 
 ## Assertions
@@ -64,7 +106,18 @@ mechanism alone is insufficient to write files.
 - Compile-pass output is the byte-exact result of `ruac::compile_path`.
 - Compile-fail output is the exact compiler error with the fixture root replaced
   by `<golden>` so snapshots do not depend on an absolute checkout path.
+- Parser accept/reject sources must produce the same outcome in the compiler and
+  CST parsers; every CST parse must remain lossless, including rejected input.
+- Range output records every CST node and non-trivia token with its exact byte
+  range. `parser/ranges/<case>.rua` pairs with `<case>.range.golden`.
+- `.ruai` compiler fixtures prove declarations participate in checking but are
+  skipped by codegen. IDE snapshots cover completion, hover/goto, references,
+  and read-only rename behavior.
+- General IDE snapshots cover local/member/path completion, local and
+  cross-file hover/goto/references/rename, diagnostics, and document symbols.
+- `COVERAGE.md` records direct golden evidence separately from unit-test
+  coverage and keeps unsupported or partially covered behavior explicit.
 - A compile-pass case that fails, or a compile-fail case that succeeds, always
   fails even in update mode.
-- Golden files are updated only by the explicit command above and must be
+- Golden files are updated only by the documented explicit commands and must be
   reviewed like source code.

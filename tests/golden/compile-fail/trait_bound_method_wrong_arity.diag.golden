@@ -1,0 +1,1 @@
+<golden>/compile-fail/trait_bound_method_wrong_arity.rua:6: method `Animal::speak` expects 0 argument(s), got 1

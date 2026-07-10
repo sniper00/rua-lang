@@ -1,0 +1,4 @@
+query: geometry::area -> surface
+edit: geometry.rua 7..11 "area" -> "surface"
+edit: main.rua 49..53 "area" -> "surface"
+edit: main.rua 95..99 "area" -> "surface"

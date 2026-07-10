@@ -1,0 +1,3 @@
+fn read(point: Point) -> i64 {
+    point.position.x
+}

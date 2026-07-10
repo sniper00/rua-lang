@@ -1,0 +1,5 @@
+fn strings() {
+    let quote = "say \"hello\"";
+    let path = "c:\\tmp\\rua";
+    let newline = "first\nsecond";
+}

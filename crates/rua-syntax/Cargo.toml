@@ -11,4 +11,6 @@ doctest = false
 
 [dependencies]
 rowan.workspace = true
+# Phase 1/5 transition-only bridge; all production access is isolated in
+# `src/transition.rs`, which documents the removal plan.
 ruac.workspace = true

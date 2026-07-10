@@ -1,0 +1,2 @@
+diagnostic: line=2 range=27..28 text="1" message="expected return type `bool`, found `i64`"
+diagnostic: line=6 range=51..52 text="1" message="`if` condition must be `bool`, found `i64`"

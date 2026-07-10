@@ -1,0 +1,3 @@
+fn read() -> i64 {
+    outer::inner::value
+}

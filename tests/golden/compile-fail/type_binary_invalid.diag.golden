@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_binary_invalid.rua:2: arithmetic operator applied to `bool`

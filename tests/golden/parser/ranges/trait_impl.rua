@@ -1,0 +1,9 @@
+trait Named {
+    fn name(&self) -> String;
+}
+
+struct User { name: String }
+
+impl Named for User {
+    fn name(&self) -> String { self.name }
+}

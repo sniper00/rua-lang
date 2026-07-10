@@ -1,0 +1,5 @@
+query: client.
+member: close Method "fn close(&self)"
+member: endpoint Field "endpoint: String"
+member: request Method "fn request(&self, path: String) -> String"
+member: retries Field "retries: i64"

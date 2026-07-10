@@ -1,0 +1,7 @@
+struct Nested<T> {
+    value: Vec<Option<Result<T, String>>>,
+}
+
+fn keep<T>(value: Nested<T>) -> Nested<T> {
+    value
+}

@@ -1,0 +1,36 @@
+source_len: 93
+SourceFile 0..93
+  ExternBlock 0..44
+    KwExtern 0..6 "extern"
+    Str 7..12 "\"lua\""
+    LBrace 13..14 "{"
+    ExternFn 14..42
+      KwFn 19..21 "fn"
+      Ident 22..32 "host_value"
+      LParen 32..33 "("
+      RParen 33..34 ")"
+      Arrow 35..37 "->"
+      PathType 38..41
+        Ident 38..41 "i64"
+      Semi 41..42 ";"
+    RBrace 43..44 "}"
+  ModDecl 46..92
+    KwMod 46..49 "mod"
+    Ident 50..56 "nested"
+    LBrace 57..58 "{"
+    FnDecl 63..90
+      KwPub 63..66 "pub"
+      KwFn 67..69 "fn"
+      Ident 70..75 "value"
+      LParen 75..76 "("
+      RParen 76..77 ")"
+      Arrow 78..80 "->"
+      PathType 81..84
+        Ident 81..84 "i64"
+      Block 84..90
+        LBrace 85..86 "{"
+        ExprStmt 87..88
+          LiteralExpr 87..88
+            Int 87..88 "1"
+        RBrace 89..90 "}"
+    RBrace 91..92 "}"

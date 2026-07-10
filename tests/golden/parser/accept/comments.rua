@@ -1,0 +1,5 @@
+// leading comment
+fn main() {
+    /* nested /* inner */ comment */
+    let value = 1; // trailing comment
+}

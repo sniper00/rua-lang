@@ -1,0 +1,4 @@
+query: value
+target: 20..25 Local
+text: "value"
+detail: "let value: i64"

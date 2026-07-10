@@ -1,0 +1,7 @@
+enum Message { Move { x: i64, y: i64 } }
+
+fn coordinate(message: Message) -> i64 {
+    match message {
+        Message::Move { z } => z,
+    }
+}

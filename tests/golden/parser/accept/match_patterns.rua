@@ -1,0 +1,9 @@
+enum Message { Quit, Move { x: i64, y: i64 }, Write(String) }
+
+fn classify(message: Message) -> i64 {
+    match message {
+        Message::Quit => 0,
+        Message::Move { x, y } => x + y,
+        Message::Write(text) => text.len(),
+    }
+}

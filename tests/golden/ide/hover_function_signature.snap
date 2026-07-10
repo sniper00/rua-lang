@@ -1,0 +1,4 @@
+query: add
+target: 31..34 Item
+text: "add"
+detail: "fn add(left: i64, right: i64) -> i64"

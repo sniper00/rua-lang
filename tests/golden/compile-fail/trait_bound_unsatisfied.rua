@@ -1,0 +1,11 @@
+trait Animal {
+    fn speak(&self) -> String;
+}
+
+struct Cat {}
+
+fn describe<T: Animal>(animal: T) {}
+
+fn main() {
+    describe(Cat {});
+}

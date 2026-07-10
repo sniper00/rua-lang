@@ -1,0 +1,5 @@
+fn keyword_boundaries() {
+    let function_name = 1;
+    let mutable_value = function_name + 1;
+    let matching = mutable_value == 2;
+}

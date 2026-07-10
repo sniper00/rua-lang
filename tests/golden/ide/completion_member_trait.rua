@@ -1,0 +1,15 @@
+trait Worker {
+    fn run(&self) -> i64;
+    fn stop(&self) {}
+}
+
+struct Job { id: i64 }
+
+impl Worker for Job {
+    fn run(&self) -> i64 { self.id }
+}
+
+fn main() {
+    let job = Job { id: 1 };
+    job.
+}

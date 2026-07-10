@@ -1,0 +1,5 @@
+fn require_bool(value: bool) {}
+
+fn main() {
+    require_bool(1);
+}

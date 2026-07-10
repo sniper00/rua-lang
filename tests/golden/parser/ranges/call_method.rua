@@ -1,0 +1,3 @@
+fn compute(service: Service) -> i64 {
+    normalize(service.fetch(1).unwrap())
+}

@@ -1,0 +1,1 @@
+<golden>/compile-fail/trait_bound_method_wrong_type.rua:6: argument 1 of `Adder::add` expects `i64`, found `bool`

@@ -89,7 +89,7 @@ pub trait Named: AstNode {
 // --- root & items ----------------------------------------------------------
 
 ast_node!(
-    /// The whole file. [`parse`](crate::parse) returns this as `green`.
+    /// The whole file returned by [`parse_source_file`](crate::parse_source_file).
     SourceFile = SourceFile
 );
 
@@ -1436,10 +1436,10 @@ fn is_binop_token(kind: SyntaxKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::parse_source_file;
 
     fn source_file(src: &str) -> SourceFile {
-        SourceFile::cast(parse(src).green).expect("root is SourceFile")
+        parse_source_file(src).tree
     }
 
     #[test]

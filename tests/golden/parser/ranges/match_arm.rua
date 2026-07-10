@@ -1,0 +1,7 @@
+fn classify(value: i64) -> i64 {
+    match value {
+        0 => 10,
+        1 | 2 if value > 0 => 20,
+        _ => 30,
+    }
+}

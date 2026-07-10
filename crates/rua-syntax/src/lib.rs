@@ -5,9 +5,9 @@
 //! pipeline (lexer → parser → AST → check/typeck/codegen) and is **rowan-free**.
 //! This crate provides a separate lossless **rowan CST** (parser → green/red
 //! tree with trivia) plus a typed **AstNode view layer**, consumed only by
-//! tooling (formatter / LSP). It reuses `ruac`'s lexer (`token` /
-//! `tokenize`) so the two trees can never disagree on tokenization; `rowan`
-//! stays confined to this crate.
+//! tooling (formatter / LSP). During the Phase 1 migration, compiler-backed
+//! lexer and semantic compatibility calls are isolated in one crate-private
+//! `transition` module; `rowan` stays confined to this crate.
 
 pub mod analysis;
 pub mod ast;
@@ -20,14 +20,13 @@ mod kind;
 mod lexer;
 mod line_index;
 mod parser;
+mod transition;
 
 pub use ast::{AstNode, Named};
-pub use kind::{
-    RuaLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, from_token,
-};
+pub use kind::{RuaLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 pub use lexer::{LexToken, lex};
 pub use line_index::LineIndex;
-pub use parser::{Parse, ParseError, parse};
+pub use parser::{Parse, ParseError, parse, parse_source_file};
 
 use rowan::GreenNodeBuilder;
 

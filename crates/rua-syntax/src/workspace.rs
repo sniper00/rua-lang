@@ -20,11 +20,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::analysis::Analysis;
+use crate::analysis::{Analysis, CompletionMember};
 use crate::ast::{Item, Named, SourceFile};
 use crate::nameres::{self, RefKind, RenameError};
 use crate::symbols::Symbol;
-use ruac::typeck::CompletionMember;
 
 // --- FileLoader ---------------------------------------------------------------
 
@@ -274,11 +273,11 @@ impl<L: FileLoader> Workspace<L> {
         let ctx = crate::completion::completion_context(self.analysis_of(&file_canon)?.source_file(), offset)?;
         let src = self.source_text(&file_canon)?;
         let repaired = crate::completion::repair(&src, &ctx);
-        let (tm, ri, _files) = ruac::member_completion_src(&repaired, &file_canon);
-        Some(match ri.at_end(0, ctx.receiver_end) {
-            Some(rt) => tm.get(&rt.type_name).to_vec(),
-            None => Vec::new(),
-        })
+        Some(crate::transition::member_completions_src(
+            &repaired,
+            &file_canon,
+            ctx.receiver_end,
+        ))
     }
 
     /// Path-context completions (`Type::` / `mod::`) for `offset` in `file`.
@@ -458,7 +457,7 @@ impl<L: FileLoader> Workspace<L> {
         offset: usize,
     ) -> Option<(PathBuf, (usize, usize), String)> {
         let root_src = self.source_text(file_canon)?;
-        let (index, files) = ruac::member_index_src(&root_src, file_canon);
+        let (index, files) = crate::transition::member_index_src(&root_src, file_canon);
         let hit = index.at(0, offset)?;
         let target_path = files
             .get(hit.target_file as usize)

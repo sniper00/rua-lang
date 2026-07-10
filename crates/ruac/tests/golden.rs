@@ -9,6 +9,28 @@ const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden \
                               update_goldens -- --ignored --exact";
 const MIN_COMPILE_PASS_CASES: usize = 30;
+const MIN_COMPILE_FAIL_CASES: usize = 30;
+const MIN_COVERAGE_ROWS: usize = 25;
+const COVERAGE_HEADER: &str =
+    "| Feature | Compile pass | Compile fail | Parser/range | IDE snapshot | Notes |";
+const REQUIRED_COVERAGE_MARKERS: &[&str] = &[
+    "| Closures |",
+    "| Iterator adapters and fusion |",
+    "| External `.ruai` library roots |",
+    "| Diagnostic codes and precise ranges |",
+    "| Semantic tokens |",
+    "| Inlay hints |",
+    "## Known Gaps",
+    "## Merge Gate",
+];
+const RUAI_COMPILE_PASS_CASES: &[&str] = &[
+    "declaration_codegen_skip",
+    "library_decl_basic",
+    "library_decl_module_dir",
+    "library_mount_single_file",
+    "workspace_shadows_library",
+];
+const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_type_error"];
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",
     "compile-fail",
@@ -174,11 +196,45 @@ fn run_compile_pass(update: bool) -> Result<(), String> {
 
 fn run_compile_fail(update: bool) -> Result<(), String> {
     let root = golden_root().join("compile-fail");
-    for source in discover_rua(&root)? {
+    let sources = discover_rua(&root)?;
+    if sources.len() < MIN_COMPILE_FAIL_CASES {
+        return Err(format!(
+            "compile-fail corpus has {} cases; expected at least {MIN_COMPILE_FAIL_CASES}",
+            sources.len()
+        ));
+    }
+    for source in sources {
         let error = ruac::compile_path(&source).err();
         let Some(error) = error else {
             return Err(format!(
                 "compile-fail case {} compiled successfully",
+                fixture_label(&source)
+            ));
+        };
+        let actual = stable_diagnostic(&error);
+        assert_or_update(&source, &actual, GoldenKind::Diagnostic, update)?;
+    }
+    Ok(())
+}
+
+fn run_ruai(update: bool) -> Result<(), String> {
+    let root = golden_root().join("ruai");
+    for case in RUAI_COMPILE_PASS_CASES {
+        let source = root.join(case).join("workspace/main.rua");
+        let actual = ruac::compile_path(&source).map_err(|error| {
+            format!(
+                ".ruai compile-pass case {} failed:\n{error}",
+                fixture_label(&source)
+            )
+        })?;
+        assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
+    }
+    for case in RUAI_COMPILE_FAIL_CASES {
+        let source = root.join(case).join("workspace/main.rua");
+        let error = ruac::compile_path(&source).err();
+        let Some(error) = error else {
+            return Err(format!(
+                ".ruai compile-fail case {} compiled successfully",
                 fixture_label(&source)
             ));
         };
@@ -199,6 +255,39 @@ fn golden_layout_is_present() {
         let path = root.join(relative);
         assert!(path.is_dir(), "missing golden directory {}", path.display());
     }
+}
+
+#[test]
+fn golden_coverage_matrix_is_present() {
+    let path = golden_root().join("COVERAGE.md");
+    let coverage = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    assert!(
+        coverage.contains(COVERAGE_HEADER),
+        "coverage matrix header changed"
+    );
+    for status in ["Yes", "Partial", "No", "N/A"] {
+        assert!(
+            coverage.contains(status),
+            "coverage matrix is missing `{status}` status"
+        );
+    }
+    for marker in REQUIRED_COVERAGE_MARKERS {
+        assert!(
+            coverage.contains(marker),
+            "coverage matrix is missing `{marker}`"
+        );
+    }
+    let rows = coverage
+        .lines()
+        .filter(|line| {
+            line.starts_with("| ") && !line.starts_with("| Feature") && !line.starts_with("| ---")
+        })
+        .count();
+    assert!(
+        rows >= MIN_COVERAGE_ROWS,
+        "coverage matrix has {rows} feature rows; expected at least {MIN_COVERAGE_ROWS}"
+    );
 }
 
 #[test]
@@ -231,6 +320,11 @@ fn golden_compile_fail() {
 }
 
 #[test]
+fn golden_ruai() {
+    run(run_ruai(false));
+}
+
+#[test]
 #[ignore = "updates repository golden files; run the documented explicit command"]
 fn update_goldens() {
     assert_eq!(
@@ -240,4 +334,5 @@ fn update_goldens() {
     );
     run(run_compile_pass(true));
     run(run_compile_fail(true));
+    run(run_ruai(true));
 }

@@ -1,0 +1,7 @@
+trait Animal {
+    fn speak(&self) -> String;
+}
+
+fn describe<T: Animal>(animal: T) -> String {
+    animal.speak(1)
+}

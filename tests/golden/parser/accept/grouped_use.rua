@@ -1,0 +1,4 @@
+use math::{one, two as second};
+use math::nested::value as nested_value;
+
+fn main() {}

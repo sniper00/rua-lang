@@ -1,0 +1,35 @@
+source_len: 75
+SourceFile 0..75
+  EnumDecl 0..74
+    KwEnum 0..4 "enum"
+    Ident 5..12 "Message"
+    VariantList 12..74
+      LBrace 13..14 "{"
+      EnumVariant 14..23
+        Ident 19..23 "Quit"
+      Comma 23..24 ","
+      EnumVariant 24..42
+        Ident 29..34 "Write"
+        LParen 34..35 "("
+        PathType 35..41
+          Ident 35..41 "String"
+        RParen 41..42 ")"
+      Comma 42..43 ","
+      EnumVariant 43..71
+        Ident 48..52 "Move"
+        FieldList 52..71
+          LBrace 53..54 "{"
+          FieldDecl 54..61
+            Ident 55..56 "x"
+            Colon 56..57 ":"
+            PathType 58..61
+              Ident 58..61 "i64"
+          Comma 61..62 ","
+          FieldDecl 62..69
+            Ident 63..64 "y"
+            Colon 64..65 ":"
+            PathType 66..69
+              Ident 66..69 "i64"
+          RBrace 70..71 "}"
+      Comma 71..72 ","
+      RBrace 73..74 "}"

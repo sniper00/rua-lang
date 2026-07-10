@@ -1,0 +1,31 @@
+source_len: 52
+SourceFile 0..52
+  FnDecl 0..51
+    KwFn 0..2 "fn"
+    Ident 3..8 "first"
+    LParen 8..9 "("
+    Param 9..25
+      Ident 9..15 "values"
+      Colon 15..16 ":"
+      PathType 17..25
+        Ident 17..20 "Vec"
+        TypeArgs 20..25
+          Lt 20..21 "<"
+          PathType 21..24
+            Ident 21..24 "i64"
+          Gt 24..25 ">"
+    RParen 25..26 ")"
+    Arrow 27..29 "->"
+    PathType 30..33
+      Ident 30..33 "i64"
+    Block 33..51
+      LBrace 34..35 "{"
+      ExprStmt 40..49
+        IndexExpr 40..49
+          PathExpr 40..46
+            Ident 40..46 "values"
+          LBracket 46..47 "["
+          LiteralExpr 47..48
+            Int 47..48 "0"
+          RBracket 48..49 "]"
+      RBrace 50..51 "}"

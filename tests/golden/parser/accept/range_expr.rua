@@ -1,0 +1,8 @@
+fn ranges() {
+    for i in 0..10 {
+        println!("{}", i);
+    }
+    for j in 1..=5 {
+        println!("{}", j);
+    }
+}

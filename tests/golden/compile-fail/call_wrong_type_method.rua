@@ -1,0 +1,9 @@
+struct Counter { value: i64 }
+
+impl Counter {
+    fn set(&mut self, value: i64) { self.value = value; }
+}
+
+fn update(counter: Counter) {
+    counter.set(false);
+}

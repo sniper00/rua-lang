@@ -1,0 +1,4 @@
+fn main() {
+    let mut total = 1;
+    total = total + 1;
+}

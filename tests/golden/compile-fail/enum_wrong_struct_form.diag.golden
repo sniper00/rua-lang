@@ -1,0 +1,1 @@
+<golden>/compile-fail/enum_wrong_struct_form.rua:4: struct variant `Message::Move` must be built with `{ .. }`

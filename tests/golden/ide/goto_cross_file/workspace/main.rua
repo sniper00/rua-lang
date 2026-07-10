@@ -1,0 +1,5 @@
+mod geometry;
+
+fn main() -> i64 {
+    geometry::area(2)
+}

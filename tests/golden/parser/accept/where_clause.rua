@@ -1,0 +1,10 @@
+trait Named {
+    fn name(&self) -> String;
+}
+
+fn label<T>(value: T) -> String
+where
+    T: Named,
+{
+    value.name()
+}

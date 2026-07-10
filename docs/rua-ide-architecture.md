@@ -1350,7 +1350,11 @@ fn main() {
 
 1. 记录新仓库基线：`cargo test -p ruac -p rua-syntax -p rua-lsp --features rua-lsp/lsp` 状态。
 2. 为已有 member access/member completion/rename/references 建 snapshot 或 golden。
-3. 标记旧架构 API：`member_index`、`binding_types`、`member_completion_src` 为 transition-only。
+3. 在 rustdoc 中把旧架构 IDE façade 标记为 transition-only：`check_diags`、
+   `member_index`、`type_members`、`binding_types`、`member_index_path`、
+   `member_index_src`、`member_completion`、`member_completion_src`。这些 API
+   仍有 workspace 内消费者，因此 Phase 0 不加 `#[deprecated]`，避免把正常构建
+   变成告警源；迁移期间禁止新增消费者。
 4. 建 `ruac` oracle corpus：accept/reject、diagnostic range/code、golden Lua output，后续 `rua-analysis` parity 都以此为基准。
 
 退出条件：
@@ -1477,7 +1481,8 @@ fn main() {
 
 退出条件：
 
-- LSP 不再调用 `ruac::check_diags/member_index/binding_types/member_completion_src`。
+- `rua-syntax` 和 LSP 的 production code 不再调用任何 transition-only
+  `ruac` IDE façade；Phase 6 随后删除或私有化这组 API。
 - 当前 v3 用户可见能力不退化。
 
 ### Phase 6：ruac 精简化与行为对齐

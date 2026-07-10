@@ -52,7 +52,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Advance the cursor past one whole UTF-8 character. Unlike [`bump`], which
+    /// Advance the cursor past one whole UTF-8 character. Unlike [`Self::bump`], which
     /// steps a single byte (safe for the ASCII lexemes and byte-scanned
     /// string/comment bodies), this keeps `pos` on a char boundary when an
     /// unexpected multibyte char is encountered, so later slicing never panics.

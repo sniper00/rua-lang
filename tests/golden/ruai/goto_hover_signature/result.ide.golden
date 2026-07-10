@@ -1,0 +1,5 @@
+query: moon::log
+target: moon.ruai 71..74 Item
+text: "log"
+detail: "extern pub fn log(message: String)"
+hover: "extern pub fn log(message: String)"

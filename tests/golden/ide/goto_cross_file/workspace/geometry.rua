@@ -1,0 +1,3 @@
+pub fn area(side: i64) -> i64 {
+    side * side
+}

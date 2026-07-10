@@ -1,0 +1,3 @@
+query: local_value
+completion: enabled "let enabled: bool"
+completion: local_value "let local_value: i64"

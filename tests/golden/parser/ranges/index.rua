@@ -1,0 +1,3 @@
+fn first(values: Vec<i64>) -> i64 {
+    values[0]
+}

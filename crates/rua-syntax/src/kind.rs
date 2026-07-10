@@ -3,14 +3,10 @@
 //! It merges three families into one `#[repr(u16)]` enum, as required by rowan:
 //!   1. **trivia** tokens (whitespace, comments) — retained in the tree so the
 //!      formatter/LSP see the exact source (`node.text() == source`),
-//!   2. **real** tokens — one variant per [`ruac::token::RuaTokenKind`],
+//!   2. **real** tokens — one variant per Rua language token,
 //!   3. **node** kinds — the grammar productions the CST parser (P6-1) builds.
 //!
-//! Token classification (keywords/operators/literals) is owned by this crate;
-//! [`from_token`] is the single conversion point, so the CST cannot drift from
-//! the semantic lexer.
-
-use ruac::token::RuaTokenKind;
+//! Token classification (keywords/operators/literals) is owned by this crate.
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -172,78 +168,6 @@ impl SyntaxKind {
 
     pub fn is_comment(self) -> bool {
         matches!(self, SyntaxKind::LineComment | SyntaxKind::BlockComment)
-    }
-}
-
-/// Map a semantic-lexer token kind to its CST token kind. Single source of truth
-/// for real-token classification (keeps the CST from drifting).
-pub fn from_token(k: RuaTokenKind) -> SyntaxKind {
-    use RuaTokenKind as T;
-    match k {
-        T::KwFn => SyntaxKind::KwFn,
-        T::KwLet => SyntaxKind::KwLet,
-        T::KwMut => SyntaxKind::KwMut,
-        T::KwIf => SyntaxKind::KwIf,
-        T::KwElse => SyntaxKind::KwElse,
-        T::KwWhile => SyntaxKind::KwWhile,
-        T::KwLoop => SyntaxKind::KwLoop,
-        T::KwFor => SyntaxKind::KwFor,
-        T::KwIn => SyntaxKind::KwIn,
-        T::KwReturn => SyntaxKind::KwReturn,
-        T::KwBreak => SyntaxKind::KwBreak,
-        T::KwContinue => SyntaxKind::KwContinue,
-        T::KwTrue => SyntaxKind::KwTrue,
-        T::KwFalse => SyntaxKind::KwFalse,
-        T::KwStruct => SyntaxKind::KwStruct,
-        T::KwEnum => SyntaxKind::KwEnum,
-        T::KwTrait => SyntaxKind::KwTrait,
-        T::KwImpl => SyntaxKind::KwImpl,
-        T::KwPub => SyntaxKind::KwPub,
-        T::KwUse => SyntaxKind::KwUse,
-        T::KwMod => SyntaxKind::KwMod,
-        T::KwAs => SyntaxKind::KwAs,
-        T::KwMatch => SyntaxKind::KwMatch,
-        T::KwSelf => SyntaxKind::KwSelf,
-        T::KwExtern => SyntaxKind::KwExtern,
-        T::Ident => SyntaxKind::Ident,
-        T::Int => SyntaxKind::Int,
-        T::Float => SyntaxKind::Float,
-        T::Str => SyntaxKind::Str,
-        T::Plus => SyntaxKind::Plus,
-        T::Minus => SyntaxKind::Minus,
-        T::Star => SyntaxKind::Star,
-        T::Slash => SyntaxKind::Slash,
-        T::Percent => SyntaxKind::Percent,
-        T::Eq => SyntaxKind::Eq,
-        T::EqEq => SyntaxKind::EqEq,
-        T::Ne => SyntaxKind::Ne,
-        T::Lt => SyntaxKind::Lt,
-        T::Le => SyntaxKind::Le,
-        T::Gt => SyntaxKind::Gt,
-        T::Ge => SyntaxKind::Ge,
-        T::AndAnd => SyntaxKind::AndAnd,
-        T::OrOr => SyntaxKind::OrOr,
-        T::Not => SyntaxKind::Not,
-        T::Amp => SyntaxKind::Amp,
-        T::Pipe => SyntaxKind::Pipe,
-        T::Question => SyntaxKind::Question,
-        T::Arrow => SyntaxKind::Arrow,
-        T::FatArrow => SyntaxKind::FatArrow,
-        T::ColonColon => SyntaxKind::ColonColon,
-        T::Colon => SyntaxKind::Colon,
-        T::Semi => SyntaxKind::Semi,
-        T::Comma => SyntaxKind::Comma,
-        T::Dot => SyntaxKind::Dot,
-        T::DotDot => SyntaxKind::DotDot,
-        T::DotDotEq => SyntaxKind::DotDotEq,
-        T::LParen => SyntaxKind::LParen,
-        T::RParen => SyntaxKind::RParen,
-        T::LBrace => SyntaxKind::LBrace,
-        T::RBrace => SyntaxKind::RBrace,
-        T::LBracket => SyntaxKind::LBracket,
-        T::RBracket => SyntaxKind::RBracket,
-        T::Eof => SyntaxKind::Eof,
-        T::Unknown => SyntaxKind::Error,
     }
 }
 

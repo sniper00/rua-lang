@@ -1,0 +1,1 @@
+<golden>/compile-fail/trait_bound_unsatisfied.rua:10: type `Cat` does not implement trait `Animal` (required by bound `T: Animal` of `describe`)

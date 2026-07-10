@@ -1,0 +1,9 @@
+struct Counter { value: i64 }
+
+impl Counter {
+    fn get(&self) -> i64 { self.value }
+}
+
+fn read(counter: Counter) -> i64 {
+    counter.get(1)
+}

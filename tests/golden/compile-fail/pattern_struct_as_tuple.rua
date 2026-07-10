@@ -1,0 +1,7 @@
+enum Message { Move { x: i64, y: i64 } }
+
+fn x(message: Message) -> i64 {
+    match message {
+        Message::Move(x, y) => x,
+    }
+}

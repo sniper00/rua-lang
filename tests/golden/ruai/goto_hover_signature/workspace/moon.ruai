@@ -1,0 +1,4 @@
+/// Write a message through the host logger.
+extern "lua" {
+    pub fn log(message: String);
+}

@@ -1,0 +1,41 @@
+source_len: 81
+SourceFile 0..81
+  FnDecl 0..80
+    KwFn 0..2 "fn"
+    Ident 3..10 "compute"
+    LParen 10..11 "("
+    Param 11..27
+      Ident 11..18 "service"
+      Colon 18..19 ":"
+      PathType 20..27
+        Ident 20..27 "Service"
+    RParen 27..28 ")"
+    Arrow 29..31 "->"
+    PathType 32..35
+      Ident 32..35 "i64"
+    Block 35..80
+      LBrace 36..37 "{"
+      ExprStmt 42..78
+        CallExpr 42..78
+          PathExpr 42..51
+            Ident 42..51 "normalize"
+          ArgList 51..78
+            LParen 51..52 "("
+            MethodCallExpr 52..77
+              MethodCallExpr 52..68
+                PathExpr 52..59
+                  Ident 52..59 "service"
+                Dot 59..60 "."
+                Ident 60..65 "fetch"
+                ArgList 65..68
+                  LParen 65..66 "("
+                  LiteralExpr 66..67
+                    Int 66..67 "1"
+                  RParen 67..68 ")"
+              Dot 68..69 "."
+              Ident 69..75 "unwrap"
+              ArgList 75..77
+                LParen 75..76 "("
+                RParen 76..77 ")"
+            RParen 77..78 ")"
+      RBrace 79..80 "}"

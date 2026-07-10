@@ -1,0 +1,5 @@
+enum Message {
+    Quit,
+    Write(String),
+    Move { x: i64, y: i64 },
+}

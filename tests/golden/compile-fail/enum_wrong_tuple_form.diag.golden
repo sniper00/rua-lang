@@ -1,0 +1,1 @@
+<golden>/compile-fail/enum_wrong_tuple_form.rua:4: variant `Message::Move` is not a struct variant

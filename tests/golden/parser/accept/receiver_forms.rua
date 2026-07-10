@@ -1,0 +1,7 @@
+struct Counter { value: i64 }
+
+impl Counter {
+    fn take(self) -> i64 { self.value }
+    fn read(&self) -> i64 { self.value }
+    fn increment(&mut self) { self.value = self.value + 1; }
+}

@@ -1,0 +1,5 @@
+mod math;
+
+fn answer() -> i64 {
+    math::constants::answer()
+}

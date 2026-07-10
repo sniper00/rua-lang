@@ -1,0 +1,9 @@
+mod geometry;
+
+fn first() -> i64 {
+    geometry::area(2)
+}
+
+fn second() -> i64 {
+    geometry::area(3)
+}

@@ -1,0 +1,4 @@
+query: moon::log
+reference: main.rua 34..37 "log"
+reference: main.rua 75..78 "log"
+reference: moon.ruai 26..29 "log"

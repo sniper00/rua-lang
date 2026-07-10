@@ -1,0 +1,7 @@
+trait Adder {
+    fn add(&self, value: i64) -> i64;
+}
+
+fn add<T: Adder>(target: T) -> i64 {
+    target.add(false)
+}

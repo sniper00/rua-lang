@@ -1,0 +1,7 @@
+enum State { Ready }
+
+fn value(state: State) -> i64 {
+    match state {
+        State::Ready(value) => value,
+    }
+}

@@ -1,0 +1,1 @@
+<golden>/compile-fail/enum_unknown_variant.rua:4: enum `State` has no variant `Missing`

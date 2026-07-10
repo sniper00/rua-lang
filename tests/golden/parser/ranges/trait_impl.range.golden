@@ -1,0 +1,55 @@
+source_len: 144
+SourceFile 0..144
+  TraitDecl 0..45
+    KwTrait 0..5 "trait"
+    Ident 6..11 "Named"
+    LBrace 12..13 "{"
+    TraitMethod 13..43
+      KwFn 18..20 "fn"
+      Ident 21..25 "name"
+      LParen 25..26 "("
+      Amp 26..27 "&"
+      KwSelf 27..31 "self"
+      RParen 31..32 ")"
+      Arrow 33..35 "->"
+      PathType 36..42
+        Ident 36..42 "String"
+      Semi 42..43 ";"
+    RBrace 44..45 "}"
+  StructDecl 47..75
+    KwStruct 47..53 "struct"
+    Ident 54..58 "User"
+    FieldList 58..75
+      LBrace 59..60 "{"
+      FieldDecl 60..73
+        Ident 61..65 "name"
+        Colon 65..66 ":"
+        PathType 67..73
+          Ident 67..73 "String"
+      RBrace 74..75 "}"
+  ImplDecl 77..143
+    KwImpl 77..81 "impl"
+    Ident 82..87 "Named"
+    KwFor 88..91 "for"
+    Ident 92..96 "User"
+    LBrace 97..98 "{"
+    FnDecl 98..141
+      KwFn 103..105 "fn"
+      Ident 106..110 "name"
+      LParen 110..111 "("
+      Amp 111..112 "&"
+      KwSelf 112..116 "self"
+      RParen 116..117 ")"
+      Arrow 118..120 "->"
+      PathType 121..127
+        Ident 121..127 "String"
+      Block 127..141
+        LBrace 128..129 "{"
+        ExprStmt 130..139
+          FieldExpr 130..139
+            PathExpr 130..134
+              KwSelf 130..134 "self"
+            Dot 134..135 "."
+            Ident 135..139 "name"
+        RBrace 140..141 "}"
+    RBrace 142..143 "}"

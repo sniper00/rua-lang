@@ -1,0 +1,4 @@
+query: value -> total
+edit: 32..37 "value" -> "total"
+edit: 47..52 "value" -> "total"
+edit: 55..60 "value" -> "total"

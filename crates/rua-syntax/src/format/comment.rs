@@ -201,12 +201,11 @@ pub(crate) fn extract_children(parent: &SyntaxNode) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::{AstNode, parse_source_file};
 
     fn test_extract(src: &str) -> Vec<Entry> {
-        let parsed = parse(src);
-        let root = parsed.green;
-        extract_children(&root)
+        let parsed = parse_source_file(src);
+        extract_children(parsed.tree.syntax())
     }
 
     #[test]
@@ -241,8 +240,8 @@ mod tests {
     fn trailing_comment_on_stmt() {
         // Block content: let x = 1; // t
         let src = "fn foo() {\n    let x = 1; // t\n}";
-        let parsed = parse(src);
-        let root = parsed.green;
+        let parsed = parse_source_file(src);
+        let root = parsed.tree.syntax();
         // Navigate: SourceFile → FnDecl → Block
         let block = root
             .descendants_with_tokens()
@@ -383,7 +382,8 @@ mod tests {
     // (unlike blocks). These verify `peel_leading_trivia` recovers them.
 
     fn extract_field_list(src: &str) -> Vec<Entry> {
-        let root = parse(src).green;
+        let parsed = parse_source_file(src);
+        let root = parsed.tree.syntax();
         let fl = root
             .descendants()
             .find(|n| n.kind() == K::FieldList)

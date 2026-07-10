@@ -1,0 +1,31 @@
+source_len: 58
+SourceFile 0..58
+  FnDecl 0..57
+    KwFn 0..2 "fn"
+    Ident 3..6 "add"
+    LParen 6..7 "("
+    Param 7..16
+      Ident 7..11 "left"
+      Colon 11..12 ":"
+      PathType 13..16
+        Ident 13..16 "i64"
+    Comma 16..17 ","
+    Param 17..28
+      Ident 18..23 "right"
+      Colon 23..24 ":"
+      PathType 25..28
+        Ident 25..28 "i64"
+    RParen 28..29 ")"
+    Arrow 30..32 "->"
+    PathType 33..36
+      Ident 33..36 "i64"
+    Block 36..57
+      LBrace 37..38 "{"
+      ExprStmt 43..55
+        BinExpr 43..55
+          PathExpr 43..47
+            Ident 43..47 "left"
+          Plus 48..49 "+"
+          PathExpr 50..55
+            Ident 50..55 "right"
+      RBrace 56..57 "}"

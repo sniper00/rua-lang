@@ -1,0 +1,1 @@
+<golden>/compile-fail/name_duplicate_struct_field.rua: duplicate field `x` in struct `Point`

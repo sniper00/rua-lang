@@ -1,0 +1,22 @@
+/// A point in integer space.
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Mode {
+    Fast,
+    Safe,
+}
+
+trait Named {
+    fn name(&self) -> String;
+}
+
+impl Named for Point {
+    fn name(&self) -> String { "point" }
+}
+
+mod utility {
+    pub fn origin() -> Point { Point { x: 0, y: 0 } }
+}

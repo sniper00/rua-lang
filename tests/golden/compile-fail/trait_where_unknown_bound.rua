@@ -1,0 +1,1 @@
+fn inspect<T>(value: T) where T: MissingTrait {}

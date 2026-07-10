@@ -8,6 +8,16 @@
 //! Current scope: P0 + core of P1 (functions, `let`/`let mut`, arithmetic /
 //! logic / comparison with precedence, `if`/`else` as expression and statement,
 //! `while`/`loop`/`break`/`continue`, blocks, calls, `return`).
+//!
+//! # API stability
+//!
+//! The IDE-facing functions [`check_diags`], [`member_index`], [`type_members`],
+//! [`binding_types`], [`member_index_path`], [`member_index_src`],
+//! [`member_completion`], and [`member_completion_src`] are transition-only
+//! compatibility bridges for the current `rua-syntax` and `rua-lsp` crates.
+//! They are not stable compiler APIs and must not gain new consumers. Phase 5
+//! moves their queries into `rua-analysis`; Phase 6 then removes or privatizes
+//! these facades as part of narrowing `ruac`'s public API.
 
 pub mod ast;
 pub mod check;
@@ -72,6 +82,12 @@ pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), Str
 /// as [`Diag::bare`] — they carry the message but no span. When the parser is
 /// enhanced to emit structured errors with byte offsets (I2), those will flow
 /// through as properly-positioned diagnostics.
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current LSP diagnostics path. New IDE code
+/// must use the planned `rua-analysis` diagnostics query instead of extending
+/// this single-file compiler entry point. Phase 5 removes its IDE consumers.
 pub fn check_diags(src: &str) -> (Vec<Diag>, Vec<String>) {
     let mut diags: Vec<Diag> = Vec::new();
 
@@ -111,6 +127,12 @@ pub fn check_diags(src: &str) -> (Vec<Diag>, Vec<String>) {
 /// accesses whose receiver type is defined in another file resolve to nothing
 /// (returned index simply omits them — zero false positives). Parse/resolve
 /// errors yield whatever partial index type-checking could still produce.
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current `rua-syntax` analysis cache. New IDE
+/// code must use the planned `rua-analysis` type-inference/member query. Phase 5
+/// removes this bridge from the IDE path.
 pub fn member_index(src: &str) -> typeck::MemberIndex {
     let mut program = match parser::parse(src) {
         Ok(p) => p,
@@ -125,6 +147,12 @@ pub fn member_index(src: &str) -> typeck::MemberIndex {
 /// Type-check in-memory `src` (single-file view) and return the member-completion
 /// catalog (`type name → fields + methods`). Mirrors [`member_index`]; file
 /// modules are not loaded — cross-file completion uses the `_src` variant (C1).
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current member-completion implementation. New
+/// IDE code must use the planned `rua-analysis` completion queries. Phase 5
+/// removes this bridge from the IDE path.
 pub fn type_members(src: &str) -> typeck::TypeMembers {
     let mut program = match parser::parse(src) {
         Ok(p) => p,
@@ -141,6 +169,12 @@ pub fn type_members(src: &str) -> typeck::TypeMembers {
 /// LSP local-variable hover. Mirrors [`member_index`]; file modules are not
 /// loaded (locals are always resolved within their own file, so file id 0
 /// matches the LSP's single-file view).
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current local-hover implementation. New IDE
+/// code must use the planned `rua-analysis` body-inference query. Phase 5
+/// removes this bridge from the IDE path.
 pub fn binding_types(src: &str) -> typeck::BindingTypes {
     let mut program = match parser::parse(src) {
         Ok(p) => p,
@@ -162,6 +196,12 @@ pub fn binding_types(src: &str) -> typeck::BindingTypes {
 /// Parse / resolve / type errors are tolerated: whatever partial index could be
 /// produced is returned (never panics, never hard-errors), so the LSP degrades
 /// gracefully while the user is mid-edit.
+///
+/// # Transition-only
+///
+/// Compatibility bridge for path-based member lookup. It is limited to disk
+/// state and must not become a workspace API. Phase 5 replaces it with
+/// `rua-analysis` queries backed by the VFS and open buffers.
 pub fn member_index_path(path: &Path) -> (typeck::MemberIndex, Vec<String>) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -180,6 +220,12 @@ pub fn member_index_path(path: &Path) -> (typeck::MemberIndex, Vec<String>) {
 ///
 /// Limitation: unsaved edits in **child** files are not reflected (they load from
 /// disk). File id 0 is `root_path`.
+///
+/// # Transition-only
+///
+/// Compatibility bridge for cross-file member lookup. New IDE code must use
+/// the planned VFS-backed `rua-analysis` query, which sees all open buffers.
+/// Phase 5 removes this bridge from the IDE path.
 pub fn member_index_src(root_src: &str, root_path: &Path) -> (typeck::MemberIndex, Vec<String>) {
     let mut program = match parser::parse(root_src) {
         Ok(p) => p,
@@ -194,6 +240,12 @@ pub fn member_index_src(root_src: &str, root_path: &Path) -> (typeck::MemberInde
 
 /// Single-file member completion: `(catalog, receiver index)`. Mirrors
 /// [`member_index`]; file modules not loaded (use [`member_completion_src`]).
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current single-file completion path. New IDE
+/// code must use the planned `rua-analysis` completion query. Phase 5 removes
+/// this bridge from the IDE path.
 pub fn member_completion(src: &str) -> (typeck::TypeMembers, typeck::ReceiverIndex) {
     let mut program = match parser::parse(src) {
         Ok(p) => p,
@@ -213,6 +265,12 @@ pub fn member_completion(src: &str) -> (typeck::TypeMembers, typeck::ReceiverInd
 /// Multi-file member completion: root text from the buffer, `mod` children
 /// from disk. Mirrors [`member_index_src`]. Returns the file registry too so the
 /// caller can map receiver `recv_file` ids (0 = root) if needed.
+///
+/// # Transition-only
+///
+/// Compatibility bridge for the current cross-file completion path. New IDE
+/// code must use the planned VFS-backed `rua-analysis` completion query. Phase 5
+/// removes this bridge from the IDE path.
 pub fn member_completion_src(
     root_src: &str,
     root_path: &std::path::Path,

@@ -1,0 +1,24 @@
+source_len: 58
+SourceFile 0..58
+  UseDecl 0..43
+    KwUse 0..3 "use"
+    Ident 4..9 "outer"
+    ColonColon 9..11 "::"
+    Ident 11..16 "inner"
+    ColonColon 16..18 "::"
+    LBrace 18..19 "{"
+    Ident 19..24 "first"
+    Comma 24..25 ","
+    Ident 26..32 "second"
+    KwAs 33..35 "as"
+    Ident 36..41 "other"
+    RBrace 41..42 "}"
+    Semi 42..43 ";"
+  FnDecl 45..57
+    KwFn 45..47 "fn"
+    Ident 48..52 "main"
+    LParen 52..53 "("
+    RParen 53..54 ")"
+    Block 54..57
+      LBrace 55..56 "{"
+      RBrace 56..57 "}"

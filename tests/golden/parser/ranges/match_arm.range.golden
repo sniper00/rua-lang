@@ -1,0 +1,56 @@
+source_len: 127
+SourceFile 0..127
+  FnDecl 0..126
+    KwFn 0..2 "fn"
+    Ident 3..11 "classify"
+    LParen 11..12 "("
+    Param 12..22
+      Ident 12..17 "value"
+      Colon 17..18 ":"
+      PathType 19..22
+        Ident 19..22 "i64"
+    RParen 22..23 ")"
+    Arrow 24..26 "->"
+    PathType 27..30
+      Ident 27..30 "i64"
+    Block 30..126
+      LBrace 31..32 "{"
+      ExprStmt 37..124
+        MatchExpr 37..124
+          KwMatch 37..42 "match"
+          PathExpr 43..48
+            Ident 43..48 "value"
+          LBrace 49..50 "{"
+          MatchArm 50..67
+            Pattern 59..60
+              Int 59..60 "0"
+            FatArrow 61..63 "=>"
+            LiteralExpr 64..66
+              Int 64..66 "10"
+            Comma 66..67 ","
+          MatchArm 67..101
+            Pattern 76..77
+              Int 76..77 "1"
+            Pipe 78..79 "|"
+            Pattern 80..81
+              Int 80..81 "2"
+            KwIf 82..84 "if"
+            BinExpr 85..94
+              PathExpr 85..90
+                Ident 85..90 "value"
+              Gt 91..92 ">"
+              LiteralExpr 93..94
+                Int 93..94 "0"
+            FatArrow 95..97 "=>"
+            LiteralExpr 98..100
+              Int 98..100 "20"
+            Comma 100..101 ","
+          MatchArm 101..118
+            Pattern 110..111
+              Ident 110..111 "_"
+            FatArrow 112..114 "=>"
+            LiteralExpr 115..117
+              Int 115..117 "30"
+            Comma 117..118 ","
+          RBrace 123..124 "}"
+      RBrace 125..126 "}"

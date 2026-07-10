@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_let_annotation_mismatch.rua:2: `enabled` annotated as `bool` but initialized with `i64`

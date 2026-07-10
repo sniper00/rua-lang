@@ -1,0 +1,7 @@
+pub struct User {
+    pub id: i64,
+}
+
+extern "lua" {
+    pub fn default_user() -> User;
+}

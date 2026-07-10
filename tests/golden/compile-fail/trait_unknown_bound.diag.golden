@@ -1,0 +1,1 @@
+<golden>/compile-fail/trait_unknown_bound.rua: unknown trait `MissingTrait` in bound `T: MissingTrait`

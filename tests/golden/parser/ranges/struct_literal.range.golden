@@ -1,0 +1,46 @@
+source_len: 83
+SourceFile 0..83
+  StructDecl 0..31
+    KwStruct 0..6 "struct"
+    Ident 7..12 "Point"
+    FieldList 12..31
+      LBrace 13..14 "{"
+      FieldDecl 14..21
+        Ident 15..16 "x"
+        Colon 16..17 ":"
+        PathType 18..21
+          Ident 18..21 "i64"
+      Comma 21..22 ","
+      FieldDecl 22..29
+        Ident 23..24 "y"
+        Colon 24..25 ":"
+        PathType 26..29
+          Ident 26..29 "i64"
+      RBrace 30..31 "}"
+  FnDecl 33..82
+    KwFn 33..35 "fn"
+    Ident 36..42 "origin"
+    LParen 42..43 "("
+    RParen 43..44 ")"
+    Arrow 45..47 "->"
+    PathType 48..53
+      Ident 48..53 "Point"
+    Block 53..82
+      LBrace 54..55 "{"
+      ExprStmt 60..80
+        StructLitExpr 60..80
+          Ident 60..65 "Point"
+          LBrace 66..67 "{"
+          FieldInit 67..72
+            Ident 68..69 "x"
+            Colon 69..70 ":"
+            LiteralExpr 71..72
+              Int 71..72 "0"
+          Comma 72..73 ","
+          FieldInit 73..78
+            Ident 74..75 "y"
+            Colon 75..76 ":"
+            LiteralExpr 77..78
+              Int 77..78 "0"
+          RBrace 79..80 "}"
+      RBrace 81..82 "}"

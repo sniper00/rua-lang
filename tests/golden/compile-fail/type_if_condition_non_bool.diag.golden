@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_if_condition_non_bool.rua:2: `if` condition must be `bool`, found `i64`

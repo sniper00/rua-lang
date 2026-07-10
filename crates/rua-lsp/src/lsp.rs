@@ -24,8 +24,7 @@ use lsp_types::{
     WorkspaceEdit,
 };
 
-use ruac::typeck::{CompletionMember, MemberKind};
-use rua_syntax::analysis::LocalCompletion;
+use rua_syntax::analysis::{CompletionMember, LocalCompletion, MemberKind};
 use rua_syntax::symbols::{Symbol, SymbolKind};
 use rua_syntax::workspace::{DiskLoader, Workspace, normalize_path};
 use rua_syntax::LineIndex;
@@ -1217,9 +1216,9 @@ mod tests {
     use lsp_types::{CompletionItemKind, Documentation, InsertTextFormat, Position};
     use std::path::PathBuf;
     use ruac::diag::Diag;
-    use ruac::typeck::{CompletionMember, MemberKind};
+    use rua_syntax::analysis::{CompletionMember, MemberKind};
     use rua_syntax::symbols::{SymbolKind, collect_symbols};
-    use rua_syntax::{AstNode, LineIndex, ast::SourceFile, parse};
+    use rua_syntax::{LineIndex, ast::SourceFile, parse_source_file};
 
     fn range_of(d: &Diag, src: &str) -> (Position, Position) {
         let li = LineIndex::new(src);
@@ -1368,7 +1367,7 @@ mod tests {
     // --- C3/C4 tests --------------------------------------------------------
 
     fn src_file(src: &str) -> SourceFile {
-        SourceFile::cast(parse(src).green).expect("CST parser always produces SourceFile root")
+        parse_source_file(src).tree
     }
 
     #[test]

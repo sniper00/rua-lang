@@ -1,0 +1,4 @@
+pub struct Point {
+    pub x: i64,
+    y: i64,
+}

@@ -1,0 +1,13 @@
+trait Show {
+    fn show(&self) -> String;
+}
+
+trait Container {
+    fn store<T: Show>(&self, value: T);
+}
+
+struct Plain {}
+
+fn store_plain<T: Container>(container: T, value: Plain) {
+    container.store(value);
+}

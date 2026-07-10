@@ -1,0 +1,4 @@
+query: point.
+completion: length Method "fn length(&self) -> i64"
+completion: x Field "x: i64"
+completion: y Field "y: i64"

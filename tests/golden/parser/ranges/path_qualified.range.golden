@@ -1,0 +1,20 @@
+source_len: 45
+SourceFile 0..45
+  FnDecl 0..44
+    KwFn 0..2 "fn"
+    Ident 3..7 "read"
+    LParen 7..8 "("
+    RParen 8..9 ")"
+    Arrow 10..12 "->"
+    PathType 13..16
+      Ident 13..16 "i64"
+    Block 16..44
+      LBrace 17..18 "{"
+      ExprStmt 23..42
+        PathExpr 23..42
+          Ident 23..28 "outer"
+          ColonColon 28..30 "::"
+          Ident 30..35 "inner"
+          ColonColon 35..37 "::"
+          Ident 37..42 "value"
+      RBrace 43..44 "}"

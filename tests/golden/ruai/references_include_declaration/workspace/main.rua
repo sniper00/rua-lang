@@ -1,0 +1,9 @@
+mod moon;
+
+fn first() {
+    moon::log("first");
+}
+
+fn second() {
+    moon::log("second");
+}

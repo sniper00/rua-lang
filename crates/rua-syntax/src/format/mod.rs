@@ -4,7 +4,7 @@
 //! (not the compiler's owned AST), so comments and layout are available. The CST
 //! is lowered to a [`doc::Doc`] IR and printed within a target width.
 //!
-//! Pipeline: `parse(src)` → CST → [`lower`] → [`doc::Doc`] → [`doc::print`].
+//! Pipeline: `parse_source_file(src)` → CST → [`lower`] → [`doc::Doc`] → [`doc::print`].
 
 pub mod comment;
 pub mod doc;
@@ -21,13 +21,11 @@ pub fn format_str(src: &str) -> String {
 
 /// Format with an explicit target line width (mainly for tests).
 pub fn format_str_width(src: &str, width: usize) -> String {
-    let parsed = crate::parse(src);
+    let parsed = crate::parse_source_file(src);
     if !parsed.errors.is_empty() {
         return src.to_string();
     }
-    let Some(file) = crate::ast::SourceFile::cast_root(parsed.green) else {
-        return src.to_string();
-    };
+    let file = parsed.tree;
     let doc = lower::lower_source_file(&file);
     let mut out = doc::print(&doc, width);
     // Source files end with exactly one trailing newline.

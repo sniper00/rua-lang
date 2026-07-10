@@ -1,0 +1,4 @@
+extern "lua" {
+    fn host_log(message: String);
+    fn host_format(template: String, ...) -> String;
+}

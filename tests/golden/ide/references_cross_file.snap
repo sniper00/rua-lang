@@ -1,0 +1,4 @@
+query: geometry::area
+reference: geometry.rua 7..11 "area"
+reference: main.rua 49..53 "area"
+reference: main.rua 95..99 "area"

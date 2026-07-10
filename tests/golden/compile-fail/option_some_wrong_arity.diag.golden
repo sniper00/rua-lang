@@ -1,0 +1,1 @@
+<golden>/compile-fail/option_some_wrong_arity.rua:2: `Some` takes exactly 1 argument

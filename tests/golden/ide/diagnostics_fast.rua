@@ -1,0 +1,7 @@
+fn enabled() -> bool {
+    1
+}
+
+fn main() {
+    if 1 {}
+}

@@ -1,0 +1,1 @@
+<golden>/compile-fail/pattern_struct_as_tuple.rua:5: struct variant `Message::Move` must be matched with `{ .. }`

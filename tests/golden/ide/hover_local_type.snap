@@ -1,0 +1,4 @@
+query: total
+target: 24..29 Local
+text: "total"
+detail: "let mut total: i64"
