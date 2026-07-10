@@ -4,7 +4,9 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use rua_syntax::{Parse, ast::SourceFile, parse_source_file};
 
-use crate::vfs::{Change, FileId, Vfs};
+use crate::vfs::{
+    Change, FileId, FileKind, SourceRoot, SourceRootChange, SourceRootId, SourceRootKind, Vfs,
+};
 
 /// In-memory analysis inputs and their derived per-file data.
 #[derive(Clone, Debug, Default)]
@@ -29,6 +31,16 @@ impl BaseDb {
     }
 
     pub fn apply_change(&mut self, change: Change) {
+        for source_root_change in change.source_root_changes() {
+            let SourceRootChange::Remove { source_root_id } = source_root_change else {
+                continue;
+            };
+            if let Some(source_root) = self.vfs.source_root(*source_root_id) {
+                for file_id in source_root.files() {
+                    self.parse_cache.get_mut().remove(&file_id);
+                }
+            }
+        }
         for file_change in change.file_changes() {
             self.parse_cache.get_mut().remove(&file_change.file_id());
         }
@@ -37,6 +49,28 @@ impl BaseDb {
 
     pub fn file_text(&self, file_id: FileId) -> Option<Arc<str>> {
         self.vfs.file_text(file_id)
+    }
+
+    pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {
+        self.vfs.file_kind(file_id)
+    }
+
+    pub fn source_root_id(&self, file_id: FileId) -> Option<SourceRootId> {
+        self.vfs.source_root_id(file_id)
+    }
+
+    pub fn source_root(&self, source_root_id: SourceRootId) -> Option<&SourceRoot> {
+        self.vfs.source_root(source_root_id)
+    }
+
+    pub fn source_root_kind(&self, file_id: FileId) -> Option<SourceRootKind> {
+        self.source_root_id(file_id)
+            .and_then(|source_root_id| self.source_root(source_root_id))
+            .map(SourceRoot::kind)
+    }
+
+    pub fn is_file_read_only(&self, file_id: FileId) -> bool {
+        self.vfs.is_file_read_only(file_id)
     }
 
     // Rowan red nodes are thread-local; Arc provides shared cache identity for
