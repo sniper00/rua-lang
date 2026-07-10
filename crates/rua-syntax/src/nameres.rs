@@ -44,8 +44,8 @@
 use rowan::TextSize;
 
 use crate::ast::{
-    AstNode, Block, FnDecl, ForStmt, IfExpr, Item, LetStmt, MatchArm, ModDecl, Named, Pattern,
-    PatternKind, SourceFile, Stmt, WhileStmt,
+    AstNode, Block, ClosureExpr, FnDecl, ForStmt, IfExpr, Item, LetStmt, MatchArm, ModDecl, Named,
+    Pattern, PatternKind, SourceFile, Stmt, WhileStmt,
 };
 use crate::kind::SyntaxKind;
 use crate::symbols::Symbol;
@@ -469,6 +469,26 @@ pub fn locals_in_scope(file: &SourceFile, offset: usize) -> Vec<(String, (usize,
                     }
                 }
             }
+            SyntaxKind::ClosureExpr => {
+                if let Some(closure) = ClosureExpr::cast(node.clone())
+                    && let Some(body) = closure.body()
+                    && offset_in_range(offset, body.syntax())
+                {
+                    for param in closure.params() {
+                        if let Some(name) = param.name() {
+                            let range = name.text_range();
+                            push(
+                                name.text().to_string(),
+                                (
+                                    usize::from(range.start()),
+                                    usize::from(range.end()),
+                                ),
+                                &mut out,
+                            );
+                        }
+                    }
+                }
+            }
             SyntaxKind::ForExpr => {
                 if let Some(f) = ForStmt::cast(node.clone())
                     && let Some(body) = f.body()
@@ -559,6 +579,11 @@ fn resolve_local(file: &SourceFile, offset: usize, name: &str) -> Option<Resolut
             }
             SyntaxKind::FnDecl => {
                 if let Some(res) = find_in_fn_params(&node, name) {
+                    return Some(res);
+                }
+            }
+            SyntaxKind::ClosureExpr => {
+                if let Some(res) = find_in_closure_params(&node, offset, name) {
                     return Some(res);
                 }
             }
@@ -709,6 +734,32 @@ fn find_in_fn_params(fn_node: &SyntaxNode, name: &str) -> Option<Resolution> {
         }
     }
     None
+}
+
+fn find_in_closure_params(
+    closure_node: &SyntaxNode,
+    use_offset: usize,
+    name: &str,
+) -> Option<Resolution> {
+    let closure = ClosureExpr::cast(closure_node.clone())?;
+    let body = closure.body()?;
+    if !offset_in_range(use_offset, body.syntax()) {
+        return None;
+    }
+    closure.params().find_map(|param| {
+        let token = param.name()?;
+        (token.text() == name).then(|| {
+            let range = token.text_range();
+            Resolution {
+                kind: RefKind::Local,
+                target_range: (
+                    usize::from(range.start()),
+                    usize::from(range.end()),
+                ),
+                detail: format!("local {name}"),
+            }
+        })
+    })
 }
 
 /// Check the `for` loop variable. Visible only inside the body.

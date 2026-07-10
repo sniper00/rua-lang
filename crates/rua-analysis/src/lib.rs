@@ -13,11 +13,14 @@ pub mod semantic;
 pub mod vfs;
 
 pub use db::BaseDb;
-pub use diagnostic::Diagnostic;
+pub use diagnostic::{Diagnostic, DiagnosticOrigin, reconcile_diagnostics};
 pub use hir::{
     DefId, DefKind, DefMap, Definition, Import, ItemKind, ItemTree, ItemTreeItem, ModuleData,
     ModuleId, ModuleKind, TextRange, Visibility,
 };
-pub use ide::{Analysis, AnalysisHost, DocumentSymbol, WorkspaceSymbol};
+pub use ide::{
+    Analysis, AnalysisHost, ClosureParameterInfo, DocumentSymbol, SemanticToken,
+    SemanticTokenKind, WorkspaceSymbol,
+};
 pub use semantic::{FilePosition, Semantics};
 pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};

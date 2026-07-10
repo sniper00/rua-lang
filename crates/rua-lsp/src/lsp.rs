@@ -15,17 +15,24 @@ use lsp_types::notification::{
     DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
     Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as _};
+use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionResponse, Diagnostic,
     DiagnosticSeverity, DocumentFormattingParams, DocumentSymbol, DocumentSymbolResponse,
     Documentation, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
     InitializeParams, InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, Position,
     PrepareRenameResponse, PublishDiagnosticsParams, Range, RenameOptions, ServerCapabilities,
-    SymbolKind as LspSymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
-    WorkspaceEdit,
+    SemanticToken as LspSemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensResult,
+    SemanticTokensServerCapabilities, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 
+use rua_analysis::{
+    AnalysisHost as CoreAnalysisHost, Change as CoreChange, Diagnostic as CoreDiagnostic,
+    DiagnosticOrigin, FileId as CoreFileId, SemanticTokenKind, TextRange as CoreTextRange,
+    reconcile_diagnostics,
+};
 use rua_syntax::analysis::{CompletionMember, LocalCompletion, MemberKind};
 use rua_syntax::symbols::{Symbol, SymbolKind};
 use rua_syntax::workspace::{DiskLoader, Workspace, normalize_path};
@@ -60,6 +67,14 @@ fn main() {
             trigger_characters: Some(vec![":".into(), ".".into()]),
             ..Default::default()
         }),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: semantic_token_legend(),
+                range: None,
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                ..SemanticTokensOptions::default()
+            },
+        )),
         ..ServerCapabilities::default()
     };
 
@@ -187,6 +202,7 @@ impl Server {
             References::METHOD => self.handle_references(req),
             Rename::METHOD => self.handle_rename(req),
             PrepareRenameRequest::METHOD => self.handle_prepare_rename(req),
+            SemanticTokensFullRequest::METHOD => self.handle_semantic_tokens(req),
             _ => {
                 let resp = Response::new_err(
                     req.id,
@@ -473,6 +489,30 @@ impl Server {
         let _ = self.connection.sender.send(Message::Response(resp));
     }
 
+    fn handle_semantic_tokens(&mut self, req: Request) {
+        let id = req.id.clone();
+        let (id, params) = match req.extract::<lsp_types::SemanticTokensParams>(
+            SemanticTokensFullRequest::METHOD,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let response = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid semantic-token params: {error:?}"),
+                );
+                let _ = self.connection.sender.send(Message::Response(response));
+                return;
+            }
+        };
+        let key = Self::doc_key(&params.text_document.uri);
+        let result = self.workspace.analysis_of(&key).map(|analysis| {
+            SemanticTokensResult::Tokens(semantic_tokens_for(analysis.text()))
+        });
+        let response = Response::new_ok(id, result);
+        let _ = self.connection.sender.send(Message::Response(response));
+    }
+
     // --- shared lookup helpers -----------------------------------------------
 
     /// True when `path` denotes the same file as document `key` under the
@@ -704,13 +744,10 @@ impl Server {
     fn publish_diagnostics(&mut self, uri: &Uri) {
         let key = Self::doc_key(uri);
         let lsp_diags: Vec<Diagnostic> = match self.workspace.analysis_of(&key) {
-            Some(a) => {
-                let (diags, _files) = ruac::check_diags(a.text());
-                diags
-                    .iter()
-                    .map(|d| diag_to_lsp(d, a.line_index(), a.text()))
-                    .collect()
-            }
+            Some(analysis) => reconciled_diagnostics_for(
+                analysis.text(),
+                analysis.line_index(),
+            ),
             None => return,
         };
         self.send_diagnostics(uri, &lsp_diags);
@@ -724,6 +761,132 @@ impl Server {
         };
         let not = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
         let _ = self.connection.sender.send(Message::Notification(not));
+    }
+}
+
+fn semantic_token_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::METHOD,
+            SemanticTokenType::OPERATOR,
+        ],
+        token_modifiers: vec![SemanticTokenModifier::DECLARATION],
+    }
+}
+
+fn semantic_tokens_for(source: &str) -> SemanticTokens {
+    let file_id = CoreFileId::new(0);
+    let mut change = CoreChange::new();
+    change.set_file_text(file_id, source);
+    let mut host = CoreAnalysisHost::new();
+    host.apply_change(change);
+    let analysis = host.analysis();
+    let line_index = LineIndex::new(source);
+    let mut previous_line = 0u32;
+    let mut previous_start = 0u32;
+    let mut data = Vec::new();
+
+    for token in analysis.semantic_tokens(file_id) {
+        let range = token.range();
+        let start = range.start() as usize;
+        let end = range.end() as usize;
+        let (line, column) = line_index.line_col(start, source);
+        let line = line as u32;
+        let column = column as u32;
+        let delta_line = line - previous_line;
+        let delta_start = if delta_line == 0 {
+            column - previous_start
+        } else {
+            column
+        };
+        let token_type = match token.kind() {
+            SemanticTokenKind::ClosureParameter => 0,
+            SemanticTokenKind::Method => 1,
+            SemanticTokenKind::RangeOperator => 2,
+        };
+        data.push(LspSemanticToken {
+            delta_line,
+            delta_start,
+            length: source[start..end].encode_utf16().count() as u32,
+            token_type,
+            token_modifiers_bitset: u32::from(token.is_declaration()),
+        });
+        previous_line = line;
+        previous_start = column;
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
+    }
+}
+
+fn reconciled_diagnostics_for(
+    source: &str,
+    line_index: &LineIndex,
+) -> Vec<Diagnostic> {
+    let file_id = CoreFileId::new(0);
+    let mut change = CoreChange::new();
+    change.set_file_text(file_id, source);
+    let mut host = CoreAnalysisHost::new();
+    host.apply_change(change);
+    let fast = host.analysis().diagnostics(file_id);
+
+    let (compiler_raw, _) = ruac::check_diags(source);
+    let compiler: Vec<_> = compiler_raw
+        .iter()
+        .map(|diagnostic| {
+            CoreDiagnostic::new(
+                file_id,
+                CoreTextRange::new(
+                    diagnostic.start as u32,
+                    (diagnostic.start + diagnostic.len) as u32,
+                ),
+                diagnostic.msg.clone(),
+                DiagnosticOrigin::Compiler,
+            )
+        })
+        .collect();
+    let reconciled = reconcile_diagnostics(fast, compiler);
+
+    if reconciled
+        .first()
+        .is_some_and(|diagnostic| diagnostic.origin() == DiagnosticOrigin::Compiler)
+    {
+        compiler_raw
+            .iter()
+            .map(|diagnostic| diag_to_lsp(diagnostic, line_index, source))
+            .collect()
+    } else {
+        reconciled
+            .iter()
+            .map(|diagnostic| core_diag_to_lsp(diagnostic, line_index, source))
+            .collect()
+    }
+}
+
+fn core_diag_to_lsp(
+    diagnostic: &CoreDiagnostic,
+    line_index: &LineIndex,
+    source: &str,
+) -> Diagnostic {
+    let range = diagnostic.range();
+    let (start_line, start_column) = line_index.line_col(range.start() as usize, source);
+    let (end_line, end_column) = line_index.line_col(range.end() as usize, source);
+    Diagnostic {
+        range: Range {
+            start: Position::new(start_line as u32, start_column as u32),
+            end: Position::new(end_line as u32, end_column as u32),
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        source: Some(match diagnostic.origin() {
+            DiagnosticOrigin::FastAnalysis => "rua-analysis",
+            DiagnosticOrigin::Compiler => "ruac",
+        }
+        .to_string()),
+        message: diagnostic.message().to_string(),
+        ..Diagnostic::default()
     }
 }
 
@@ -1252,8 +1415,8 @@ fn builtin_hover_detail(name: &str) -> Option<String> {
 mod tests {
     use super::{
         builtin_hover_detail, completion_items_at, completions_for, diag_to_lsp, format_edits,
-        member_to_item, percent_decode, range_from_bytes, to_lsp_symbol_kind, uri_to_path,
-        whole_document_range,
+        member_to_item, percent_decode, range_from_bytes, semantic_tokens_for,
+        reconciled_diagnostics_for, to_lsp_symbol_kind, uri_to_path, whole_document_range, Server,
     };
     use lsp_types::{CompletionItemKind, Documentation, InsertTextFormat, Position};
     use std::path::PathBuf;
@@ -1643,6 +1806,108 @@ mod tests {
         assert_eq!(stack.kind, Some(CompletionItemKind::VARIABLE));
         // Detail is the compiler's inferred type text.
         assert!(stack.detail.as_deref().unwrap().contains("stack"));
+    }
+
+    #[test]
+    fn closure_iterator_ide_completion_includes_typed_parameter() {
+        let src = concat!(
+            "fn main() {\n",
+            "  let values = vec![1, 2, 3];\n",
+            "  let count = values.iter().map(|item| item + 1).count();\n",
+            "}\n",
+        );
+        let offset = src.rfind("item +").unwrap();
+        let items = completion_items_at(src, offset);
+        let item = items.iter().find(|item| item.label == "item").unwrap();
+        assert_eq!(item.detail.as_deref(), Some("closure parameter item: i64"));
+    }
+
+    #[test]
+    fn closure_iterator_ide_semantic_tokens_cover_params_methods_and_range() {
+        let src = "fn main() { (0..3).map(|value| value + 1).filter(|item| item > 1).count(); }";
+        let tokens = semantic_tokens_for(src);
+        let line_index = LineIndex::new(src);
+        let mut line = 0u32;
+        let mut column = 0u32;
+        let mut decoded = Vec::new();
+        for token in tokens.data {
+            line += token.delta_line;
+            column = if token.delta_line == 0 {
+                column + token.delta_start
+            } else {
+                token.delta_start
+            };
+            let start = line_index.offset(line as usize, column as usize, src);
+            let end = start + token.length as usize;
+            decoded.push((src[start..end].to_string(), token.token_type, token.token_modifiers_bitset));
+        }
+        for method in ["map", "filter", "count"] {
+            assert!(decoded.iter().any(|token| token.0 == method && token.1 == 1));
+        }
+        assert!(decoded.iter().any(|token| token.0 == ".." && token.1 == 2));
+        for parameter in ["value", "item"] {
+            assert!(decoded.iter().any(|token| {
+                token.0 == parameter && token.1 == 0 && token.2 == 1
+            }));
+            assert!(decoded.iter().any(|token| {
+                token.0 == parameter && token.1 == 0 && token.2 == 0
+            }));
+        }
+    }
+
+    #[test]
+    fn closure_iterator_ide_diagnostics_publish_compiler_parity_once() {
+        let src = concat!(
+            "fn main() {\n",
+            "  let values = vec![1, 2, 3];\n",
+            "  let count = values.iter().filter(|value| value + 1).count();\n",
+            "}\n",
+        );
+        let line_index = LineIndex::new(src);
+        let diagnostics = reconciled_diagnostics_for(src, &line_index);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].source.as_deref(), Some("ruac"));
+        assert_eq!(
+            diagnostics[0].message,
+            "iterator filter predicate must be `bool`, found `i64`"
+        );
+        assert_eq!(diagnostics[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn closure_iterator_ide_lsp_hover_goto_references_and_rename() {
+        let src = concat!(
+            "fn main() {\n",
+            "  let values = vec![1, 2, 3];\n",
+            "  let count = values.iter().map(|item| item + 1).count();\n",
+            "}\n",
+        );
+        let uri: lsp_types::Uri = "file:///tmp/rua-closure-iterator-ide.rua".parse().unwrap();
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        server.set_document(uri.clone(), src.to_string());
+        let use_offset = src.rfind("item +").unwrap();
+        let line_index = LineIndex::new(src);
+        let (line, column) = line_index.line_col(use_offset, src);
+        let position = Position::new(line as u32, column as u32);
+
+        let (_, detail) = server.hover_at_uri(&uri, position).expect("closure hover");
+        assert_eq!(detail, "closure parameter item: i64");
+        let (_, definition) = server
+            .definition_at_uri(&uri, position)
+            .expect("closure goto definition");
+        assert!(definition.start.character < position.character);
+        assert_eq!(
+            server
+                .references_at_uri(&uri, position, true)
+                .expect("closure references")
+                .len(),
+            2
+        );
+        let edit = server
+            .rename_at_uri(&uri, position, "element")
+            .expect("closure rename");
+        assert_eq!(edit.changes.unwrap().values().next().unwrap().len(), 2);
     }
 
     #[test]

@@ -497,6 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn closure_iterator_ide_resolves_types_completion_references_and_rename() {
+        let src = concat!(
+            "fn main() {\n",
+            "  let values = vec![1, 2, 3];\n",
+            "  let count = values.iter().map(|item| item + 1).count();\n",
+            "}\n",
+        );
+        let analysis = Analysis::new(src);
+        let definition = nth_word(src, "item", 0);
+        let use_site = nth_word(src, "item", 1);
+
+        let resolved = analysis.resolve_at(use_site).expect("closure parameter use");
+        assert_eq!(resolved.target_range.0, definition);
+        assert_eq!(resolved.detail, "closure parameter item: i64");
+
+        let locals = analysis.scope_locals(use_site);
+        assert!(locals.iter().any(|local| {
+            local.name == "item" && local.detail == "closure parameter item: i64"
+        }));
+        assert_eq!(analysis.references_at(use_site).len(), 2);
+        let edits = analysis.rename_edits(use_site, "element").expect("rename closure param");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.2 == "element"));
+    }
+
+    #[test]
     fn local_without_inferable_type_stays_plain() {
         // `foo()` is unresolved, so the binding type is Unknown → plain hover.
         let src = "fn main() { let z = foo(); let _ = z; }";

@@ -2,6 +2,7 @@
 //!
 //! Results exposed here remain independent of LSP protocol types.
 
+mod closure_iterator;
 mod symbol;
 
 use std::{rc::Rc, sync::Arc};
@@ -16,6 +17,9 @@ use crate::{
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
 
+pub use closure_iterator::{
+    ClosureParameterInfo, SemanticToken, SemanticTokenKind,
+};
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
 /// Mutable owner of the current analysis inputs.
@@ -52,9 +56,8 @@ impl Analysis {
         self.db.parse(file_id)
     }
 
-    /// Semantic diagnostics are introduced after the analysis skeleton.
-    pub fn diagnostics(&self, _file_id: FileId) -> Vec<Diagnostic> {
-        Vec::new()
+    pub fn diagnostics(&self, file_id: FileId) -> Vec<Diagnostic> {
+        crate::diagnostic::fast_diagnostics(&self.db, file_id)
     }
 
     pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
@@ -83,6 +86,14 @@ impl Analysis {
 
     pub fn workspace_symbols(&self, root_file: FileId, query: &str) -> Vec<WorkspaceSymbol> {
         symbol::workspace_symbols(&self.db.def_map(root_file), query)
+    }
+
+    pub fn closure_parameters(&self, file_id: FileId) -> Vec<ClosureParameterInfo> {
+        closure_iterator::closure_parameters(&self.db, file_id)
+    }
+
+    pub fn semantic_tokens(&self, file_id: FileId) -> Vec<SemanticToken> {
+        closure_iterator::semantic_tokens(&self.db, file_id)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

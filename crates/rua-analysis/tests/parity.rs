@@ -253,7 +253,7 @@ fn closure_type_parity_matches_rowan_parameter_ranges() {
         "  let scale = |value| value * factor;\n",
         "  let scaled = scale(14);\n",
         "  let add = |left: i64, right| -> i64 { left + right };\n",
-        "  let mapped = vec![1, 2].iter().map(|item| item + 1);\n",
+        "  let mapped_count = vec![1, 2].iter().map(|item| item + 1).count();\n",
         "  add(scaled, 8)\n",
         "}\n",
     );
