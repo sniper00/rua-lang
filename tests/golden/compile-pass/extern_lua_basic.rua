@@ -1,0 +1,7 @@
+extern "lua" {
+    fn print(message: String);
+}
+
+fn main() {
+    print("hello");
+}

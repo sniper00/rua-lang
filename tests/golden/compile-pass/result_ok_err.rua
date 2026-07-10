@@ -1,0 +1,7 @@
+fn success() -> Result<i64, String> {
+    Ok(5)
+}
+
+fn failure() -> Result<i64, String> {
+    Err("failed")
+}

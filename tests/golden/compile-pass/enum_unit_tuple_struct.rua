@@ -1,0 +1,17 @@
+enum Message {
+    Quit,
+    Number(i64),
+    Move { x: i64, y: i64 },
+}
+
+fn quit() -> Message {
+    Message::Quit
+}
+
+fn number() -> Message {
+    Message::Number(7)
+}
+
+fn movement() -> Message {
+    Message::Move { x: 1, y: 2 }
+}

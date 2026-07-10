@@ -1,0 +1,11 @@
+mod math {
+    pub fn value() -> i64 {
+        7
+    }
+}
+
+use math::value as answer;
+
+fn main() {
+    let value = answer();
+}

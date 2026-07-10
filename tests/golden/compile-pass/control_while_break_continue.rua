@@ -1,0 +1,13 @@
+fn count() -> i64 {
+    let mut value = 0;
+    while value < 10 {
+        value = value + 1;
+        if value == 3 {
+            continue;
+        }
+        if value == 5 {
+            break;
+        }
+    }
+    value
+}

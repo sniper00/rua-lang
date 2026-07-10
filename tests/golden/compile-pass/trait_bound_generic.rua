@@ -1,0 +1,19 @@
+trait Named {
+    fn name(&self) -> String;
+}
+
+struct Item {}
+
+impl Named for Item {
+    fn name(&self) -> String {
+        "item"
+    }
+}
+
+fn label<T: Named>(value: T) -> String {
+    value.name()
+}
+
+fn main() {
+    let text = label(Item {});
+}

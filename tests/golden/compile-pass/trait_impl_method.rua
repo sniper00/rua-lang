@@ -1,0 +1,15 @@
+trait Named {
+    fn name(&self) -> String;
+}
+
+struct Item {}
+
+impl Named for Item {
+    fn name(&self) -> String {
+        "item"
+    }
+}
+
+fn read(item: Item) -> String {
+    item.name()
+}

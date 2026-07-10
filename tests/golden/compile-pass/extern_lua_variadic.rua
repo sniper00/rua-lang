@@ -1,0 +1,7 @@
+extern "lua" {
+    fn host_format(template: String, ...) -> String;
+}
+
+fn main() {
+    let text = host_format("{} {}", 1, 2);
+}

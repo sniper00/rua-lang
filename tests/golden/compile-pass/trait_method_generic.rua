@@ -1,0 +1,14 @@
+struct Wrapper {
+    marker: i64,
+}
+
+impl Wrapper {
+    fn wrap<T>(&self, value: T) -> T {
+        value
+    }
+}
+
+fn main() {
+    let wrapper = Wrapper { marker: 0 };
+    let value: i64 = wrapper.wrap(7);
+}

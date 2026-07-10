@@ -1,0 +1,3 @@
+fn unary_bool(n: i64) -> bool {
+    -n < 0 && !false
+}

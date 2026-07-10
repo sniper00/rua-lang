@@ -1,0 +1,7 @@
+fn main() {
+    let mut scores = HashMap::new();
+    scores.insert("alice", 10);
+    let score = scores.get("alice");
+    let present = scores.contains_key("alice");
+    let size = scores.len();
+}

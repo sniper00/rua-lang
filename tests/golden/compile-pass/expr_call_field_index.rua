@@ -1,0 +1,11 @@
+struct Item {
+    value: i64,
+}
+
+fn id(value: i64) -> i64 {
+    value
+}
+
+fn read(item: Item, values: Vec<i64>) -> i64 {
+    id(item.value) + values[0]
+}

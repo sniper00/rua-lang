@@ -1,0 +1,5 @@
+fn increment() -> i64 {
+    let mut value = 1;
+    value = value + 1;
+    value
+}

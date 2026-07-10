@@ -1,0 +1,14 @@
+struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    fn increment(&mut self) {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() {
+    let mut counter = Counter { value: 0 };
+    counter.increment();
+}

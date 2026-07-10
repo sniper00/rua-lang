@@ -1,0 +1,11 @@
+mod outer {
+    pub mod inner {
+        pub fn value() -> i64 {
+            7
+        }
+    }
+}
+
+fn main() {
+    let value = outer::inner::value();
+}

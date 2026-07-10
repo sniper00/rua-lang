@@ -1,0 +1,7 @@
+fn block_tail() -> i64 {
+    let value = {
+        let base = 2;
+        base + 3
+    };
+    value
+}

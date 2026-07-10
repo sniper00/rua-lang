@@ -1,0 +1,4 @@
+fn absolute(value: i64) -> i64 {
+    let result = if value < 0 { -value } else { value };
+    result
+}

@@ -1,0 +1,7 @@
+fn present() -> Option<i64> {
+    Some(5)
+}
+
+fn absent() -> Option<i64> {
+    None
+}

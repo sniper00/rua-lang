@@ -1,0 +1,8 @@
+fn load() -> Result<i64, String> {
+    Ok(5)
+}
+
+fn use_value() -> Result<i64, String> {
+    let value = load()?;
+    Ok(value + 1)
+}

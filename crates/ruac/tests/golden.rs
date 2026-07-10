@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden \
                               update_goldens -- --ignored --exact";
+const MIN_COMPILE_PASS_CASES: usize = 30;
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",
     "compile-fail",
@@ -152,7 +153,14 @@ fn assert_or_update(
 
 fn run_compile_pass(update: bool) -> Result<(), String> {
     let root = golden_root().join("compile-pass");
-    for source in discover_rua(&root)? {
+    let sources = discover_rua(&root)?;
+    if sources.len() < MIN_COMPILE_PASS_CASES {
+        return Err(format!(
+            "compile-pass corpus has {} cases; expected at least {MIN_COMPILE_PASS_CASES}",
+            sources.len()
+        ));
+    }
+    for source in sources {
         let actual = ruac::compile_path(&source).map_err(|error| {
             format!(
                 "compile-pass case {} failed:\n{error}",

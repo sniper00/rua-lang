@@ -1,0 +1,9 @@
+mod api {
+    pub fn visible() -> i64 {
+        1
+    }
+}
+
+fn main() {
+    let value = api::visible();
+}

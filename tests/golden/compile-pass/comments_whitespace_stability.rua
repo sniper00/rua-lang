@@ -1,0 +1,6 @@
+// Leading line comment.
+/* Leading block comment. */
+fn stable( value: i64 ) -> i64 {
+    // The compiler ignores trivia while preserving behavior.
+    value + 1
+}

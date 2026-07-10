@@ -1,0 +1,11 @@
+struct Choice {
+    value: i64,
+}
+
+fn choose(flag: bool) -> Choice {
+    if flag {
+        Choice { value: 1 }
+    } else {
+        Choice { value: 2 }
+    }
+}
