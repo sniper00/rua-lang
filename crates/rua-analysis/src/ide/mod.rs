@@ -9,7 +9,7 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     diagnostic::Diagnostic,
-    hir::{ItemTree, module_resolution::resolve_module_file},
+    hir::{DefMap, ItemTree, module_resolution::resolve_module_file},
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
 
@@ -62,6 +62,10 @@ impl Analysis {
 
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
         self.db.file_path(file_id)
+    }
+
+    pub fn def_map(&self, root_file: FileId) -> Arc<DefMap> {
+        self.db.def_map(root_file)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

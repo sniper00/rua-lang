@@ -5,7 +5,7 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use rua_syntax::{Parse, ast::SourceFile, parse_source_file};
 
 use crate::{
-    hir::ItemTree,
+    hir::{DefMap, ItemTree},
     vfs::{
         Change, FileId, FileKind, SourceRoot, SourceRootChange, SourceRootId, SourceRootKind, Vfs,
         VfsPath,
@@ -18,6 +18,7 @@ pub struct BaseDb {
     vfs: Vfs,
     parse_cache: RefCell<HashMap<FileId, Arc<Parse<SourceFile>>>>,
     item_tree_cache: RefCell<HashMap<FileId, Arc<ItemTree>>>,
+    def_map_cache: RefCell<HashMap<FileId, Arc<DefMap>>>,
 }
 
 impl BaseDb {
@@ -98,6 +99,7 @@ impl BaseDb {
     fn invalidate_file(&mut self, file_id: FileId) {
         self.parse_cache.get_mut().remove(&file_id);
         self.item_tree_cache.get_mut().remove(&file_id);
+        self.def_map_cache.get_mut().clear();
     }
 
     // Rowan red nodes are thread-local; Arc provides shared cache identity for
@@ -128,6 +130,18 @@ impl BaseDb {
             .insert(file_id, item_tree.clone());
         item_tree
     }
+
+    pub fn def_map(&self, root_file: FileId) -> Arc<DefMap> {
+        if let Some(def_map) = self.def_map_cache.borrow().get(&root_file).cloned() {
+            return def_map;
+        }
+
+        let def_map = Arc::new(DefMap::build(self, root_file));
+        self.def_map_cache
+            .borrow_mut()
+            .insert(root_file, def_map.clone());
+        def_map
+    }
 }
 
 #[cfg(test)]
@@ -135,7 +149,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::BaseDb;
-    use crate::vfs::FileId;
+    use crate::vfs::{Change, FileId, FileKind, SourceRootId, SourceRootKind};
 
     #[test]
     fn parse_cache_reads_current_vfs_text() {
@@ -219,5 +233,49 @@ mod tests {
         assert!(!Arc::ptr_eq(&changed_before, &changed_after));
         assert!(Arc::ptr_eq(&unchanged_before, &unchanged_after));
         assert_eq!(changed_after.items()[0].name(), "after");
+    }
+
+    #[test]
+    fn def_map_cache_invalidates_when_a_module_dependency_changes() {
+        let root_id = SourceRootId::new(0);
+        let main_id = FileId::new(0);
+        let child_id = FileId::new(1);
+        let mut initial = Change::new();
+        initial.set_source_root(root_id, SourceRootKind::Workspace);
+        initial.set_file_with_path(
+            main_id,
+            root_id,
+            FileKind::Source,
+            "src/main.rua",
+            "mod child;",
+        );
+        initial.set_file_with_path(
+            child_id,
+            root_id,
+            FileKind::Source,
+            "src/child.rua",
+            "fn before() {}",
+        );
+        let mut db = BaseDb::new();
+        db.apply_change(initial);
+        let before = db.def_map(main_id);
+
+        assert!(Arc::ptr_eq(&before, &db.def_map(main_id)));
+        db.set_file_text(child_id, "fn after() {}");
+        let after = db.def_map(main_id);
+        let child_before = before
+            .resolve_name(before.root(), "child")
+            .and_then(|definition| definition.target_module())
+            .expect("child module before update");
+        let child_after = after
+            .resolve_name(after.root(), "child")
+            .and_then(|definition| definition.target_module())
+            .expect("child module after update");
+
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert!(before.resolve_name(child_before, "before").is_some());
+        assert!(before.resolve_name(child_before, "after").is_none());
+        assert!(after.resolve_name(child_after, "before").is_none());
+        assert!(after.resolve_name(child_after, "after").is_some());
     }
 }

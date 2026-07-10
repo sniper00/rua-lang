@@ -45,6 +45,12 @@ pub enum ItemKind {
     TypeAlias,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModuleKind {
+    Inline,
+    File,
+}
+
 /// Phase 3 visibility model. More granular visibility can be added without
 /// changing ItemTree ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,6 +66,8 @@ pub struct ItemTreeItem {
     range: TextRange,
     name_range: TextRange,
     visibility: Visibility,
+    module_kind: Option<ModuleKind>,
+    children: Vec<ItemTreeItem>,
 }
 
 impl ItemTreeItem {
@@ -82,6 +90,14 @@ impl ItemTreeItem {
     pub const fn visibility(&self) -> Visibility {
         self.visibility
     }
+
+    pub const fn module_kind(&self) -> Option<ModuleKind> {
+        self.module_kind
+    }
+
+    pub fn children(&self) -> &[ItemTreeItem] {
+        &self.children
+    }
 }
 
 /// Compact declaration-only representation of one file.
@@ -92,48 +108,66 @@ pub struct ItemTree {
 
 impl ItemTree {
     pub fn lower(file: &SourceFile) -> Self {
-        let mut tree = Self::default();
-        for item in file.items() {
-            tree.lower_item(item);
+        Self {
+            items: Self::lower_items(file.items()),
         }
-        tree
     }
 
     pub fn items(&self) -> &[ItemTreeItem] {
         &self.items
     }
 
-    fn lower_item(&mut self, item: Item) {
+    fn lower_items(items: impl Iterator<Item = Item>) -> Vec<ItemTreeItem> {
+        items.flat_map(Self::lower_item).collect()
+    }
+
+    fn lower_item(item: Item) -> Vec<ItemTreeItem> {
         match item {
-            Item::Fn(item) => {
-                self.push_named(&item, ItemKind::Function, item.is_pub());
-            }
-            Item::Struct(item) => {
-                self.push_named(&item, ItemKind::Struct, item.is_pub());
-            }
-            Item::Enum(item) => {
-                self.push_named(&item, ItemKind::Enum, item.is_pub());
-            }
-            Item::Trait(item) => {
-                self.push_named(&item, ItemKind::Trait, item.is_pub());
-            }
+            Item::Fn(item) => Self::named(&item, ItemKind::Function, item.is_pub())
+                .into_iter()
+                .collect(),
+            Item::Struct(item) => Self::named(&item, ItemKind::Struct, item.is_pub())
+                .into_iter()
+                .collect(),
+            Item::Enum(item) => Self::named(&item, ItemKind::Enum, item.is_pub())
+                .into_iter()
+                .collect(),
+            Item::Trait(item) => Self::named(&item, ItemKind::Trait, item.is_pub())
+                .into_iter()
+                .collect(),
             Item::Mod(item) => {
-                self.push_named(&item, ItemKind::Module, item.is_pub());
+                let module_kind = if item.is_file() {
+                    ModuleKind::File
+                } else {
+                    ModuleKind::Inline
+                };
+                let children = if module_kind == ModuleKind::Inline {
+                    Self::lower_items(item.items())
+                } else {
+                    Vec::new()
+                };
+                Self::named(&item, ItemKind::Module, item.is_pub())
+                    .map(|mut summary| {
+                        summary.module_kind = Some(module_kind);
+                        summary.children = children;
+                        summary
+                    })
+                    .into_iter()
+                    .collect()
             }
-            Item::Extern(block) => {
-                for function in block.fns() {
-                    self.push_named(&function, ItemKind::Function, function.is_pub());
-                }
-            }
-            Item::Impl(_) | Item::Use(_) => {}
+            Item::Extern(block) => block
+                .fns()
+                .filter_map(|function| {
+                    Self::named(&function, ItemKind::Function, function.is_pub())
+                })
+                .collect(),
+            Item::Impl(_) | Item::Use(_) => Vec::new(),
         }
     }
 
-    fn push_named(&mut self, item: &impl Named, kind: ItemKind, is_public: bool) {
-        let Some(name) = item.name() else {
-            return;
-        };
-        self.items.push(ItemTreeItem {
+    fn named(item: &impl Named, kind: ItemKind, is_public: bool) -> Option<ItemTreeItem> {
+        let name = item.name()?;
+        Some(ItemTreeItem {
             name: name.text().to_string(),
             kind,
             range: node_range(item.syntax()),
@@ -143,7 +177,9 @@ impl ItemTree {
             } else {
                 Visibility::Private
             },
-        });
+            module_kind: None,
+            children: Vec::new(),
+        })
     }
 }
 
@@ -161,7 +197,7 @@ fn token_range(token: &SyntaxToken) -> TextRange {
 mod tests {
     use rua_syntax::parse_source_file;
 
-    use super::{ItemKind, ItemTree, Visibility};
+    use super::{ItemKind, ItemTree, ModuleKind, Visibility};
 
     #[test]
     fn item_tree_lowers_top_level_declaration_summaries() {
@@ -211,6 +247,12 @@ mod tests {
                 .iter()
                 .all(|item| item.name() != "hidden_inside_module" && item.name() != "body_local")
         );
+        let nested = &tree.items()[4];
+        assert_eq!(nested.module_kind(), Some(ModuleKind::Inline));
+        assert_eq!(nested.children().len(), 1);
+        assert_eq!(nested.children()[0].name(), "hidden_inside_module");
+        assert_eq!(tree.items()[5].module_kind(), Some(ModuleKind::File));
+        assert!(tree.items()[5].children().is_empty());
     }
 
     #[test]
