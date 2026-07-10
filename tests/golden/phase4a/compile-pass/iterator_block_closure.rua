@@ -1,0 +1,10 @@
+fn main() -> Vec<i64> {
+    (0..4)
+        .map(|value| -> i64 {
+            if value > 1 {
+                return value * 2;
+            }
+            value
+        })
+        .collect::<Vec<_>>()
+}

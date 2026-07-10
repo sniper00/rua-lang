@@ -31,13 +31,14 @@ const RUAI_COMPILE_PASS_CASES: &[&str] = &[
     "workspace_shadows_library",
 ];
 const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_type_error"];
-const PHASE4A_TODO_PASS_CASES: &[&str] = &[
+const PHASE4A_ACTIVE_PASS_CASES: &[&str] = &[
     "closure_expr_inferred",
     "closure_block_typed",
     "closure_capture_read",
     "iterator_vec_for",
     "iterator_map_filter_collect",
     "iterator_fold",
+    "iterator_block_closure",
 ];
 const PHASE4A_TODO_FAIL_CASES: &[&str] = &[
     "iterator_escape_unsupported",
@@ -281,6 +282,54 @@ fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
+    let root = golden_root().join("phase4a/compile-pass");
+    for case in PHASE4A_ACTIVE_PASS_CASES {
+        let source = root.join(format!("{case}.rua"));
+        let actual = ruac::compile_path(&source).map_err(|error| {
+            format!(
+                "Phase 4A compile-pass case {} failed:\n{error}",
+                fixture_label(&source)
+            )
+        })?;
+        if case.starts_with("iterator_") {
+            if actual.matches("for ").count() != 1 {
+                return Err(format!(
+                    "Phase 4A fused output {} must contain exactly one loop",
+                    fixture_label(&source)
+                ));
+            }
+            for forbidden in [
+                "coroutine",
+                ":iter(",
+                ":into_iter(",
+                ":map(",
+                ":filter(",
+                ":fold(",
+                ":collect(",
+                "function(",
+            ] {
+                if actual.contains(forbidden) {
+                    return Err(format!(
+                        "Phase 4A fused output {} contains forbidden shape {forbidden:?}",
+                        fixture_label(&source)
+                    ));
+                }
+            }
+            if *case == "iterator_map_filter_collect"
+                && actual.matches("rt.vec({ n = 0 })").count() != 1
+            {
+                return Err(format!(
+                    "Phase 4A collect output {} must allocate exactly one result Vec",
+                    fixture_label(&source)
+                ));
+            }
+        }
+        assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
+    }
+    Ok(())
+}
+
 fn run(result: Result<(), String>) {
     result.unwrap_or_else(|error| panic!("{error}"));
 }
@@ -297,9 +346,9 @@ fn golden_layout_is_present() {
 #[test]
 fn phase4a_todo_goldens_are_registered() {
     let root = golden_root().join("phase4a");
-    for case in PHASE4A_TODO_PASS_CASES {
+    for case in PHASE4A_ACTIVE_PASS_CASES {
         let path = root.join("compile-pass").join(format!("{case}.rua"));
-        assert!(path.is_file(), "missing Phase 4A TODO {}", path.display());
+        assert!(path.is_file(), "missing active Phase 4A case {}", path.display());
     }
     for case in PHASE4A_TODO_FAIL_CASES {
         let path = root.join("compile-fail").join(format!("{case}.rua"));
@@ -312,17 +361,6 @@ fn phase4a_todo_goldens_are_registered() {
             "missing active Phase 4A case {}",
             path.display()
         );
-    }
-}
-
-#[test]
-#[ignore = "Phase 4A compile-pass TODOs are enabled by their implementation steps"]
-fn phase4a_todo_compile_pass() {
-    let root = golden_root().join("phase4a/compile-pass");
-    for case in PHASE4A_TODO_PASS_CASES {
-        let path = root.join(format!("{case}.rua"));
-        ruac::compile_path(&path)
-            .unwrap_or_else(|error| panic!("Phase 4A TODO {case} still fails: {error}"));
     }
 }
 
@@ -384,6 +422,11 @@ fn golden_compile_pass() {
 }
 
 #[test]
+fn phase4a_golden_compile_pass() {
+    run(run_phase4a_compile_pass(false));
+}
+
+#[test]
 fn golden_compile_fail() {
     run(run_compile_fail(false));
 }
@@ -407,6 +450,7 @@ fn update_goldens() {
         "refusing to update without {UPDATE_ENV}=1"
     );
     run(run_compile_pass(true));
+    run(run_phase4a_compile_pass(true));
     run(run_compile_fail(true));
     run(run_phase4a_compile_fail(true));
     run(run_ruai(true));

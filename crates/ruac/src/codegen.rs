@@ -12,7 +12,9 @@
 //!   Result        -> Ok(v) => { ok = v }, Err(e) => { err = e }
 
 use crate::ast::*;
-use crate::typeck::TypeInfo;
+use crate::typeck::{
+    IterAdapterKind, IterConsumerKind, IterPlan, IterSourceKind, TypeInfo,
+};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
@@ -27,6 +29,34 @@ enum VarShape {
     Unit,
     Tuple,
     Struct,
+}
+
+struct IterCall<'a> {
+    kind: IterAdapterKind,
+    args: &'a [Expr],
+}
+
+struct IterChain<'a> {
+    source: &'a Expr,
+    adapters: Vec<IterCall<'a>>,
+    consumer_args: &'a [Expr],
+}
+
+#[derive(Default)]
+struct IterAdapterState {
+    counter: Option<String>,
+    limit: Option<String>,
+}
+
+enum IterLoopSource {
+    Range {
+        start: String,
+        end: String,
+        inclusive: bool,
+    },
+    Vec {
+        holder: String,
+    },
 }
 
 /// Type/variant information gathered before codegen so paths like
@@ -127,6 +157,7 @@ pub fn generate(prog: &Program, info: &TypeInfo) -> String {
         tmp: 0,
         ctx: Ctx::collect(prog),
         uses_rt: false,
+        closure_return_targets: Vec::new(),
         info,
     };
     cg.gen_program(prog);
@@ -146,6 +177,9 @@ struct Codegen<'a> {
     ctx: Ctx,
     /// Set when any generated code references the `rua_rt` runtime shim.
     uses_rt: bool,
+    /// Inlined iterator closure returns assign a local and jump out of the
+    /// closure body instead of returning from the enclosing Rua function.
+    closure_return_targets: Vec<(String, String)>,
     info: &'a TypeInfo,
 }
 
@@ -406,7 +440,14 @@ impl Codegen<'_> {
     fn gen_stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, init, .. } => {
-                if needs_hoist(init) {
+                if let ExprKind::Closure { params, body, .. } = &init.kind {
+                    self.gen_closure_local(name, params, body);
+                } else if self
+                    .info
+                    .iter_plan(init.span.file, init.span.start, init.span.len)
+                    .is_some()
+                    || needs_hoist(init)
+                {
                     self.line(&format!("local {}", name));
                     self.gen_expr_to(init, &Dest::Var(name.clone()));
                 } else {
@@ -416,6 +457,14 @@ impl Codegen<'_> {
             }
             Stmt::Expr(e) => self.gen_expr_to(e, &Dest::Discard),
             Stmt::Return(opt) => {
+                if let Some((target, label)) = self.closure_return_targets.last().cloned() {
+                    match opt {
+                        Some(e) => self.gen_expr_to(e, &Dest::Var(target)),
+                        None => self.line(&format!("{} = nil", target)),
+                    }
+                    self.line(&format!("goto {}", label));
+                    return;
+                }
                 self.line("do");
                 self.indent += 1;
                 match opt {
@@ -479,6 +528,19 @@ impl Codegen<'_> {
     }
 
     fn gen_for(&mut self, var: &str, iter: &Expr, body: &Block) {
+        if let Some(plan) = self
+            .info
+            .iter_plan(iter.span.file, iter.span.start, iter.span.len)
+            && (!plan.adapters.is_empty()
+                || matches!(
+                    plan.source.kind,
+                    IterSourceKind::VecIter | IterSourceKind::VecIntoIter
+                ))
+            && let Some(chain) = extract_iter_chain(iter, plan, false)
+        {
+            self.gen_iter_loop(&chain, plan, Some((var, body)), &Dest::Discard);
+            return;
+        }
         if let ExprKind::Range {
             start,
             end,
@@ -514,6 +576,331 @@ impl Codegen<'_> {
         }
     }
 
+    fn gen_closure_local(&mut self, name: &str, params: &[ClosureParam], body: &ClosureBody) {
+        let params = params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.line(&format!("local function {name}({params})"));
+        self.indent += 1;
+        match body {
+            ClosureBody::Expr(expr) => self.gen_expr_to(expr, &Dest::Return),
+            ClosureBody::Block(block) => self.gen_block_to(block, &Dest::Return),
+        }
+        self.indent -= 1;
+        self.line("end");
+    }
+
+    fn gen_closure_value(&mut self, params: &[ClosureParam], body: &ClosureBody) -> String {
+        let local = self.fresh_tmp();
+        self.gen_closure_local(&local, params, body);
+        local
+    }
+
+    fn gen_inlined_closure(&mut self, closure: &Expr, inputs: &[String]) -> String {
+        let ExprKind::Closure { params, body, .. } = &closure.kind else {
+            return "nil".to_string();
+        };
+        let result = self.fresh_tmp();
+        let done = matches!(body, ClosureBody::Block(_))
+            .then(|| format!("{}_done", self.fresh_tmp()));
+        self.line(&format!("local {}", result));
+        self.line("do");
+        self.indent += 1;
+        for (param, input) in params.iter().zip(inputs) {
+            self.line(&format!("local {} = {}", param.name, input));
+        }
+        match body {
+            ClosureBody::Expr(expr) => self.gen_expr_to(expr, &Dest::Var(result.clone())),
+            ClosureBody::Block(block) => {
+                let done = done.as_ref().unwrap();
+                self.closure_return_targets
+                    .push((result.clone(), done.clone()));
+                self.gen_block_to(block, &Dest::Var(result.clone()));
+                self.closure_return_targets.pop();
+            }
+        }
+        self.indent -= 1;
+        self.line("end");
+        if let Some(done) = done {
+            self.line(&format!("::{}::", done));
+        }
+        result
+    }
+
+    fn gen_iter_loop(
+        &mut self,
+        chain: &IterChain<'_>,
+        plan: &IterPlan,
+        for_body: Option<(&str, &Block)>,
+        dest: &Dest,
+    ) {
+        let source = match plan.source.kind {
+            IterSourceKind::ExclusiveRange | IterSourceKind::InclusiveRange => {
+                let ExprKind::Range { start, end, .. } = &chain.source.kind else {
+                    return;
+                };
+                let start_value = self.gen_inline(start);
+                let start_local = self.fresh_tmp();
+                self.line(&format!("local {} = {}", start_local, start_value));
+                let end_value = self.gen_inline(end);
+                let end_local = self.fresh_tmp();
+                self.line(&format!("local {} = {}", end_local, end_value));
+                IterLoopSource::Range {
+                    start: start_local,
+                    end: end_local,
+                    inclusive: plan.source.kind == IterSourceKind::InclusiveRange,
+                }
+            }
+            IterSourceKind::Vec
+            | IterSourceKind::VecIter
+            | IterSourceKind::VecIntoIter => {
+                let value = self.gen_inline(chain.source);
+                let holder = self.fresh_tmp();
+                self.line(&format!("local {} = {}", holder, value));
+                IterLoopSource::Vec { holder }
+            }
+        };
+
+        let mut states = Vec::with_capacity(chain.adapters.len());
+        for adapter in &chain.adapters {
+            let mut state = IterAdapterState::default();
+            match adapter.kind {
+                IterAdapterKind::Enumerate => {
+                    let counter = self.fresh_tmp();
+                    self.line(&format!("local {} = 0", counter));
+                    state.counter = Some(counter);
+                }
+                IterAdapterKind::Skip | IterAdapterKind::Take => {
+                    let limit_value = adapter
+                        .args
+                        .first()
+                        .map(|arg| self.gen_inline(arg))
+                        .unwrap_or_else(|| "0".to_string());
+                    let limit = self.fresh_tmp();
+                    self.line(&format!("local {} = {}", limit, limit_value));
+                    let counter = self.fresh_tmp();
+                    self.line(&format!("local {} = 0", counter));
+                    state.limit = Some(limit);
+                    state.counter = Some(counter);
+                }
+                _ => {}
+            }
+            states.push(state);
+        }
+
+        let result = match plan.consumer {
+            IterConsumerKind::For => None,
+            IterConsumerKind::CollectVec => {
+                self.uses_rt = true;
+                let result = self.fresh_tmp();
+                self.line(&format!("local {} = rt.vec({{ n = 0 }})", result));
+                Some(result)
+            }
+            IterConsumerKind::Fold => {
+                let init = chain
+                    .consumer_args
+                    .first()
+                    .map(|arg| self.gen_inline(arg))
+                    .unwrap_or_else(|| "nil".to_string());
+                let result = self.fresh_tmp();
+                self.line(&format!("local {} = {}", result, init));
+                Some(result)
+            }
+            IterConsumerKind::Count => {
+                let result = self.fresh_tmp();
+                self.line(&format!("local {} = 0", result));
+                Some(result)
+            }
+            IterConsumerKind::Any | IterConsumerKind::All => {
+                let result = self.fresh_tmp();
+                let initial = if plan.consumer == IterConsumerKind::All {
+                    "true"
+                } else {
+                    "false"
+                };
+                self.line(&format!("local {} = {}", result, initial));
+                Some(result)
+            }
+            IterConsumerKind::Find => {
+                let result = self.fresh_tmp();
+                self.line(&format!("local {} = nil", result));
+                Some(result)
+            }
+        };
+
+        let item = self.fresh_tmp();
+        match &source {
+            IterLoopSource::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let stop = if *inclusive {
+                    end.clone()
+                } else {
+                    format!("({}) - 1", end)
+                };
+                let index = self.fresh_tmp();
+                self.line(&format!("for {} = {}, {} do", index, start, stop));
+                self.indent += 1;
+                self.line(&format!("local {} = {}", item, index));
+                self.indent -= 1;
+            }
+            IterLoopSource::Vec { holder } => {
+                let index = self.fresh_tmp();
+                self.line(&format!("for {} = 0, {}.n - 1 do", index, holder));
+                self.indent += 1;
+                self.line(&format!("local {} = {}[{}]", item, holder, index));
+                self.indent -= 1;
+            }
+        }
+        self.indent += 1;
+        let active = self.fresh_tmp();
+        self.line(&format!("local {} = true", active));
+
+        for (adapter, state) in chain.adapters.iter().zip(&states) {
+            self.line(&format!("if {} then", active));
+            self.indent += 1;
+            match adapter.kind {
+                IterAdapterKind::Map => {
+                    if let Some(closure) = adapter.args.first() {
+                        let mapped = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
+                        self.line(&format!("{} = {}", item, mapped));
+                    }
+                }
+                IterAdapterKind::Filter => {
+                    if let Some(closure) = adapter.args.first() {
+                        let keep = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
+                        self.line(&format!("if not {} then {} = false end", keep, active));
+                    }
+                }
+                IterAdapterKind::FilterMap => {
+                    if let Some(closure) = adapter.args.first() {
+                        let mapped = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
+                        self.line(&format!("if {} == nil then", mapped));
+                        self.indent += 1;
+                        self.line(&format!("{} = false", active));
+                        self.indent -= 1;
+                        self.line("else");
+                        self.indent += 1;
+                        self.line(&format!("{} = {}", item, mapped));
+                        self.indent -= 1;
+                        self.line("end");
+                    }
+                }
+                IterAdapterKind::Enumerate => {
+                    let counter = state.counter.as_deref().unwrap_or("0");
+                    self.line(&format!(
+                        "{} = {{ [0] = {}, [1] = {}, n = 2 }}",
+                        item, counter, item
+                    ));
+                    self.line(&format!("{} = {} + 1", counter, counter));
+                }
+                IterAdapterKind::Skip => {
+                    let counter = state.counter.as_deref().unwrap_or("0");
+                    let limit = state.limit.as_deref().unwrap_or("0");
+                    self.line(&format!("if {} < {} then", counter, limit));
+                    self.indent += 1;
+                    self.line(&format!("{} = {} + 1", counter, counter));
+                    self.line(&format!("{} = false", active));
+                    self.indent -= 1;
+                    self.line("end");
+                }
+                IterAdapterKind::Take => {
+                    let counter = state.counter.as_deref().unwrap_or("0");
+                    let limit = state.limit.as_deref().unwrap_or("0");
+                    self.line(&format!("if {} >= {} then break end", counter, limit));
+                    self.line(&format!("{} = {} + 1", counter, counter));
+                }
+            }
+            self.indent -= 1;
+            self.line("end");
+        }
+
+        self.line(&format!("if {} then", active));
+        self.indent += 1;
+        match plan.consumer {
+            IterConsumerKind::For => {
+                if let Some((var, body)) = for_body {
+                    self.line(&format!("local {} = {}", var, item));
+                    self.gen_block_to(body, &Dest::Discard);
+                }
+            }
+            IterConsumerKind::CollectVec => {
+                let result = result.as_deref().unwrap();
+                self.line(&format!("{}[{}.n] = {}", result, result, item));
+                self.line(&format!("{}.n = {}.n + 1", result, result));
+            }
+            IterConsumerKind::Fold => {
+                if let (Some(result), Some(closure)) =
+                    (result.as_deref(), chain.consumer_args.get(1))
+                {
+                    let inputs = [result.to_string(), item.clone()];
+                    let next = self.gen_inlined_closure(closure, &inputs);
+                    self.line(&format!("{} = {}", result, next));
+                }
+            }
+            IterConsumerKind::Count => {
+                let result = result.as_deref().unwrap();
+                self.line(&format!("{} = {} + 1", result, result));
+            }
+            IterConsumerKind::Any | IterConsumerKind::All | IterConsumerKind::Find => {
+                if let (Some(result), Some(predicate)) =
+                    (result.as_deref(), chain.consumer_args.first())
+                {
+                    let matches =
+                        self.gen_inlined_closure(predicate, std::slice::from_ref(&item));
+                    match plan.consumer {
+                        IterConsumerKind::Any => {
+                            self.line(&format!(
+                                "if {} then {} = true; break end",
+                                matches, result
+                            ));
+                        }
+                        IterConsumerKind::All => {
+                            self.line(&format!(
+                                "if not {} then {} = false; break end",
+                                matches, result
+                            ));
+                        }
+                        IterConsumerKind::Find => {
+                            self.line(&format!(
+                                "if {} then {} = {}; break end",
+                                matches, result, item
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.indent -= 1;
+        self.line("end");
+
+        if plan.consumer == IterConsumerKind::For {
+            self.line("::continue::");
+        }
+        for (adapter, state) in chain.adapters.iter().zip(&states) {
+            if adapter.kind == IterAdapterKind::Take {
+                let counter = state.counter.as_deref().unwrap_or("0");
+                let limit = state.limit.as_deref().unwrap_or("0");
+                self.line(&format!("if {} >= {} then break end", counter, limit));
+            }
+        }
+        self.indent -= 1;
+        self.line("end");
+
+        if let Some(result) = result {
+            match dest {
+                Dest::Var(target) => self.line(&format!("{} = {}", target, result)),
+                Dest::Return => self.line(&format!("return {}", result)),
+                Dest::Discard => {}
+            }
+        }
+    }
+
     // --- expression to destination ----------------------------------------
 
     fn gen_block_to(&mut self, block: &Block, dest: &Dest) {
@@ -531,6 +918,14 @@ impl Codegen<'_> {
     }
 
     fn gen_expr_to(&mut self, e: &Expr, dest: &Dest) {
+        if let Some(plan) = self
+            .info
+            .iter_plan(e.span.file, e.span.start, e.span.len)
+            && let Some(chain) = extract_iter_chain(e, plan, true)
+        {
+            self.gen_iter_loop(&chain, plan, None, dest);
+            return;
+        }
         match &e.kind {
             ExprKind::If {
                 cond,
@@ -807,12 +1202,22 @@ impl Codegen<'_> {
     // --- inline (pure Lua expression, may hoist) --------------------------
 
     fn gen_inline(&mut self, e: &Expr) -> String {
+        if let Some(plan) = self
+            .info
+            .iter_plan(e.span.file, e.span.start, e.span.len)
+            && let Some(chain) = extract_iter_chain(e, plan, true)
+        {
+            let tmp = self.fresh_tmp();
+            self.line(&format!("local {}", tmp));
+            self.gen_iter_loop(&chain, plan, None, &Dest::Var(tmp.clone()));
+            return tmp;
+        }
         match &e.kind {
             ExprKind::Int(s) => lua_int_literal(s),
             ExprKind::Float(s) => s.replace('_', ""),
             ExprKind::Str(s) => s.clone(),
             ExprKind::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-            ExprKind::Closure { .. } => "nil --[[ closure codegen pending ]]".to_string(),
+            ExprKind::Closure { params, body, .. } => self.gen_closure_value(params, body),
             ExprKind::Path(segs) => self.gen_path(segs),
             ExprKind::Unary { op, expr } => {
                 let inner = self.gen_inline(expr);
@@ -1025,6 +1430,46 @@ impl Codegen<'_> {
             format!("{{ {} }}", field_parts.join(", "))
         }
     }
+}
+
+fn extract_iter_chain<'a>(expr: &'a Expr, plan: &IterPlan, has_consumer: bool) -> Option<IterChain<'a>> {
+    let (mut cursor, consumer_args): (&Expr, &[Expr]) = if has_consumer {
+        let ExprKind::MethodCall { recv, args, .. } = &expr.kind else {
+            return None;
+        };
+        (recv, args)
+    } else {
+        (expr, &[])
+    };
+
+    let mut adapters = Vec::with_capacity(plan.adapters.len());
+    for adapter in plan.adapters.iter().rev() {
+        let ExprKind::MethodCall { recv, args, .. } = &cursor.kind else {
+            return None;
+        };
+        adapters.push(IterCall {
+            kind: adapter.kind,
+            args,
+        });
+        cursor = recv;
+    }
+    adapters.reverse();
+
+    if matches!(
+        plan.source.kind,
+        IterSourceKind::VecIter | IterSourceKind::VecIntoIter
+    ) {
+        let ExprKind::MethodCall { recv, .. } = &cursor.kind else {
+            return None;
+        };
+        cursor = recv;
+    }
+
+    Some(IterChain {
+        source: cursor,
+        adapters,
+        consumer_args,
+    })
 }
 
 /// Collect trait declarations across all scopes (root + nested modules), keyed

@@ -297,10 +297,71 @@ fn main() {
 }
 
 #[test]
-fn iterator_plan_does_not_fall_through_to_legacy_method_codegen() {
-    let error = crate::compile_str("fn main() -> i64 { (0..4).count() }")
-        .expect_err("iterator consumer codegen should remain gated until 4A.6");
-    assert!(error.contains("iterator codegen is not implemented yet"));
+fn iterator_codegen_does_not_fall_through_to_legacy_method_calls() {
+    let lua = crate::compile_str("fn main() -> i64 { (0..4).count() }")
+        .expect("compile fused range count");
+    assert!(lua.contains("for __t"), "missing numeric for: {lua}");
+    assert!(!lua.contains(":count("), "legacy method call leaked: {lua}");
+}
+
+#[test]
+fn iterator_codegen_fuses_adapters_into_one_vec_loop() {
+    let source = r#"
+fn main() -> Vec<i64> {
+    vec![1, 2, 3, 4]
+        .iter()
+        .map(|value| value * 2)
+        .filter(|value| value > 4)
+        .skip(1)
+        .take(2)
+        .collect::<Vec<i64>>()
+}
+"#;
+    let lua = crate::compile_str(source).expect("compile fused iterator chain");
+    assert_eq!(lua.matches("for ").count(), 1, "expected one loop: {lua}");
+    assert!(lua.contains(".n - 1 do"), "Vec loop must use `.n`: {lua}");
+    for forbidden in [":iter(", ":map(", ":filter(", ":skip(", ":take(", ":collect(", "coroutine"] {
+        assert!(!lua.contains(forbidden), "found {forbidden:?}: {lua}");
+    }
+    assert!(!lua.contains("function("), "per-item closure emitted: {lua}");
+    assert_eq!(
+        lua.matches("rt.vec(").count(),
+        2,
+        "expected source Vec plus one collected Vec: {lua}"
+    );
+}
+
+#[test]
+fn iterator_codegen_handles_fold_filter_map_enumerate_and_early_exit() {
+    let sources = [
+        "fn main() -> i64 { (0..4).fold(0, |total, value| total + value) }",
+        "fn main() -> i64 { vec![1, 2].iter().filter_map(|value| Some(value)).enumerate().count() }",
+        "fn main() -> bool { (0..4).any(|value| value == 2) }",
+        "fn main() -> bool { (0..4).all(|value| value < 4) }",
+        "fn main() -> Option<i64> { (0..4).find(|value| value == 2) }",
+    ];
+    for source in sources {
+        let lua = crate::compile_str(source).expect("compile iterator consumer");
+        assert_eq!(lua.matches("for ").count(), 1, "expected one loop: {lua}");
+        assert!(!lua.contains("coroutine"));
+        assert!(!lua.contains("function("));
+    }
+}
+
+#[test]
+fn iterator_codegen_inlines_block_closure_returns() {
+    let source = r#"
+fn main() -> Vec<i64> {
+    (0..4).map(|value| -> i64 {
+        if value > 1 { return value * 2; }
+        value
+    }).collect::<Vec<_>>()
+}
+"#;
+    let lua = crate::compile_str(source).expect("compile block iterator closure");
+    assert!(lua.contains("goto __t"), "closure return was not lowered: {lua}");
+    assert!(lua.contains("_done::"), "closure return label missing: {lua}");
+    assert!(!lua.contains("function("), "per-item closure emitted: {lua}");
 }
 
 #[test]
