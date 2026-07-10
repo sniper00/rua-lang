@@ -141,10 +141,11 @@ fn closure_typeck_uses_iterator_adapter_item_context() {
     let source = r#"
 fn main() {
     let values = vec![1, 2, 3];
-    let mapped = values
+    let count = values
         .iter()
         .map(|value| value + 1)
-        .filter(|value| value > 1);
+        .filter(|value| value > 1)
+        .count();
 }
 "#;
     let (diagnostics, _) = crate::check_diags(source);
@@ -266,15 +267,22 @@ fn main() {
 }
 
 #[test]
-fn iterator_plan_is_lazy_until_a_consumer_is_known() {
+fn iterator_plan_escape_stays_lazy_and_is_rejected() {
     let source = r#"
 fn main() {
     let values = vec![1, 2, 3];
     let pending = values.iter().map(|value| value + 1).skip(1);
 }
 "#;
-    let info = iterator_type_info(source);
-    assert_eq!(info.iter_plans().count(), 0);
+    let (diagnostics, _) = crate::check_diags(source);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet"));
+    let bindings = crate::binding_types(source);
+    assert!(bindings
+        .hits()
+        .iter()
+        .any(|binding| binding.display == "let pending: Iterator<i64>"));
 }
 
 #[test]
@@ -413,6 +421,41 @@ fn main() {
         diagnostics.is_empty(),
         "fused mutable capture should type-check: {diagnostics:?}"
     );
+}
+
+#[test]
+fn iterator_escape_reports_stored_passed_returned_and_assigned_plans() {
+    let cases = [
+        "fn main() { let pending = (0..4).map(|value| value + 1); }",
+        concat!(
+            "fn consume<T>(value: T) {}\n",
+            "fn main() { consume((0..4).map(|value| value + 1)); }\n",
+        ),
+        "fn escaped() { return (0..4).map(|value| value + 1); }",
+        concat!(
+            "fn main() {\n",
+            "  let mut slot = 0;\n",
+            "  slot = (0..4).map(|value| value + 1);\n",
+            "}\n",
+        ),
+    ];
+
+    for source in cases {
+        let (diagnostics, _) = crate::check_diags(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet"),
+            "missing iterator escape diagnostic in {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn iterator_escape_does_not_reject_immediate_consumers() {
+    let source = "fn main() -> i64 { (0..4).map(|value| value + 1).count() }";
+    let (diagnostics, _) = crate::check_diags(source);
+    assert!(diagnostics.is_empty(), "consumer was treated as escape: {diagnostics:?}");
 }
 
 fn compile(src: &str) -> String {

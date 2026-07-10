@@ -1732,6 +1732,9 @@ impl Tc {
         }
         let ret_ty = ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit);
         let actual = self.block(body);
+        if let Some(tail) = &body.tail {
+            self.reject_iter_escape(&actual, tail.span);
+        }
         // Only check a concrete, non-unit declared return against a concrete tail.
         if let Some(tail) = &body.tail {
             if ret_ty.is_concrete()
@@ -1830,6 +1833,7 @@ impl Tc {
                     }
                     None => init_ty,
                 };
+                self.reject_iter_escape(&bind_ty, init.span);
                 // For an inferred (un-annotated) empty collection, fill unknown
                 // element/key/value slots from later `push`/`insert` calls in
                 // this block (`let mut m = HashMap::new(); m.insert("a", 1)`).
@@ -1847,10 +1851,12 @@ impl Tc {
                 self.bind_mutability(name, bind_ty, *mutable);
             }
             Stmt::Expr(e) => {
-                self.infer(e);
+                let ty = self.infer(e);
+                self.reject_iter_escape(&ty, e.span);
             }
             Stmt::Return(Some(e)) => {
                 let ty = self.infer(e);
+                self.reject_iter_escape(&ty, e.span);
                 if let Some(returns) = self.closure_returns.last_mut() {
                     returns.push(ty);
                 }
@@ -1923,6 +1929,12 @@ impl Tc {
     fn expect_bool(&mut self, ty: &Ty, sp: SourceRange, what: &str) {
         if ty.is_concrete() && *ty != Ty::Bool {
             self.err(sp, format!("{} must be `bool`, found `{}`", what, ty.name()));
+        }
+    }
+
+    fn reject_iter_escape(&mut self, ty: &Ty, span: SourceRange) {
+        if matches!(ty, Ty::Iter(_, _)) {
+            self.err(span, "iterator escape is not supported yet".to_string());
         }
     }
 
@@ -2046,6 +2058,8 @@ impl Tc {
             }
             inferred_ret = declared;
         }
+
+        self.reject_iter_escape(&inferred_ret, span);
 
         Ty::Closure(param_tys, Box::new(inferred_ret))
     }
@@ -2518,6 +2532,9 @@ impl Tc {
                 let rt = self.infer(recv);
                 self.record_receiver(recv.span, &rt); // C1
                 let arg_tys = self.infer_method_args(&rt, method, args);
+                for (arg, ty) in args.iter().zip(&arg_tys) {
+                    self.reject_iter_escape(ty, arg.span);
+                }
                 // Only check calls whose receiver is a known user type that
                 // actually declares the method; everything else is Unknown so
                 // Vec/HashMap/String/extern method calls are never flagged.
@@ -2715,6 +2732,9 @@ impl Tc {
             }
             ExprKind::MacroCall { name, args } => {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                for (arg, ty) in args.iter().zip(&arg_tys) {
+                    self.reject_iter_escape(ty, arg.span);
+                }
                 match name.as_str() {
                     "format" => Ty::Str,
                     "println" | "print" | "panic" => Ty::Unit,
@@ -2728,7 +2748,11 @@ impl Tc {
                     _ => Ty::Unknown,
                 }
             }
-            ExprKind::StructLit { path, .. } => {
+            ExprKind::StructLit { path, fields } => {
+                for (_, field) in fields {
+                    let ty = self.infer(field);
+                    self.reject_iter_escape(&ty, field.span);
+                }
                 let name = path.last().cloned().unwrap_or_default();
                 if self.structs.contains_key(&name) {
                     Ty::Named(name)
@@ -2791,7 +2815,8 @@ impl Tc {
             ExprKind::Block(b) => self.block(b),
             ExprKind::Assign { target, value } => {
                 self.infer(target);
-                self.infer(value);
+                let value_ty = self.infer(value);
+                self.reject_iter_escape(&value_ty, value.span);
                 if let ExprKind::Path(segments) = &target.kind
                     && segments.len() == 1
                     && let Some(&boundary) = self.closure_boundaries.last()
@@ -2880,6 +2905,9 @@ impl Tc {
 
     fn infer_call(&mut self, callee: &Expr, args: &[Expr]) -> Ty {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+        for (arg, ty) in args.iter().zip(&arg_tys) {
+            self.reject_iter_escape(ty, arg.span);
+        }
         if let ExprKind::Closure { params, ret, body } = &callee.kind {
             let closure = self.infer_closure(
                 callee.span,
