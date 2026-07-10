@@ -871,6 +871,7 @@ impl ForStmt {
 ast_node!(BinExpr = BinExpr);
 ast_node!(UnaryExpr = UnaryExpr);
 ast_node!(RangeExpr = RangeExpr);
+ast_node!(ClosureExpr = ClosureExpr);
 ast_node!(AssignExpr = AssignExpr);
 ast_node!(TryExpr = TryExpr);
 ast_node!(CallExpr = CallExpr);
@@ -895,6 +896,7 @@ pub enum Expr {
     Bin(BinExpr),
     Unary(UnaryExpr),
     Range(RangeExpr),
+    Closure(ClosureExpr),
     Assign(AssignExpr),
     Try(TryExpr),
     Call(CallExpr),
@@ -918,6 +920,7 @@ impl AstNode for Expr {
             K::BinExpr
                 | K::UnaryExpr
                 | K::RangeExpr
+                | K::ClosureExpr
                 | K::AssignExpr
                 | K::TryExpr
                 | K::CallExpr
@@ -939,6 +942,7 @@ impl AstNode for Expr {
             K::BinExpr => Expr::Bin(BinExpr { syntax: node }),
             K::UnaryExpr => Expr::Unary(UnaryExpr { syntax: node }),
             K::RangeExpr => Expr::Range(RangeExpr { syntax: node }),
+            K::ClosureExpr => Expr::Closure(ClosureExpr { syntax: node }),
             K::AssignExpr => Expr::Assign(AssignExpr { syntax: node }),
             K::TryExpr => Expr::Try(TryExpr { syntax: node }),
             K::CallExpr => Expr::Call(CallExpr { syntax: node }),
@@ -961,6 +965,7 @@ impl AstNode for Expr {
             Expr::Bin(n) => n.syntax(),
             Expr::Unary(n) => n.syntax(),
             Expr::Range(n) => n.syntax(),
+            Expr::Closure(n) => n.syntax(),
             Expr::Assign(n) => n.syntax(),
             Expr::Try(n) => n.syntax(),
             Expr::Call(n) => n.syntax(),
@@ -1016,6 +1021,20 @@ impl RangeExpr {
     }
     pub fn is_inclusive(&self) -> bool {
         token(&self.syntax, K::DotDotEq).is_some()
+    }
+}
+
+impl ClosureExpr {
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        children::<Param>(&self.syntax)
+    }
+
+    pub fn ret_type(&self) -> Option<Type> {
+        child::<Type>(&self.syntax)
+    }
+
+    pub fn body(&self) -> Option<Expr> {
+        child::<Expr>(&self.syntax)
     }
 }
 
@@ -1469,6 +1488,45 @@ mod tests {
         assert!(f.ret_type().is_some());
         assert!(f.body().is_some());
         assert!(!f.has_self());
+    }
+
+    #[test]
+    fn closure_accessors_cover_params_return_and_body_forms() {
+        let sf = source_file(concat!(
+            "fn main() {\n",
+            "  let inferred = |left, right| left + right;\n",
+            "  let typed = |value: i64| -> i64 { value + 1 };\n",
+            "  let empty = || 42;\n",
+            "}\n",
+        ));
+        let Item::Fn(function) = sf.items().next().expect("function") else {
+            panic!("expected function");
+        };
+        let closures: Vec<_> = function
+            .body()
+            .expect("function body")
+            .stmts()
+            .map(|statement| {
+                let Stmt::Let(binding) = statement else {
+                    panic!("expected closure binding");
+                };
+                let Expr::Closure(closure) = binding.init().expect("closure initializer") else {
+                    panic!("expected closure expression");
+                };
+                closure
+            })
+            .collect();
+
+        assert_eq!(closures[0].params().count(), 2);
+        assert!(closures[0].params().all(|parameter| parameter.ty().is_none()));
+        assert!(closures[0].ret_type().is_none());
+        assert!(matches!(closures[0].body(), Some(Expr::Bin(_))));
+        assert_eq!(closures[1].params().count(), 1);
+        assert!(closures[1].params().next().expect("typed parameter").ty().is_some());
+        assert!(closures[1].ret_type().is_some());
+        assert!(matches!(closures[1].body(), Some(Expr::Block(_))));
+        assert_eq!(closures[2].params().count(), 0);
+        assert!(matches!(closures[2].body(), Some(Expr::Literal(_))));
     }
 
     #[test]

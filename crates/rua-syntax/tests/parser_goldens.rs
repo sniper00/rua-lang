@@ -11,9 +11,9 @@ use rua_syntax::{Parse, SyntaxElement, SyntaxNode, ast::SourceFile, parse_source
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test \
                               parser_goldens update_parser_range_snapshots -- --ignored --exact";
-const MIN_ACCEPT_CASES: usize = 12;
-const MIN_REJECT_CASES: usize = 5;
-const MIN_RANGE_CASES: usize = 12;
+const MIN_ACCEPT_CASES: usize = 15;
+const MIN_REJECT_CASES: usize = 6;
+const MIN_RANGE_CASES: usize = 15;
 
 struct ParserCases {
     accept: Vec<PathBuf>,

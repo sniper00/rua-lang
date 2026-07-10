@@ -1,0 +1,57 @@
+source_len: 83
+SourceFile 0..83
+  FnDecl 0..82
+    KwFn 0..2 "fn"
+    Ident 3..7 "main"
+    LParen 7..8 "("
+    RParen 8..9 ")"
+    Block 9..82
+      LBrace 10..11 "{"
+      LetStmt 16..80
+        KwLet 16..19 "let"
+        Ident 20..25 "count"
+        Eq 26..27 "="
+        MethodCallExpr 28..79
+          MethodCallExpr 28..71
+            MethodCallExpr 28..48
+              MacroCallExpr 28..41
+                Ident 28..31 "vec"
+                Not 31..32 "!"
+                LBracket 32..33 "["
+                LiteralExpr 33..34
+                  Int 33..34 "1"
+                Comma 34..35 ","
+                LiteralExpr 36..37
+                  Int 36..37 "2"
+                Comma 37..38 ","
+                LiteralExpr 39..40
+                  Int 39..40 "3"
+                RBracket 40..41 "]"
+              Dot 41..42 "."
+              Ident 42..46 "iter"
+              ArgList 46..48
+                LParen 46..47 "("
+                RParen 47..48 ")"
+            Dot 48..49 "."
+            Ident 49..52 "map"
+            ArgList 52..71
+              LParen 52..53 "("
+              ClosureExpr 53..70
+                Pipe 53..54 "|"
+                Param 54..59
+                  Ident 54..59 "value"
+                Pipe 59..60 "|"
+                BinExpr 61..70
+                  PathExpr 61..66
+                    Ident 61..66 "value"
+                  Plus 67..68 "+"
+                  LiteralExpr 69..70
+                    Int 69..70 "1"
+              RParen 70..71 ")"
+          Dot 71..72 "."
+          Ident 72..77 "count"
+          ArgList 77..79
+            LParen 77..78 "("
+            RParen 78..79 ")"
+        Semi 79..80 ";"
+      RBrace 81..82 "}"

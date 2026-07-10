@@ -1,0 +1,39 @@
+source_len: 72
+SourceFile 0..72
+  FnDecl 0..71
+    KwFn 0..2 "fn"
+    Ident 3..7 "main"
+    LParen 7..8 "("
+    RParen 8..9 ")"
+    Block 9..71
+      LBrace 10..11 "{"
+      LetStmt 16..69
+        KwLet 16..19 "let"
+        Ident 20..23 "add"
+        Eq 24..25 "="
+        ClosureExpr 26..68
+          Pipe 26..27 "|"
+          Param 27..36
+            Ident 27..31 "left"
+            Colon 31..32 ":"
+            PathType 33..36
+              Ident 33..36 "i64"
+          Comma 36..37 ","
+          Param 37..43
+            Ident 38..43 "right"
+          Pipe 43..44 "|"
+          Arrow 45..47 "->"
+          PathType 48..51
+            Ident 48..51 "i64"
+          Block 51..68
+            LBrace 52..53 "{"
+            ExprStmt 54..66
+              BinExpr 54..66
+                PathExpr 54..58
+                  Ident 54..58 "left"
+                Plus 59..60 "+"
+                PathExpr 61..66
+                  Ident 61..66 "right"
+            RBrace 67..68 "}"
+        Semi 68..69 ";"
+      RBrace 70..71 "}"

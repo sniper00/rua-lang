@@ -715,6 +715,7 @@ fn expr_inline(e: &Expr) -> Doc {
         ]),
         Expr::StructLit(s) => struct_lit_doc(s),
         Expr::MacroCall(m) => macro_doc(m),
+        Expr::Closure(closure) => Doc::text(ser_node(closure.syntax())),
         Expr::If(_) | Expr::Match(_) | Expr::Block(_) => Doc::text(compact(e.syntax())),
     }
 }

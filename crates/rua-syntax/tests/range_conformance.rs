@@ -7,15 +7,17 @@
 use std::path::{Path, PathBuf};
 
 use rua_syntax::ast::{
-    FieldExpr as SyntaxFieldExpr, Item as SyntaxItem, MethodCallExpr as SyntaxMethodCallExpr,
-    PathExpr as SyntaxPathExpr,
+    ClosureExpr as SyntaxClosureExpr, FieldExpr as SyntaxFieldExpr, Item as SyntaxItem,
+    MethodCallExpr as SyntaxMethodCallExpr, PathExpr as SyntaxPathExpr, Stmt as SyntaxStmt,
 };
 use rua_syntax::{AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken, lex, parse_source_file};
-use ruac::ast::{Expr, ExprKind, Item as CompilerItem};
+use ruac::ast::{
+    ClosureBody, Expr, ExprKind, Item as CompilerItem, Stmt as CompilerStmt,
+};
 use ruac::token::{RuaTokenKind, SourceRange};
 use ruac::tokenize::RuaTokenize;
 
-const MIN_RANGE_CASES: usize = 13;
+const MIN_RANGE_CASES: usize = 15;
 
 fn range_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/parser/ranges")
@@ -293,4 +295,74 @@ fn range_conformance_path_and_member_access() {
         base.span,
         syntax_method.syntax().text_range(),
     );
+}
+
+#[test]
+fn range_conformance_closure_params_and_body() {
+    let source =
+        "fn main() { let add = |left: i64, right| -> i64 left + right; }\n";
+    let compiler = ruac::parser::parse(source).expect("compiler parser accepts closure case");
+    let parsed = parse_source_file(source);
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+
+    let CompilerStmt::Let { init, .. } = &function(&compiler, 0).body.stmts[0] else {
+        panic!("compiler statement is not a closure binding")
+    };
+    let ExprKind::Closure {
+        params,
+        body: ClosureBody::Expr(compiler_body),
+        ..
+    } = &init.kind
+    else {
+        panic!("compiler initializer is not an expression closure")
+    };
+    let SyntaxItem::Fn(syntax_function) =
+        parsed.tree.items().next().expect("CST function item")
+    else {
+        panic!("CST item is not a function")
+    };
+    let SyntaxStmt::Let(syntax_binding) = syntax_function
+        .body()
+        .expect("CST function body")
+        .stmts()
+        .next()
+        .expect("CST closure binding")
+    else {
+        panic!("CST statement is not a closure binding")
+    };
+    let syntax_closure = match syntax_binding.init().expect("CST closure initializer") {
+        rua_syntax::ast::Expr::Closure(closure) => closure,
+        _ => panic!("CST initializer is not a closure"),
+    };
+
+    assert_range_eq(
+        "closure expression",
+        source,
+        init.span,
+        syntax_closure.syntax().text_range(),
+    );
+    for (compiler_param, syntax_param) in params.iter().zip(syntax_closure.params()) {
+        let syntax_name = token_named(syntax_param.name(), &compiler_param.name);
+        assert_range_eq(
+            "closure parameter",
+            source,
+            compiler_param.name_span,
+            syntax_name.text_range(),
+        );
+    }
+    let syntax_body = syntax_closure.body().expect("CST closure body");
+    assert_range_eq(
+        "closure body",
+        source,
+        compiler_body.span,
+        syntax_body.syntax().text_range(),
+    );
+
+    let cast = parsed
+        .syntax_node()
+        .descendants()
+        .find_map(SyntaxClosureExpr::cast)
+        .expect("typed closure cast");
+    assert_eq!(cast.params().count(), 2);
+    assert!(cast.ret_type().is_some());
 }

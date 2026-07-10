@@ -16,7 +16,7 @@ Current inventory:
 
 - Compile pass: 43 `.rua` / `.lua.golden` pairs.
 - Compile fail: 42 `.rua` / `.diag.golden` pairs.
-- Parser/range: 12 accept, 5 reject, and 13 byte-range cases.
+- Parser/range: 15 accept, 6 reject, and 15 byte-range cases.
 - `.ruai`: 5 compiler pass, 1 compiler fail, and 4 IDE snapshots.
 - General IDE: 14 snapshots across completion, navigation, references, rename,
   diagnostics, and symbols.
@@ -36,8 +36,8 @@ Current inventory:
 | `HashMap<K, V>` | Yes | No | No | No | Basic codegen only; key/value mismatch goldens and dedicated parser/IDE snapshots are missing. |
 | Std macros and runtime calls | Yes | No | Partial | No | `println!`, `format!`, and macro nodes appear in range fixtures; misuse diagnostics are missing. |
 | Numeric ranges and `for` | Yes | No | Yes | No | Both range forms now have compiler Lua coverage; invalid-bound diagnostics and IDE coverage are still missing. |
-| Closures | No | No | No | No | Phase 4A pass/fail TODO fixtures are registered; parser/typecheck/codegen are not implemented yet. |
-| Iterator adapters and fusion | No | No | No | No | Phase 4A TODO fixtures and the fused-codegen contract are registered; adapters are not implemented yet. |
+| Closures | No | No | Yes | No | Both parsers accept expression/typed/block closures with range snapshots; typecheck/codegen are not implemented yet. |
+| Iterator adapters and fusion | No | No | Partial | No | Adapter-call closure syntax has parser/range coverage; iterator typing and fused codegen are not implemented yet. |
 | Inline modules and `use` | Yes | Yes | Yes | Yes | Inline/nested modules, aliases/grouped imports, private imports, use ranges, module-path completion and symbols. |
 | File modules (`.rua`) | No | Yes | No | Yes | Missing-module rejection and IDE cross-file queries exist; compiler pass/codegen and dedicated parser/range cases are absent. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
@@ -61,8 +61,8 @@ Current inventory:
 
 ## Known Gaps
 
-- Closures and iterator adapters have registered Phase 4A TODO fixtures but are
-  absent from both parsers and downstream executable goldens.
+- Closures and iterator adapters have parser fixtures plus registered Phase 4A
+  TODOs, but remain absent from type checking and executable codegen goldens.
 - Range/`for` syntax and Lua lowering are covered; invalid-bound behavior is not
   protected by a repository golden.
 - `Vec` and `HashMap` mismatch behavior has unit tests but no shared

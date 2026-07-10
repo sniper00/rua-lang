@@ -925,6 +925,7 @@ impl<'a> Parser<'a> {
     fn primary(&mut self) {
         self.eat_trivia();
         match self.current() {
+            K::Pipe | K::OrOr => self.closure_expr(),
             K::Int | K::Float | K::Str | K::KwTrue | K::KwFalse => {
                 let cp = self.builder.checkpoint();
                 self.bump();
@@ -963,6 +964,40 @@ impl<'a> Parser<'a> {
                 self.error_bump();
             }
         }
+    }
+
+    fn closure_expr(&mut self) {
+        let cp = self.builder.checkpoint();
+        if self.at(K::OrOr) {
+            self.bump();
+        } else {
+            self.expect(K::Pipe);
+            while !self.at(K::Pipe) && !self.at(K::Eof) {
+                let before = self.pos;
+                self.builder.start_node(K::Param);
+                self.expect_ident();
+                if self.accept(K::Colon) {
+                    self.ty();
+                }
+                self.builder.finish_node();
+                if !self.accept(K::Comma) {
+                    break;
+                }
+                if self.pos == before {
+                    self.error_bump();
+                }
+            }
+            self.expect(K::Pipe);
+        }
+        if self.accept(K::Arrow) {
+            self.ty();
+        }
+        if self.at(K::LBrace) {
+            self.block();
+        } else {
+            self.allow_struct_expr();
+        }
+        self.wrap(cp, K::ClosureExpr);
     }
 
     fn macro_call(&mut self) {
