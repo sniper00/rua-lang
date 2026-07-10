@@ -3,4 +3,5 @@ fn main() {
     let update = |value| {
         total = total + value;
     };
+    update(1);
 }

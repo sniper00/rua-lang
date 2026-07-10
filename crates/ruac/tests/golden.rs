@@ -40,11 +40,14 @@ const PHASE4A_TODO_PASS_CASES: &[&str] = &[
     "iterator_fold",
 ];
 const PHASE4A_TODO_FAIL_CASES: &[&str] = &[
-    "closure_param_cannot_infer",
-    "closure_mut_capture_invalid",
     "iterator_non_iterable_source",
     "iterator_filter_not_bool",
     "iterator_escape_unsupported",
+];
+const PHASE4A_ACTIVE_FAIL_CASES: &[&str] = &[
+    "closure_param_cannot_infer",
+    "closure_mut_capture_invalid",
+    "closure_escape_unsupported",
 ];
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",
@@ -260,6 +263,23 @@ fn run_ruai(update: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
+    let root = golden_root().join("phase4a/compile-fail");
+    for case in PHASE4A_ACTIVE_FAIL_CASES {
+        let source = root.join(format!("{case}.rua"));
+        let error = ruac::compile_path(&source).err();
+        let Some(error) = error else {
+            return Err(format!(
+                "Phase 4A compile-fail case {} compiled successfully",
+                fixture_label(&source)
+            ));
+        };
+        let actual = stable_diagnostic(&error);
+        assert_or_update(&source, &actual, GoldenKind::Diagnostic, update)?;
+    }
+    Ok(())
+}
+
 fn run(result: Result<(), String>) {
     result.unwrap_or_else(|error| panic!("{error}"));
 }
@@ -283,6 +303,14 @@ fn phase4a_todo_goldens_are_registered() {
     for case in PHASE4A_TODO_FAIL_CASES {
         let path = root.join("compile-fail").join(format!("{case}.rua"));
         assert!(path.is_file(), "missing Phase 4A TODO {}", path.display());
+    }
+    for case in PHASE4A_ACTIVE_FAIL_CASES {
+        let path = root.join("compile-fail").join(format!("{case}.rua"));
+        assert!(
+            path.is_file(),
+            "missing active Phase 4A case {}",
+            path.display()
+        );
     }
 }
 
@@ -360,6 +388,11 @@ fn golden_compile_fail() {
 }
 
 #[test]
+fn phase4a_golden_compile_fail() {
+    run(run_phase4a_compile_fail(false));
+}
+
+#[test]
 fn golden_ruai() {
     run(run_ruai(false));
 }
@@ -374,5 +407,6 @@ fn update_goldens() {
     );
     run(run_compile_pass(true));
     run(run_compile_fail(true));
+    run(run_phase4a_compile_fail(true));
     run(run_ruai(true));
 }

@@ -1,0 +1,3 @@
+fn main() {
+    let escaped = |value: i64| value + 1;
+}

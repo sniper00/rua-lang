@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/closure_mut_capture_invalid.rua:4: mutable capture of `total` is only supported in a fused iterator consumer

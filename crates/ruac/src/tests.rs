@@ -71,6 +71,130 @@ fn parser_range_keeps_exclusive_and_inclusive_forms() {
     assert_eq!(inclusive, [false, true]);
 }
 
+#[test]
+fn closure_typeck_infers_calls_blocks_and_read_captures() {
+    let cases = [
+        r#"
+fn main() -> i64 {
+    let increment = |value| value + 1;
+    increment(41)
+}
+"#,
+        r#"
+fn main() -> i64 {
+    let increment = |value: i64| -> i64 {
+        return value + 1;
+    };
+    increment(41)
+}
+"#,
+        r#"
+fn main() -> i64 {
+    let factor = 3;
+    let scale = |value| value * factor;
+    scale(14)
+}
+"#,
+    ];
+
+    for source in cases {
+        let (diagnostics, _) = crate::check_diags(source);
+        assert!(
+            diagnostics.is_empty(),
+            "valid closure produced diagnostics: {diagnostics:?}"
+        );
+        let bindings = crate::binding_types(source);
+        assert!(
+            bindings
+                .hits()
+                .iter()
+                .any(|binding| binding.display == "closure parameter value: i64"),
+            "closure parameter was not contextually inferred: {:?}",
+            bindings.hits()
+        );
+    }
+}
+
+#[test]
+fn closure_typeck_checks_signature_and_call_arguments() {
+    let source = r#"
+fn main() {
+    let stringify = |value: String| -> bool { value };
+    stringify(1);
+}
+"#;
+    let (diagnostics, _) = crate::check_diags(source);
+    let messages: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.msg.as_str())
+        .collect();
+    assert!(messages.iter().any(|message| {
+        message.contains("closure expects return type `bool`, found `String`")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("argument 1 of closure `stringify` expects `String`, found `i64`")
+    }));
+}
+
+#[test]
+fn closure_typeck_uses_iterator_adapter_item_context() {
+    let source = r#"
+fn main() {
+    let values = vec![1, 2, 3];
+    let mapped = values
+        .iter()
+        .map(|value| value + 1)
+        .filter(|value| value > 1);
+}
+"#;
+    let (diagnostics, _) = crate::check_diags(source);
+    assert!(
+        diagnostics.is_empty(),
+        "iterator closure context produced diagnostics: {diagnostics:?}"
+    );
+    let bindings = crate::binding_types(source);
+    let inferred = bindings
+        .hits()
+        .iter()
+        .filter(|binding| binding.display == "closure parameter value: i64")
+        .count();
+    assert_eq!(inferred, 2, "both adapter closures should infer i64");
+}
+
+#[test]
+fn closure_typeck_reports_unknown_mutable_capture_and_escape() {
+    let cases = [
+        (
+            "fn main() { let unknown = |value| value; }",
+            "cannot infer type of closure parameter `value`",
+        ),
+        (
+            concat!(
+                "fn main() {\n",
+                "  let mut total = 0;\n",
+                "  let update = |value: i64| { total = total + value; };\n",
+                "  update(1);\n",
+                "}\n",
+            ),
+            "mutable capture of `total` is only supported in a fused iterator consumer",
+        ),
+        (
+            "fn main() { let escaped = |value: i64| value; }",
+            "closure escape is not supported yet",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let (diagnostics, _) = crate::check_diags(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.msg.contains(expected)),
+            "missing {expected:?} in {diagnostics:?}"
+        );
+    }
+}
+
 fn compile(src: &str) -> String {
     compile_str(src).unwrap_or_else(|e| panic!("compile error: {}", e))
 }

@@ -45,6 +45,7 @@ pub fn compile_str(src: &str) -> Result<String, String> {
     resolve::resolve_uses(&mut program);
     check::check(&program, &files)?;
     let info = typeck::check(&program, &files)?;
+    reject_pending_closure_codegen(&info, &files)?;
     Ok(codegen::generate(&program, &info))
 }
 
@@ -54,7 +55,22 @@ pub fn compile_path(path: &Path) -> Result<String, String> {
     let (program, files) = parse_and_resolve(path)?;
     check::check(&program, &files)?;
     let info = typeck::check(&program, &files)?;
+    reject_pending_closure_codegen(&info, &files)?;
     Ok(codegen::generate(&program, &info))
+}
+
+fn reject_pending_closure_codegen(info: &typeck::TypeInfo, files: &[String]) -> Result<(), String> {
+    let Some(span) = info.first_closure() else {
+        return Ok(());
+    };
+    let diagnostic = Diag::new(
+        span.file,
+        span.start,
+        span.len,
+        span.line,
+        "closure codegen is not implemented yet".to_string(),
+    );
+    Err(diag::render_all(&[diagnostic], files))
 }
 
 /// Parse a file and splice in its file modules, without semantic checks. Returns

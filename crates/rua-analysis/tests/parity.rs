@@ -11,6 +11,7 @@ use rua_analysis::{
     Analysis, AnalysisHost, Change, DefKind, FileId, FileKind, FilePosition, SourceRootId,
     SourceRootKind,
 };
+use rua_syntax::{AstNode, Named, ast::ClosureExpr};
 use ruac::ast::{Item as CompilerItem, Program};
 
 fn workspace_root() -> PathBuf {
@@ -242,4 +243,102 @@ fn parity_file_modules_and_declaration_files() {
             "file-module parity failed for {fixture}"
         );
     }
+}
+
+#[test]
+fn closure_type_parity_matches_rowan_parameter_ranges() {
+    let source = concat!(
+        "fn main() -> i64 {\n",
+        "  let factor = 3;\n",
+        "  let scale = |value| value * factor;\n",
+        "  let scaled = scale(14);\n",
+        "  let add = |left: i64, right| -> i64 { left + right };\n",
+        "  let mapped = vec![1, 2].iter().map(|item| item + 1);\n",
+        "  add(scaled, 8)\n",
+        "}\n",
+    );
+    let parsed = rua_syntax::parse(source);
+    assert!(parsed.errors().is_empty(), "rowan parser rejected closure");
+
+    let rowan_params: Vec<_> = parsed
+        .syntax_node()
+        .descendants()
+        .filter_map(ClosureExpr::cast)
+        .flat_map(|closure| closure.params().collect::<Vec<_>>())
+        .map(|param| {
+            let name = param.name().expect("closure parameter name");
+            let range = name.text_range();
+            (
+                name.text().to_string(),
+                usize::from(range.start()),
+                usize::from(range.len()),
+            )
+        })
+        .collect();
+
+    let compiler = ruac::binding_types(source);
+    let compiler_params: Vec<_> = compiler
+        .hits()
+        .iter()
+        .filter(|binding| binding.display.starts_with("closure parameter "))
+        .map(|binding| {
+            (
+                source[binding.name_start..binding.name_start + binding.name_len].to_string(),
+                binding.name_start,
+                binding.name_len,
+                binding.display.clone(),
+            )
+        })
+        .collect();
+
+    assert_eq!(rowan_params.len(), compiler_params.len());
+    for ((name, start, len), (compiler_name, compiler_start, compiler_len, display)) in
+        rowan_params.iter().zip(&compiler_params)
+    {
+        assert_eq!(
+            (name, start, len),
+            (compiler_name, compiler_start, compiler_len)
+        );
+        assert_eq!(display, &format!("closure parameter {name}: i64"));
+    }
+
+    let (diagnostics, _) = ruac::check_diags(source);
+    assert!(
+        diagnostics.is_empty(),
+        "compiler type checker rejected rowan-accepted closure: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn closure_type_parity_preserves_mutable_capture_range() {
+    let source = concat!(
+        "fn main() {\n",
+        "  let mut total = 0;\n",
+        "  let update = |value: i64| { total = total + value; };\n",
+        "  update(1);\n",
+        "}\n",
+    );
+    let parsed = rua_syntax::parse(source);
+    assert!(parsed.errors().is_empty());
+    let (diagnostics, _) = ruac::check_diags(source);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.msg.starts_with("mutable capture of `total`"))
+        .expect("mutable capture diagnostic");
+    assert_eq!(
+        &source[diagnostic.start..diagnostic.start + diagnostic.len],
+        "total"
+    );
+    assert!(
+        parsed
+            .syntax_node()
+            .descendants_with_tokens()
+            .any(|element| {
+                element.into_token().is_some_and(|token| {
+                    token.text() == "total"
+                        && usize::from(token.text_range().start()) == diagnostic.start
+                        && usize::from(token.text_range().len()) == diagnostic.len
+                })
+            })
+    );
 }
