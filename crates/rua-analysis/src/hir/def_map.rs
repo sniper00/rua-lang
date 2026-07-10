@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::{
     BaseDb,
     hir::{
-        ItemKind, ItemTreeItem, ModuleKind, TextRange, Visibility,
+        Import, ItemKind, ItemTreeItem, ModuleKind, TextRange, Visibility,
         module_resolution::resolve_module_file,
     },
     vfs::FileId,
@@ -177,8 +177,10 @@ impl DefMap {
             db,
             map,
             active_files: HashSet::new(),
+            pending_imports: Vec::new(),
         };
         builder.lower_file(root, root_file);
+        builder.resolve_imports();
         builder.map
     }
 
@@ -227,12 +229,31 @@ impl DefMap {
         }
         self.resolve_name(module_id, last)
     }
+
+    pub fn resolve_path_lexical(
+        &self,
+        mut start: ModuleId,
+        segments: &[&str],
+    ) -> Option<&Definition> {
+        let (&first, remaining) = segments.split_first()?;
+        let mut definition = loop {
+            if let Some(definition) = self.resolve_name(start, first) {
+                break definition;
+            }
+            start = self.module(start)?.parent()?;
+        };
+        for segment in remaining {
+            definition = self.resolve_name(definition.target_module()?, segment)?;
+        }
+        Some(definition)
+    }
 }
 
 struct DefMapBuilder<'db> {
     db: &'db BaseDb,
     map: DefMap,
     active_files: HashSet<FileId>,
+    pending_imports: Vec<(ModuleId, Import)>,
 }
 
 impl DefMapBuilder<'_> {
@@ -242,6 +263,13 @@ impl DefMapBuilder<'_> {
         }
         let item_tree = self.db.item_tree(file_id);
         self.lower_items(module_id, file_id, item_tree.items());
+        self.pending_imports.extend(
+            item_tree
+                .imports()
+                .iter()
+                .cloned()
+                .map(|import| (module_id, import)),
+        );
         self.active_files.remove(&file_id);
     }
 
@@ -263,6 +291,12 @@ impl DefMapBuilder<'_> {
             match item.module_kind() {
                 Some(ModuleKind::Inline) => {
                     self.lower_items(child_module, file_id, item.children());
+                    self.pending_imports.extend(
+                        item.imports()
+                            .iter()
+                            .cloned()
+                            .map(|import| (child_module, import)),
+                    );
                 }
                 Some(ModuleKind::File) => {
                     if let Some(target_file) = target_file {
@@ -316,6 +350,29 @@ impl DefMapBuilder<'_> {
             .or_default()
             .push(def_id);
         def_id
+    }
+
+    fn resolve_imports(&mut self) {
+        let bindings: Vec<_> = self
+            .pending_imports
+            .iter()
+            .filter_map(|(module_id, import)| {
+                let segments: Vec<_> = import.path().iter().map(String::as_str).collect();
+                let definition = self.map.resolve_path_lexical(*module_id, &segments)?;
+                Some((
+                    *module_id,
+                    import.binding_name()?.to_string(),
+                    definition.id(),
+                ))
+            })
+            .collect();
+        for (module_id, name, def_id) in bindings {
+            self.map.modules[module_id.index() as usize]
+                .definitions
+                .entry(name)
+                .or_default()
+                .push(def_id);
+        }
     }
 }
 
@@ -420,5 +477,39 @@ mod tests {
             .expect("module data");
         assert_eq!(module_data.file_id(), None);
         assert!(module_data.definitions().next().is_none());
+    }
+
+    #[test]
+    fn def_map_resolves_simple_alias_and_grouped_import_bindings() {
+        let root_id = SourceRootId::new(0);
+        let file_id = FileId::new(0);
+        let mut change = Change::new();
+        change.set_source_root(root_id, SourceRootKind::Workspace);
+        change.set_file_with_path(
+            file_id,
+            root_id,
+            FileKind::Source,
+            "main.rua",
+            concat!(
+                "mod math { pub fn one() {} pub fn two() {} }\n",
+                "use math::{one, two as second};\n",
+            ),
+        );
+        let mut host = AnalysisHost::new();
+        host.apply_change(change);
+        let map = host.analysis().def_map(file_id);
+
+        assert_eq!(
+            map.resolve_name(map.root(), "one")
+                .expect("grouped import")
+                .name(),
+            "one"
+        );
+        assert_eq!(
+            map.resolve_name(map.root(), "second")
+                .expect("aliased grouped import")
+                .name(),
+            "two"
+        );
     }
 }

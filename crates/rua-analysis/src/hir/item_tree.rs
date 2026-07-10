@@ -64,6 +64,27 @@ pub enum Visibility {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Import {
+    path: Vec<String>,
+    alias: Option<String>,
+}
+
+impl Import {
+    pub fn path(&self) -> &[String] {
+        &self.path
+    }
+
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    pub fn binding_name(&self) -> Option<&str> {
+        self.alias()
+            .or_else(|| self.path.last().map(String::as_str))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemTreeItem {
     name: String,
     kind: ItemKind,
@@ -72,6 +93,7 @@ pub struct ItemTreeItem {
     visibility: Visibility,
     module_kind: Option<ModuleKind>,
     children: Vec<ItemTreeItem>,
+    imports: Vec<Import>,
 }
 
 impl ItemTreeItem {
@@ -102,30 +124,73 @@ impl ItemTreeItem {
     pub fn children(&self) -> &[ItemTreeItem] {
         &self.children
     }
+
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
+    }
 }
 
 /// Compact declaration-only representation of one file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemTree {
     items: Vec<ItemTreeItem>,
+    imports: Vec<Import>,
 }
 
 impl ItemTree {
     pub fn lower(file: &SourceFile) -> Self {
-        Self {
-            items: Self::lower_items(file.items()),
-        }
+        let (items, imports) = Self::lower_scope(file.items());
+        Self { items, imports }
     }
 
     pub fn items(&self) -> &[ItemTreeItem] {
         &self.items
     }
 
-    fn lower_items(items: impl Iterator<Item = Item>) -> Vec<ItemTreeItem> {
-        items.flat_map(Self::lower_item).collect()
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
     }
 
-    fn lower_item(item: Item) -> Vec<ItemTreeItem> {
+    fn lower_scope(items: impl Iterator<Item = Item>) -> (Vec<ItemTreeItem>, Vec<Import>) {
+        let mut summaries = Vec::new();
+        let mut imports = Vec::new();
+        for item in items {
+            match item {
+                Item::Use(item) => imports.extend(item.imports().map(|import| {
+                    Import {
+                        path: import
+                            .path
+                            .into_iter()
+                            .map(|token| token.text().to_string())
+                            .collect(),
+                        alias: import.alias.map(|token| token.text().to_string()),
+                    }
+                })),
+                Item::Mod(item) => {
+                    let module_kind = if item.is_file() {
+                        ModuleKind::File
+                    } else {
+                        ModuleKind::Inline
+                    };
+                    let (children, module_imports) = if module_kind == ModuleKind::Inline {
+                        Self::lower_scope(item.items())
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    if let Some(mut summary) = Self::named(&item, ItemKind::Module, item.is_pub()) {
+                        summary.module_kind = Some(module_kind);
+                        summary.children = children;
+                        summary.imports = module_imports;
+                        summaries.push(summary);
+                    }
+                }
+                item => summaries.extend(Self::lower_non_module_item(item)),
+            }
+        }
+        (summaries, imports)
+    }
+
+    fn lower_non_module_item(item: Item) -> Vec<ItemTreeItem> {
         match item {
             Item::Fn(item) => Self::named(&item, ItemKind::Function, item.is_pub())
                 .into_iter()
@@ -139,33 +204,13 @@ impl ItemTree {
             Item::Trait(item) => Self::named(&item, ItemKind::Trait, item.is_pub())
                 .into_iter()
                 .collect(),
-            Item::Mod(item) => {
-                let module_kind = if item.is_file() {
-                    ModuleKind::File
-                } else {
-                    ModuleKind::Inline
-                };
-                let children = if module_kind == ModuleKind::Inline {
-                    Self::lower_items(item.items())
-                } else {
-                    Vec::new()
-                };
-                Self::named(&item, ItemKind::Module, item.is_pub())
-                    .map(|mut summary| {
-                        summary.module_kind = Some(module_kind);
-                        summary.children = children;
-                        summary
-                    })
-                    .into_iter()
-                    .collect()
-            }
             Item::Extern(block) => block
                 .fns()
                 .filter_map(|function| {
                     Self::named(&function, ItemKind::Function, function.is_pub())
                 })
                 .collect(),
-            Item::Impl(_) | Item::Use(_) => Vec::new(),
+            Item::Impl(_) | Item::Mod(_) | Item::Use(_) => Vec::new(),
         }
     }
 
@@ -183,6 +228,7 @@ impl ItemTree {
             },
             module_kind: None,
             children: Vec::new(),
+            imports: Vec::new(),
         })
     }
 }
@@ -266,5 +312,23 @@ mod tests {
 
         assert_eq!(tree.items().len(), 1);
         assert_eq!(tree.items()[0].name(), "valid");
+    }
+
+    #[test]
+    fn item_tree_lowers_imports_in_their_module_scope() {
+        let parse = parse_source_file(concat!(
+            "use math::{one, two as second};\n",
+            "mod nested { use parent::value as local; fn call() {} }\n",
+        ));
+        let tree = ItemTree::lower(parse.tree());
+
+        assert_eq!(tree.imports().len(), 2);
+        assert_eq!(tree.imports()[0].path(), ["math", "one"]);
+        assert_eq!(tree.imports()[0].binding_name(), Some("one"));
+        assert_eq!(tree.imports()[1].path(), ["math", "two"]);
+        assert_eq!(tree.imports()[1].binding_name(), Some("second"));
+        assert_eq!(tree.items()[0].imports().len(), 1);
+        assert_eq!(tree.items()[0].imports()[0].path(), ["parent", "value"]);
+        assert_eq!(tree.items()[0].imports()[0].binding_name(), Some("local"));
     }
 }

@@ -12,3 +12,6 @@ doctest = false
 [dependencies]
 rua-syntax.workspace = true
 rowan.workspace = true
+
+[dev-dependencies]
+ruac.workspace = true

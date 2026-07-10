@@ -536,6 +536,7 @@ impl UseDecl {
                 .skip_while(|t| t.kind() != K::Ident) // skip `use`
                 .collect::<Vec<_>>(),
             pos: 0,
+            group_prefix: Vec::new(),
         }
     }
 }
@@ -550,6 +551,7 @@ pub struct UseImport {
 struct UseImportIter {
     tokens: Vec<SyntaxToken>,
     pos: usize,
+    group_prefix: Vec<SyntaxToken>,
 }
 
 impl Iterator for UseImportIter {
@@ -566,7 +568,12 @@ impl Iterator for UseImportIter {
                 self.pos += 1;
                 continue;
             }
-            if kind == K::RBrace || kind == K::Semi || kind == K::KwAs {
+            if kind == K::RBrace {
+                self.group_prefix.clear();
+                self.pos += 1;
+                continue;
+            }
+            if kind == K::Semi || kind == K::KwAs {
                 self.pos += 1;
                 continue;
             }
@@ -577,7 +584,7 @@ impl Iterator for UseImportIter {
         }
 
         // Collect path segments, skipping trivia between `::` separators.
-        let mut path = Vec::new();
+        let mut path = self.group_prefix.clone();
         loop {
             let kind = self.tokens[self.pos].kind();
             if kind == K::Ident || kind == K::KwSelf {
@@ -596,6 +603,7 @@ impl Iterator for UseImportIter {
                 if self.pos < self.tokens.len() && self.tokens[self.pos].kind() == K::LBrace {
                     self.pos += 1;
                     self.skip_trivia();
+                    self.group_prefix = path.clone();
                 }
             } else {
                 break;
@@ -1659,6 +1667,35 @@ mod tests {
         assert_eq!(
             imports[0].alias.as_ref().map(|t| t.text().to_string()).as_deref(),
             Some("c")
+        );
+    }
+
+    #[test]
+    fn use_imports_grouped_retain_common_prefix() {
+        let sf = source_file("use math::{one, two as second};\n");
+        let Item::Use(u) = sf.items().next().unwrap() else { panic!() };
+        let imports: Vec<_> = u.imports().collect();
+
+        assert_eq!(imports.len(), 2);
+        assert_eq!(
+            imports[0]
+                .path
+                .iter()
+                .map(|token| token.text().to_string())
+                .collect::<Vec<_>>(),
+            ["math", "one"]
+        );
+        assert_eq!(
+            imports[1]
+                .path
+                .iter()
+                .map(|token| token.text().to_string())
+                .collect::<Vec<_>>(),
+            ["math", "two"]
+        );
+        assert_eq!(
+            imports[1].alias.as_ref().map(|token| token.text()),
+            Some("second")
         );
     }
 

@@ -15,8 +15,8 @@ pub mod vfs;
 pub use db::BaseDb;
 pub use diagnostic::Diagnostic;
 pub use hir::{
-    DefId, DefKind, DefMap, Definition, ItemKind, ItemTree, ItemTreeItem, ModuleData, ModuleId,
-    ModuleKind, TextRange, Visibility,
+    DefId, DefKind, DefMap, Definition, Import, ItemKind, ItemTree, ItemTreeItem, ModuleData,
+    ModuleId, ModuleKind, TextRange, Visibility,
 };
 pub use ide::{Analysis, AnalysisHost, DocumentSymbol, WorkspaceSymbol};
 pub use semantic::{FilePosition, Semantics};
