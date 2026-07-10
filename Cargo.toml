@@ -10,4 +10,5 @@ members = [
 [workspace.dependencies]
 ruac = { path = "crates/ruac" }
 rua-syntax = { path = "crates/rua-syntax" }
+rua-analysis = { path = "crates/rua-analysis" }
 rowan = "0.15"

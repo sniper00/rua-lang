@@ -8,10 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod analysis_inputs;
+
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+    Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as _};
 use lsp_types::{
@@ -28,6 +30,8 @@ use rua_syntax::analysis::{CompletionMember, LocalCompletion, MemberKind};
 use rua_syntax::symbols::{Symbol, SymbolKind};
 use rua_syntax::workspace::{DiskLoader, Workspace, normalize_path};
 use rua_syntax::LineIndex;
+
+use analysis_inputs::AnalysisInputs;
 
 fn main() {
     eprintln!("rua-lsp: starting...");
@@ -68,18 +72,24 @@ fn main() {
     // Extract workspace folders so we can eagerly index all sources under each
     // root. Without eager indexing, cross-file references / rename would only
     // cover files the user has opened.
-    let workspace_folders: Vec<Uri> = serde_json::from_value::<InitializeParams>(init_params)
-        .map(|p| {
-            p.workspace_folders
-                .unwrap_or_default()
-                .into_iter()
-                .map(|f| f.uri)
-                .collect()
-        })
-        .unwrap_or_default();
+    let (workspace_folders, initialization_options): (Vec<Uri>, _) =
+        serde_json::from_value::<InitializeParams>(init_params)
+            .map(|p| {
+                let folders = p
+                    .workspace_folders
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.uri)
+                    .collect();
+                (folders, p.initialization_options)
+            })
+            .unwrap_or_default();
 
     let mut server = Server::new(connection);
     server.index_workspace_folders(&workspace_folders);
+    if let Some(settings) = initialization_options {
+        server.reload_analysis_configuration(&settings);
+    }
     if let Err(e) = server.main_loop() {
         eprintln!("rua-lsp: error in main loop: {e}");
     }
@@ -98,6 +108,9 @@ struct Server {
     /// visible to every query; on-disk files are lazily loaded on demand.
     /// There is no parallel document cache — this is the one owner.
     workspace: Workspace<DiskLoader>,
+    /// New analysis pipeline inputs. Feature handlers continue to use the
+    /// legacy workspace until their Phase 3/4 migrations are complete.
+    analysis_inputs: AnalysisInputs,
 }
 
 impl Server {
@@ -105,6 +118,7 @@ impl Server {
         Server {
             connection,
             workspace: Workspace::new(DiskLoader),
+            analysis_inputs: AnalysisInputs::new(),
         }
     }
 
@@ -637,8 +651,36 @@ impl Server {
                 // Clear diagnostics for the closed document.
                 self.send_diagnostics(&uri, &[]);
             }
+            DidChangeConfiguration::METHOD => {
+                let params: lsp_types::DidChangeConfigurationParams =
+                    match serde_json::from_value(not.params) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("rua-lsp: bad didChangeConfiguration params: {e}");
+                            return;
+                        }
+                    };
+                self.reload_analysis_configuration(&params.settings);
+            }
             _ => {
                 // Ignore unknown notifications silently (LSP allows this).
+            }
+        }
+    }
+
+    fn reload_analysis_configuration(&mut self, settings: &serde_json::Value) {
+        match self.analysis_inputs.reload_from_settings(settings) {
+            Ok(report) => {
+                eprintln!(
+                    "rua-lsp: loaded {} declaration(s) from {} configured library root(s)",
+                    report.file_count, report.configured_root_count
+                );
+                for warning in report.warnings {
+                    eprintln!("rua-lsp: library warning: {warning}");
+                }
+            }
+            Err(error) => {
+                eprintln!("rua-lsp: invalid library configuration: {error}");
             }
         }
     }

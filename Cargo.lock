@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "rua-analysis",
  "rua-syntax",
  "ruac",
  "serde_json",
