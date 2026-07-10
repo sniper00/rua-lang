@@ -1,0 +1,10 @@
+[package]
+name = "rua-analysis"
+version = "0.1.0"
+edition = "2024"
+description = "Incremental semantic analysis and IDE queries for Rua."
+
+[lib]
+name = "rua_analysis"
+path = "src/lib.rs"
+doctest = false

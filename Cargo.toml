@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ruac",
     "crates/rua-syntax",
+    "crates/rua-analysis",
     "crates/rua-lsp",
 ]
 
