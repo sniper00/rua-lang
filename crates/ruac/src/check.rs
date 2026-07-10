@@ -424,6 +424,10 @@ fn vis_expr(root: &ModNode, cur: &[String], e: &Expr, errs: &mut Vec<Diag>) {
     let sp = e.span;
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::Closure { body, .. } => match body {
+            ClosureBody::Expr(expr) => vis_expr(root, cur, expr, errs),
+            ClosureBody::Block(block) => vis_block(root, cur, block, errs),
+        },
         ExprKind::Path(segs) => check_vis(root, cur, segs, sp, errs),
         ExprKind::StructLit { path, fields } => {
             check_vis(root, cur, path, sp, errs);
@@ -567,6 +571,13 @@ fn walk_expr(info: &Info, e: &Expr, errs: &mut Vec<Diag>) {
     let sp = e.span;
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::Closure { body, .. } => {
+            errs.push(at(sp, "closure codegen is not implemented yet".to_string()));
+            match body {
+                ClosureBody::Expr(expr) => walk_expr(info, expr, errs),
+                ClosureBody::Block(block) => walk_block(info, block, errs),
+            }
+        }
         ExprKind::Path(segs) => check_path(info, segs, sp, errs),
         ExprKind::Unary { expr, .. } => walk_expr(info, expr, errs),
         ExprKind::Binary { lhs, rhs, .. } => {

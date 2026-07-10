@@ -244,11 +244,29 @@ impl Expr {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClosureParam {
+    pub name: String,
+    pub name_span: SourceRange,
+    pub ty: Option<Type>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClosureBody {
+    Expr(Box<Expr>),
+    Block(Block),
+}
+
+#[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(String),
     Float(String),
     Str(String),
     Bool(bool),
+    Closure {
+        params: Vec<ClosureParam>,
+        ret: Option<Type>,
+        body: ClosureBody,
+    },
     /// A bare name or `::`-joined path, e.g. `x`, `Foo::bar`.
     Path(Vec<String>),
     Unary {

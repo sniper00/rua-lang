@@ -131,6 +131,15 @@ fn set_file_expr(e: &mut Expr, id: u32) {
     match &mut e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
+        ExprKind::Closure { params, body, .. } => {
+            for parameter in params {
+                parameter.name_span.file = id;
+            }
+            match body {
+                ClosureBody::Expr(expr) => set_file_expr(expr, id),
+                ClosureBody::Block(block) => set_file_block(block, id),
+            }
+        }
         ExprKind::Unary { expr, .. } => set_file_expr(expr, id),
         ExprKind::Binary { lhs, rhs, .. } => {
             set_file_expr(lhs, id);
@@ -331,6 +340,17 @@ fn rewrite_stmt(s: &mut Stmt, aliases: &Aliases, scopes: &mut Scopes) {
 fn rewrite_expr(e: &mut Expr, aliases: &Aliases, scopes: &mut Scopes) {
     match &mut e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::Closure { params, body, .. } => {
+            scopes.push(HashSet::new());
+            for parameter in params {
+                bind(scopes, parameter.name.clone());
+            }
+            match body {
+                ClosureBody::Expr(expr) => rewrite_expr(expr, aliases, scopes),
+                ClosureBody::Block(block) => rewrite_block(block, aliases, scopes),
+            }
+            scopes.pop();
+        }
         ExprKind::Path(segs) => rewrite_path(segs, aliases, scopes),
         ExprKind::Unary { expr, .. } => rewrite_expr(expr, aliases, scopes),
         ExprKind::Binary { lhs, rhs, .. } => {

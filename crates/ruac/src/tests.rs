@@ -1,5 +1,76 @@
 use crate::compile_str;
 
+#[test]
+fn parser_closure_supports_expression_typed_block_and_empty_params() {
+    use crate::ast::{ClosureBody, ExprKind, Item, Stmt};
+
+    let program = crate::parser::parse(concat!(
+        "fn main() {\n",
+        "  let add = |left, right| left + right;\n",
+        "  let typed = |value: i64| -> i64 { value + 1 };\n",
+        "  let empty = || 42;\n",
+        "}\n",
+    ))
+    .expect("parse closures");
+    let Item::Fn(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    let closures: Vec<_> = function
+        .body
+        .stmts
+        .iter()
+        .map(|statement| {
+            let Stmt::Let { init, .. } = statement else {
+                panic!("expected closure binding");
+            };
+            let ExprKind::Closure { params, ret, body } = &init.kind else {
+                panic!("expected closure expression");
+            };
+            (params, ret, body)
+        })
+        .collect();
+
+    assert_eq!(closures[0].0.len(), 2);
+    assert!(closures[0].0.iter().all(|parameter| parameter.ty.is_none()));
+    assert!(closures[0].1.is_none());
+    assert!(matches!(closures[0].2, ClosureBody::Expr(_)));
+    assert_eq!(closures[1].0.len(), 1);
+    assert!(closures[1].0[0].ty.is_some());
+    assert!(closures[1].1.is_some());
+    assert!(matches!(closures[1].2, ClosureBody::Block(_)));
+    assert!(closures[2].0.is_empty());
+    assert!(matches!(closures[2].2, ClosureBody::Expr(_)));
+}
+
+#[test]
+fn parser_range_keeps_exclusive_and_inclusive_forms() {
+    use crate::ast::{ExprKind, Item, Stmt};
+
+    let program = crate::parser::parse(
+        "fn main() { for x in 0..3 {} for y in 0..=3 {} }",
+    )
+    .expect("parse ranges");
+    let Item::Fn(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    let inclusive: Vec<_> = function
+        .body
+        .stmts
+        .iter()
+        .map(|statement| {
+            let Stmt::For { iter, .. } = statement else {
+                panic!("expected for statement");
+            };
+            let ExprKind::Range { inclusive, .. } = iter.kind else {
+                panic!("expected range iterator");
+            };
+            inclusive
+        })
+        .collect();
+
+    assert_eq!(inclusive, [false, true]);
+}
+
 fn compile(src: &str) -> String {
     compile_str(src).unwrap_or_else(|e| panic!("compile error: {}", e))
 }

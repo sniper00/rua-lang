@@ -812,6 +812,7 @@ impl Codegen<'_> {
             ExprKind::Float(s) => s.replace('_', ""),
             ExprKind::Str(s) => s.clone(),
             ExprKind::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            ExprKind::Closure { .. } => "nil --[[ closure codegen pending ]]".to_string(),
             ExprKind::Path(segs) => self.gen_path(segs),
             ExprKind::Unary { op, expr } => {
                 let inner = self.gen_inline(expr);

@@ -123,6 +123,10 @@ fn collect_calls_on_block<'a>(name: &str, b: &'a Block, out: &mut Vec<(&'a str, 
 
 fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'a [Expr])>) {
     match &e.kind {
+        ExprKind::Closure { body, .. } => match body {
+            ClosureBody::Expr(expr) => collect_calls_on_expr(name, expr, out),
+            ClosureBody::Block(block) => collect_calls_on_block(name, block, out),
+        },
         ExprKind::MethodCall { recv, method, args, .. } => {
             if let ExprKind::Path(segs) = &recv.kind
                 && segs.len() == 1
@@ -1545,6 +1549,27 @@ impl Tc {
             ExprKind::Float(_) => Ty::F64,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::Closure { params, body, .. } => {
+                self.push();
+                for parameter in params {
+                    self.record_binding(
+                        &parameter.name_span,
+                        &Ty::Unknown,
+                        &format!("closure parameter {}", parameter.name),
+                    );
+                    self.bind(&parameter.name, Ty::Unknown);
+                }
+                match body {
+                    ClosureBody::Expr(expr) => {
+                        self.infer(expr);
+                    }
+                    ClosureBody::Block(block) => {
+                        self.block(block);
+                    }
+                }
+                self.pop();
+                Ty::Unknown
+            }
             ExprKind::Path(segs) => {
                 if segs.len() == 1 {
                     self.lookup(&segs[0]).unwrap_or(Ty::Unknown)

@@ -898,6 +898,7 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<Expr, String> {
         let start = self.lexer.current_range();
         match self.cur() {
+            T::Pipe | T::OrOr => self.parse_closure(),
             T::Int => {
                 let s = self.text().to_string();
                 self.bump()?;
@@ -955,6 +956,45 @@ impl<'a> Parser<'a> {
                 other.to_user_string()
             ))),
         }
+    }
+
+    fn parse_closure(&mut self) -> Result<Expr, String> {
+        let start = self.lexer.current_range();
+        let mut params = Vec::new();
+        if self.cur() == T::OrOr {
+            self.bump()?;
+        } else {
+            self.expect(T::Pipe)?;
+            while self.cur() != T::Pipe && self.cur() != T::Eof {
+                let name_span = self.lexer.current_range();
+                let name = self.expect_ident()?;
+                let ty = if self.accept(T::Colon)? {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                params.push(ClosureParam {
+                    name,
+                    name_span,
+                    ty,
+                });
+                if !self.accept(T::Comma)? {
+                    break;
+                }
+            }
+            self.expect(T::Pipe)?;
+        }
+        let ret = if self.accept(T::Arrow)? {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let body = if self.cur() == T::LBrace {
+            ClosureBody::Block(self.parse_block()?)
+        } else {
+            ClosureBody::Expr(Box::new(self.parse_expr_allow_struct()?))
+        };
+        Ok(self.mk(ExprKind::Closure { params, ret, body }, start))
     }
 
     fn parse_macro(&mut self) -> Result<Expr, String> {
