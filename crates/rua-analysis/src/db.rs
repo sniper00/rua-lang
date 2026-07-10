@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use rua_syntax::{Parse, ast::SourceFile, parse_source_file};
 
-use crate::vfs::{FileId, Vfs};
+use crate::vfs::{Change, FileId, Vfs};
 
 /// In-memory analysis inputs and their derived per-file data.
 #[derive(Clone, Debug, Default)]
@@ -26,6 +26,13 @@ impl BaseDb {
     pub fn remove_file(&mut self, file_id: FileId) {
         self.vfs.remove_file(file_id);
         self.parse_cache.get_mut().remove(&file_id);
+    }
+
+    pub fn apply_change(&mut self, change: Change) {
+        for file_change in change.file_changes() {
+            self.parse_cache.get_mut().remove(&file_change.file_id());
+        }
+        self.vfs.apply_change(change);
     }
 
     pub fn file_text(&self, file_id: FileId) -> Option<Arc<str>> {

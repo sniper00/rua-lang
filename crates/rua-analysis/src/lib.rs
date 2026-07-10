@@ -13,3 +13,6 @@ pub mod semantic;
 pub mod vfs;
 
 pub use db::BaseDb;
+pub use diagnostic::Diagnostic;
+pub use ide::{Analysis, AnalysisHost};
+pub use vfs::{Change, FileId, FileKind, SourceRootId, SourceRootKind};

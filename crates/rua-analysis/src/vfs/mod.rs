@@ -53,6 +53,14 @@ pub enum FileChange {
     Remove { file_id: FileId },
 }
 
+impl FileChange {
+    pub const fn file_id(&self) -> FileId {
+        match self {
+            Self::SetText { file_id, .. } | Self::Remove { file_id } => *file_id,
+        }
+    }
+}
+
 /// A batch of input mutations submitted by a loader or protocol adapter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Change {
