@@ -1,0 +1,7 @@
+fn main() -> Vec<i64> {
+    vec![1, 2, 3, 4]
+        .iter()
+        .map(|value| value * 2)
+        .filter(|value| value > 4)
+        .collect::<Vec<i64>>()
+}

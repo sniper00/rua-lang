@@ -14,7 +14,7 @@ Status meanings:
 
 Current inventory:
 
-- Compile pass: 42 `.rua` / `.lua.golden` pairs.
+- Compile pass: 43 `.rua` / `.lua.golden` pairs.
 - Compile fail: 42 `.rua` / `.diag.golden` pairs.
 - Parser/range: 12 accept, 5 reject, and 13 byte-range cases.
 - `.ruai`: 5 compiler pass, 1 compiler fail, and 4 IDE snapshots.
@@ -35,9 +35,9 @@ Current inventory:
 | `Vec<T>` | Yes | No | Yes | No | Basic codegen and index/type syntax covered; no shared element-mismatch diagnostic or Vec completion snapshot. |
 | `HashMap<K, V>` | Yes | No | No | No | Basic codegen only; key/value mismatch goldens and dedicated parser/IDE snapshots are missing. |
 | Std macros and runtime calls | Yes | No | Partial | No | `println!`, `format!`, and macro nodes appear in range fixtures; misuse diagnostics are missing. |
-| Numeric ranges and `for` | No | No | Yes | No | Both parsers and byte ranges cover `..`/`..=`; compiler Lua and rejection goldens are still missing. |
-| Closures | No | No | No | No | Closure syntax/typecheck/codegen is not implemented in the current dual-parser baseline. |
-| Iterator adapters and fusion | No | No | No | No | No map/filter/collect/fold pipeline or performance-shape golden exists yet. |
+| Numeric ranges and `for` | Yes | No | Yes | No | Both range forms now have compiler Lua coverage; invalid-bound diagnostics and IDE coverage are still missing. |
+| Closures | No | No | No | No | Phase 4A pass/fail TODO fixtures are registered; parser/typecheck/codegen are not implemented yet. |
+| Iterator adapters and fusion | No | No | No | No | Phase 4A TODO fixtures and the fused-codegen contract are registered; adapters are not implemented yet. |
 | Inline modules and `use` | Yes | Yes | Yes | Yes | Inline/nested modules, aliases/grouped imports, private imports, use ranges, module-path completion and symbols. |
 | File modules (`.rua`) | No | Yes | No | Yes | Missing-module rejection and IDE cross-file queries exist; compiler pass/codegen and dedicated parser/range cases are absent. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
@@ -61,10 +61,10 @@ Current inventory:
 
 ## Known Gaps
 
-- Closures and iterator adapters are absent from both parsers and all downstream
-  golden layers.
-- Range/`for` syntax is parsed, but its Lua lowering and invalid-bound behavior
-  are not protected by repository goldens.
+- Closures and iterator adapters have registered Phase 4A TODO fixtures but are
+  absent from both parsers and downstream executable goldens.
+- Range/`for` syntax and Lua lowering are covered; invalid-bound behavior is not
+  protected by a repository golden.
 - `Vec` and `HashMap` mismatch behavior has unit tests but no shared
   compile-fail oracle.
 - File-based `.rua` module compilation lacks positive Lua goldens under

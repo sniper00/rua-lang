@@ -31,6 +31,21 @@ const RUAI_COMPILE_PASS_CASES: &[&str] = &[
     "workspace_shadows_library",
 ];
 const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_type_error"];
+const PHASE4A_TODO_PASS_CASES: &[&str] = &[
+    "closure_expr_inferred",
+    "closure_block_typed",
+    "closure_capture_read",
+    "iterator_vec_for",
+    "iterator_map_filter_collect",
+    "iterator_fold",
+];
+const PHASE4A_TODO_FAIL_CASES: &[&str] = &[
+    "closure_param_cannot_infer",
+    "closure_mut_capture_invalid",
+    "iterator_non_iterable_source",
+    "iterator_filter_not_bool",
+    "iterator_escape_unsupported",
+];
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",
     "compile-fail",
@@ -40,6 +55,7 @@ const REQUIRED_DIRS: &[&str] = &[
     "modules",
     "ruai",
     "ide",
+    "phase4a",
 ];
 
 #[derive(Clone, Copy)]
@@ -254,6 +270,30 @@ fn golden_layout_is_present() {
     for relative in REQUIRED_DIRS {
         let path = root.join(relative);
         assert!(path.is_dir(), "missing golden directory {}", path.display());
+    }
+}
+
+#[test]
+fn phase4a_todo_goldens_are_registered() {
+    let root = golden_root().join("phase4a");
+    for case in PHASE4A_TODO_PASS_CASES {
+        let path = root.join("compile-pass").join(format!("{case}.rua"));
+        assert!(path.is_file(), "missing Phase 4A TODO {}", path.display());
+    }
+    for case in PHASE4A_TODO_FAIL_CASES {
+        let path = root.join("compile-fail").join(format!("{case}.rua"));
+        assert!(path.is_file(), "missing Phase 4A TODO {}", path.display());
+    }
+}
+
+#[test]
+#[ignore = "Phase 4A compile-pass TODOs are enabled by their implementation steps"]
+fn phase4a_todo_compile_pass() {
+    let root = golden_root().join("phase4a/compile-pass");
+    for case in PHASE4A_TODO_PASS_CASES {
+        let path = root.join(format!("{case}.rua"));
+        ruac::compile_path(&path)
+            .unwrap_or_else(|error| panic!("Phase 4A TODO {case} still fails: {error}"));
     }
 }
 

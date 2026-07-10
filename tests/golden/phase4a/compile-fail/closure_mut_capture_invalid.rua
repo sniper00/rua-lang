@@ -1,0 +1,6 @@
+fn main() {
+    let mut total = 0;
+    let update = |value| {
+        total = total + value;
+    };
+}

@@ -1,0 +1,4 @@
+fn main() -> i64 {
+    let increment = |value| value + 1;
+    increment(41)
+}

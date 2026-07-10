@@ -1,0 +1,5 @@
+fn main() -> i64 {
+    let factor = 3;
+    let scale = |value| value * factor;
+    scale(14)
+}
