@@ -8,3 +8,6 @@ description = "Incremental semantic analysis and IDE queries for Rua."
 name = "rua_analysis"
 path = "src/lib.rs"
 doctest = false
+
+[dependencies]
+rua-syntax.workspace = true

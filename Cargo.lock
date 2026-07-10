@@ -137,6 +137,9 @@ dependencies = [
 [[package]]
 name = "rua-analysis"
 version = "0.1.0"
+dependencies = [
+ "rua-syntax",
+]
 
 [[package]]
 name = "rua-lsp"

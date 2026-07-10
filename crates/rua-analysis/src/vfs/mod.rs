@@ -97,14 +97,22 @@ impl Vfs {
         Self::default()
     }
 
+    pub fn set_file_text(&mut self, file_id: FileId, text: impl Into<Arc<str>>) {
+        self.file_texts.insert(file_id, text.into());
+    }
+
+    pub fn remove_file(&mut self, file_id: FileId) -> Option<Arc<str>> {
+        self.file_texts.remove(&file_id)
+    }
+
     pub fn apply_change(&mut self, change: Change) {
         for file_change in change.file_changes {
             match file_change {
                 FileChange::SetText { file_id, text } => {
-                    self.file_texts.insert(file_id, text);
+                    self.set_file_text(file_id, text);
                 }
                 FileChange::Remove { file_id } => {
-                    self.file_texts.remove(&file_id);
+                    self.remove_file(file_id);
                 }
             }
         }
