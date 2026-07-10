@@ -1,0 +1,17 @@
+// moon.ruai — a *declaration file* for the moon_rs host `moon` global.
+//
+// Loaded via `mod moon;` (the resolver prefers `moon.rua`, then falls back to
+// `moon.ruai`). A `.ruai` module is declaration-only: the type checker learns
+// these signatures so calls like `moon::log("hi")` are checked, but the code
+// generator emits NO Lua for it. References therefore resolve to the `moon`
+// table the host provides natively at runtime.
+//
+// Only a small illustrative subset of the real moon_rs API is declared here.
+
+extern "lua" {
+    fn log(msg: String);
+    fn error(msg: String);
+    fn time() -> i64;
+    fn clock() -> f64;
+    fn sleep(ms: i64);
+}

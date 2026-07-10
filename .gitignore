@@ -1,0 +1,5 @@
+target/
+editors/vscode/node_modules/
+editors/vscode/dist/
+*.vsix
+.DS_Store

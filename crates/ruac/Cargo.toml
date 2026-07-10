@@ -1,0 +1,14 @@
+[package]
+name = "ruac"
+version = "0.1.0"
+edition = "2024"
+description = "Rua compiler: a Rust-syntax subset language that transpiles to readable Lua 5.5 source."
+
+[[bin]]
+name = "ruac"
+path = "src/main.rs"
+
+[lib]
+name = "ruac"
+path = "src/lib.rs"
+doctest = false

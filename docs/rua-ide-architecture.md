@@ -1229,7 +1229,7 @@ update_file(file):
 
 ## 15. 测试策略
 
-现有 `assets/example/*.rua` 更像 smoke/examples，不能作为完整 oracle。重构前必须新增系统化 golden corpus，放到 `tests/golden/` 或等价目录：
+现有 `tests/fixtures/examples/*.rua` 更像 smoke/examples，不能作为完整 oracle。重构前必须新增系统化 golden corpus，放到 `tests/golden/` 或等价目录：
 
 ```text
 tests/golden/
@@ -1305,7 +1305,7 @@ fn main() {
 - `tests/golden/compile-pass/*.rua` 的 byte-exact Lua golden 输出。
 - `tests/golden/compile-fail/*.rua` 的 diagnostic code/range/message golden 输出。
 - iterator lazy/fused codegen golden：range/Vec/map/filter/enumerate/fold/collect 不产生中间 Vec 或 coroutine。
-- 现有 `assets/example/*.rua` 继续作为 smoke corpus，但不是唯一 oracle。
+- 现有 `tests/fixtures/examples/*.rua` 继续作为 smoke corpus，但不是唯一 oracle。
 - CLI build/check 行为。
 - `.ruai` 声明模块。
 - `--lib` 注入外部 `.ruai`，与 LSP `rua.library` 解析一致。

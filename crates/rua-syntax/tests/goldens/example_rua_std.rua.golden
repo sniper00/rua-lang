@@ -1,0 +1,37 @@
+// std shims demo: `String` methods + `+` concatenation.
+//
+// Recognized `String` methods lower to `rt.str["method"](s, ..)` runtime helpers
+// (see lualib/rua_rt.lua); `String + String` lowers to Lua `..`. The type
+// checker knows each method's result type (`len -> i64`, `split -> Vec<String>`,
+// `contains -> bool`, ...) so misuse is caught at compile time.
+//
+// Compile + run:
+//   cargo run -p ruac --bin ruac -- build tests/fixtures/examples/example_rua_std.rua
+//   lua tests/fixtures/examples/example_rua_std.lua   (with LUA_PATH pointing at lualib/)
+
+fn shout(name: String) -> String {
+    // `+` on strings is concatenation; `to_uppercase` returns a new String.
+    "HELLO, ".to_string() + name.to_uppercase()
+}
+
+fn main() {
+    let s = "Hello, World";
+    println!("len       = {}", s.len());
+    println!("upper     = {}", s.to_uppercase());
+    println!("lower     = {}", s.to_lowercase());
+    println!("contains  = {}", s.contains("World"));
+    println!("starts    = {}", s.starts_with("Hello"));
+    println!("ends      = {}", s.ends_with("World"));
+    println!("replace   = {}", s.replace("o", "0"));
+    println!("trimmed   = [{}]", "  padded  ".trim());
+    println!("repeat    = {}", "ab".repeat(3));
+    println!("shout     = {}", shout("rua"));
+
+    // `split` / `chars` return `Vec<String>` (0-based, with `.len()`/`.get()`).
+    let parts = s.split(", ");
+    println!("parts     = {} / {}", parts.get(0), parts.get(1));
+
+    let letters = "abc".chars();
+    println!("chars len = {}", letters.len());
+    println!("chars[2]  = {}", letters.get(2));
+}

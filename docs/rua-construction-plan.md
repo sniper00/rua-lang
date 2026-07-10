@@ -16,7 +16,7 @@ Phase 是里程碑，Step 是一次可验证提交。实际施工按 Step 执行
 - 不在迁仓阶段做架构重写。Phase -1 只搬家、改名、修边界；Phase 0 以后才开始新架构施工。
 - 不删除 `ruac` 自有 parser。`ruac` 保持简洁 compiler pipeline；LSP/IDE 走 `rua-analysis`。
 - `ruac` 是 gold standard；`rua-analysis` 的精度通过 conformance/parity/golden 测试追 `ruac`。
-- Golden 覆盖按 `docs/rua-golden-cases.md` 执行；现有 `assets/example/*.rua` 只作为 smoke corpus，不足以作为完整 oracle。
+- Golden 覆盖按 `docs/rua-golden-cases.md` 执行；现有 `tests/fixtures/examples/*.rua` 只作为 smoke corpus，不足以作为完整 oracle。
 - 新仓库 crate/package/binary 不使用 `moon` 前缀。
 - `moon_rs` 与 `rua` 不形成 workspace 或 path dependency 耦合。
 
@@ -444,7 +444,7 @@ cargo test -p ruac golden_compile_pass
 退出条件：
 
 - 至少 30 个 compile-pass golden；如果闭包/iterator 进入实现范围，必须额外补对应 golden。
-- 旧 `assets/example/*.rua` 继续作为 smoke corpus，但不再是唯一 golden 来源。
+- 旧 `tests/fixtures/examples/*.rua` 继续作为 smoke corpus，但不再是唯一 golden 来源。
 - 每个新增语言特性必须先补 compile-pass golden，再改实现。
 
 ### Step 0.4：补齐 compile-fail diagnostic golden

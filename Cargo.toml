@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ruac",
+    "crates/rua-syntax",
+    "crates/rua-lsp",
+]
+
+[workspace.dependencies]
+ruac = { path = "crates/ruac" }
+rua-syntax = { path = "crates/rua-syntax" }
+rowan = "0.15"

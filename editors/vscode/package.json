@@ -1,0 +1,77 @@
+{
+  "name": "rua-lang",
+  "displayName": "Rua Language",
+  "description": "Language support for Rua (Rust-like syntax, transpiles to Lua 5.5) — powered by the rua-lsp language server.",
+  "version": "0.1.0",
+  "publisher": "moon-rs",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/sniper00/rua" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages"],
+  "keywords": ["rua", "lua"],
+  "activationEvents": ["onLanguage:rua"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "rua",
+        "aliases": ["Rua", "rua"],
+        "extensions": [".rua", ".ruai"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rua",
+        "scopeName": "source.rua",
+        "path": "./syntaxes/rua.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Rua",
+      "properties": {
+        "rua.server.path": {
+          "type": "string",
+          "default": "rua-lsp",
+          "markdownDescription": "Path to the `rua-lsp` executable. Use an absolute path, or leave as `rua-lsp` to find it on `PATH`. Supports `${workspaceFolder}`."
+        },
+        "rua.server.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra command-line arguments passed to the language server."
+        },
+        "rua.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the JSON-RPC communication between VS Code and the Rua language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "rua.restartServer",
+        "title": "Rua: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run check-types && node esbuild.js --production",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check-types": "tsc --noEmit",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.26.1",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

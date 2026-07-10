@@ -1,0 +1,36 @@
+// P4 feature demo: for loops, ranges, Vec, indexing, and macros.
+// Compile with:
+//   cargo run -p ruac --bin ruac -- build tests/fixtures/examples/example_rua_p4.rua
+// then run tests/fixtures/examples/example_rua_p4.lua with a Lua 5.5 host (rua_rt on path).
+
+fn sum_to(n: i64) -> i64 {
+    let mut total = 0;
+    for i in 1..=n {
+        total = total + i;
+    }
+    total
+}
+
+fn main() {
+    // Numeric range loop.
+    println!("sum 1..=5 = {}", sum_to(5));
+
+    // Vec literal + push + len + indexing (0-based, like Rust).
+    let mut v = vec![10, 20, 30];
+    v.push(40);
+    println!("len = {}", v.len());
+    println!("v[0] = {}", v[0]);
+    println!("v[3] = {}", v[3]);
+
+    // Iterate a Vec by value.
+    let mut acc = 0;
+    for x in v {
+        acc = acc + x;
+    }
+    println!("vec sum = {}", acc);
+
+    // format! builds a string; print! omits the trailing newline.
+    let msg = format!("({}, {})", 1, 2);
+    print!("point = ");
+    println!("{}", msg);
+}

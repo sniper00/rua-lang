@@ -1,0 +1,96 @@
+// P2 feature demo: struct, enum, impl/methods, match, Option (pure nil),
+// Result + `?`. Compile with:
+//   cargo run -p ruac --bin ruac -- build tests/fixtures/examples/example_rua_p2.rua
+// then run tests/fixtures/examples/example_rua_p2.lua with a Lua 5.5 host.
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn new(x: f64, y: f64) -> Point {
+        Point { x: x, y: y }
+    }
+
+    fn manhattan(&self) -> f64 {
+        self.x + self.y
+    }
+}
+
+enum Shape {
+    Circle(f64),
+    Rect { w: f64, h: f64 },
+    Unit,
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rect { w, h } => w * h,
+        Shape::Unit => 0.0,
+    }
+}
+
+// Option is pure nil: Some(v) => v, None => nil.
+fn first_positive(a: i64, b: i64) -> Option<i64> {
+    if a > 0 {
+        Some(a)
+    } else {
+        if b > 0 { Some(b) } else { None }
+    }
+}
+
+// Result + `?` propagation.
+fn checked_div(a: i64, b: i64) -> Result<i64, String> {
+    if b == 0 {
+        Err("division by zero")
+    } else {
+        Ok(a / b)
+    }
+}
+
+fn compute() -> Result<i64, String> {
+    let q = checked_div(20, 4)?;
+    Ok(q + 1)
+}
+
+fn classify(n: i64) -> i64 {
+    match n {
+        0 => 100,
+        1 | 2 => 200,
+        x if x > 10 => 300,
+        _ => 400,
+    }
+}
+
+fn main() {
+    let p = Point::new(3.0, 4.0);
+    print("manhattan = ");
+    print(p.manhattan());
+    print("\n");
+
+    print("circle area = ");
+    print(area(Shape::Circle(2.0)));
+    print("\n");
+
+    print("rect area = ");
+    print(area(Shape::Rect { w: 3.0, h: 5.0 }));
+    print("\n");
+
+    print("first_positive(-1, 7) = ");
+    print(first_positive(-1, 7));
+    print("\n");
+
+    let r = compute();
+    print("compute().ok = ");
+    print(r.ok);
+    print("\n");
+
+    print("classify(2) = ");
+    print(classify(2));
+    print("\n");
+    print("classify(42) = ");
+    print(classify(42));
+    print("\n");
+}

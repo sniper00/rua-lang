@@ -1,0 +1,125 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Rua",
+  "scopeName": "source.rua",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#macros" },
+    { "include": "#functions" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.rua",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.rua",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.rua",
+          "match": "\\b(if|else|match|for|while|loop|return|break|continue|in)\\b"
+        },
+        {
+          "name": "keyword.other.rua",
+          "match": "\\b(fn|let|mut|struct|enum|trait|impl|pub|use|mod|as|extern|where)\\b"
+        },
+        {
+          "name": "storage.type.rua",
+          "match": "\\b(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|bool|str|String)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.rua",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.self.rua",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.rua",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.rua",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.rua",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.rua",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.rua",
+          "match": "\\\\([nrt0\\\\\"']|x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\})"
+        },
+        {
+          "name": "meta.template.expression.rua",
+          "match": "\\{[^{}]*\\}"
+        }
+      ]
+    },
+    "macros": {
+      "name": "entity.name.function.macro.rua",
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)!"
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\bfn\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.rua" }
+          }
+        },
+        {
+          "name": "entity.name.function.call.rua",
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.rua",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.rua",
+          "match": "(->|=>|::|\\+|-|\\*|/|%|==|!=|<=|>=|<|>|&&|\\|\\||!|=|&|\\|)"
+        }
+      ]
+    }
+  }
+}

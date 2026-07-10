@@ -1,7 +1,7 @@
 # Rua Golden 用例清单
 
 > 状态：施工清单。
-> 目的：补足现有 `assets/example/*.rua` 覆盖不足的问题，为 `ruac` oracle、双 parser conformance、IDE parity 提供系统化 fixture。
+> 目的：补足现有 `tests/fixtures/examples/*.rua` 覆盖不足的问题，为 `ruac` oracle、双 parser conformance、IDE parity 提供系统化 fixture。
 
 ## 1. 目录约定
 

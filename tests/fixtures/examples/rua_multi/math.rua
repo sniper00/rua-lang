@@ -1,0 +1,15 @@
+// mod math — a file module. Its own file-child `trig` lives in math/trig.rua.
+
+pub mod trig;
+
+// `use` inside a module: `triple` rewrites to `math.trig.triple` at codegen.
+use trig::triple;
+
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// Uses the module-local `use` alias for `trig::triple`.
+pub fn add_then_triple(a: i64, b: i64) -> i64 {
+    triple(a + b)
+}
