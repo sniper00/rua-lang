@@ -16,4 +16,4 @@ pub use db::BaseDb;
 pub use diagnostic::Diagnostic;
 pub use hir::{ItemKind, ItemTree, ItemTreeItem, TextRange, Visibility};
 pub use ide::{Analysis, AnalysisHost};
-pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind};
+pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};

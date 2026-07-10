@@ -9,8 +9,8 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     diagnostic::Diagnostic,
-    hir::ItemTree,
-    vfs::{Change, FileId, FileKind, SourceRootKind},
+    hir::{ItemTree, module_resolution::resolve_module_file},
+    vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
 
 /// Mutable owner of the current analysis inputs.
@@ -54,6 +54,14 @@ impl Analysis {
 
     pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
         self.db.item_tree(file_id)
+    }
+
+    pub fn resolve_module(&self, from_file: FileId, name: &str) -> Option<FileId> {
+        resolve_module_file(&self.db, from_file, name)
+    }
+
+    pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
+        self.db.file_path(file_id)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

@@ -5,8 +5,50 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
+
+/// Logical path within a source root. Construction is lexical and performs no
+/// filesystem access, so virtual and unsaved files follow the same rules.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VfsPath(PathBuf);
+
+impl VfsPath {
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        let mut normalized = PathBuf::new();
+        for component in path.as_ref().components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        normalized.push(component);
+                    }
+                }
+                _ => normalized.push(component),
+            }
+        }
+        Self(normalized)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn parent(&self) -> Option<Self> {
+        self.0.parent().map(Self::new)
+    }
+
+    pub fn join(&self, path: impl AsRef<Path>) -> Self {
+        Self::new(self.0.join(path))
+    }
+}
+
+impl<P: AsRef<Path>> From<P> for VfsPath {
+    fn from(path: P) -> Self {
+        Self::new(path)
+    }
+}
 
 /// Stable identity of a file for the lifetime of an analysis session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -105,6 +147,7 @@ pub enum FileChange {
         file_id: FileId,
         source_root_id: SourceRootId,
         kind: FileKind,
+        path: Option<VfsPath>,
         text: Arc<str>,
     },
     Remove {
@@ -152,6 +195,24 @@ impl Change {
             file_id,
             source_root_id,
             kind,
+            path: None,
+            text: text.into(),
+        });
+    }
+
+    pub fn set_file_with_path(
+        &mut self,
+        file_id: FileId,
+        source_root_id: SourceRootId,
+        kind: FileKind,
+        path: impl Into<VfsPath>,
+        text: impl Into<Arc<str>>,
+    ) {
+        self.file_changes.push(FileChange::SetFile {
+            file_id,
+            source_root_id,
+            kind,
+            path: Some(path.into()),
             text: text.into(),
         });
     }
@@ -193,6 +254,8 @@ pub struct Vfs {
     file_texts: HashMap<FileId, Arc<str>>,
     file_kinds: HashMap<FileId, FileKind>,
     file_roots: HashMap<FileId, SourceRootId>,
+    file_paths: HashMap<FileId, VfsPath>,
+    path_files: HashMap<VfsPath, BTreeSet<FileId>>,
     source_roots: HashMap<SourceRootId, SourceRoot>,
 }
 
@@ -213,6 +276,17 @@ impl Vfs {
         kind: FileKind,
         text: impl Into<Arc<str>>,
     ) {
+        self.set_file_with_path(file_id, source_root_id, kind, None, text);
+    }
+
+    fn set_file_with_path(
+        &mut self,
+        file_id: FileId,
+        source_root_id: SourceRootId,
+        kind: FileKind,
+        path: Option<VfsPath>,
+        text: impl Into<Arc<str>>,
+    ) {
         assert!(
             self.source_roots.contains_key(&source_root_id),
             "cannot add {file_id:?} to unknown source root {source_root_id:?}"
@@ -220,6 +294,14 @@ impl Vfs {
 
         self.set_file_text(file_id, text);
         self.file_kinds.insert(file_id, kind);
+        self.remove_file_path(file_id);
+        if let Some(path) = path {
+            self.path_files
+                .entry(path.clone())
+                .or_default()
+                .insert(file_id);
+            self.file_paths.insert(file_id, path);
+        }
 
         if let Some(previous_root_id) = self.file_roots.insert(file_id, source_root_id)
             && previous_root_id != source_root_id
@@ -236,12 +318,25 @@ impl Vfs {
 
     pub fn remove_file(&mut self, file_id: FileId) -> Option<Arc<str>> {
         self.file_kinds.remove(&file_id);
+        self.remove_file_path(file_id);
         if let Some(source_root_id) = self.file_roots.remove(&file_id)
             && let Some(source_root) = self.source_roots.get_mut(&source_root_id)
         {
             source_root.files.remove(&file_id);
         }
         self.file_texts.remove(&file_id)
+    }
+
+    fn remove_file_path(&mut self, file_id: FileId) {
+        let Some(path) = self.file_paths.remove(&file_id) else {
+            return;
+        };
+        if let Some(file_ids) = self.path_files.get_mut(&path) {
+            file_ids.remove(&file_id);
+            if file_ids.is_empty() {
+                self.path_files.remove(&path);
+            }
+        }
     }
 
     pub fn set_source_root(&mut self, source_root_id: SourceRootId, kind: SourceRootKind) {
@@ -257,6 +352,7 @@ impl Vfs {
             self.file_texts.remove(&file_id);
             self.file_kinds.remove(&file_id);
             self.file_roots.remove(&file_id);
+            self.remove_file_path(file_id);
         }
         Some(source_root)
     }
@@ -283,8 +379,9 @@ impl Vfs {
                     file_id,
                     source_root_id,
                     kind,
+                    path,
                     text,
-                } => self.set_file(file_id, source_root_id, kind, text),
+                } => self.set_file_with_path(file_id, source_root_id, kind, path, text),
                 FileChange::Remove { file_id } => {
                     self.remove_file(file_id);
                 }
@@ -308,6 +405,28 @@ impl Vfs {
         self.source_roots.get(&source_root_id)
     }
 
+    pub fn source_roots(&self) -> impl Iterator<Item = (SourceRootId, &SourceRoot)> {
+        self.source_roots
+            .iter()
+            .map(|(source_root_id, source_root)| (*source_root_id, source_root))
+    }
+
+    pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
+        self.file_paths.get(&file_id)
+    }
+
+    pub fn file_for_path_in_root(
+        &self,
+        path: &VfsPath,
+        source_root_id: SourceRootId,
+    ) -> Option<FileId> {
+        self.path_files
+            .get(path)?
+            .iter()
+            .copied()
+            .find(|file_id| self.file_roots.get(file_id).copied() == Some(source_root_id))
+    }
+
     pub fn is_file_read_only(&self, file_id: FileId) -> bool {
         self.source_root_id(file_id)
             .and_then(|source_root_id| self.source_root(source_root_id))
@@ -317,7 +436,7 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, FileId, Vfs};
+    use super::{Change, FileId, FileKind, SourceRootId, SourceRootKind, Vfs, VfsPath};
 
     #[test]
     fn vfs_applies_file_add_update_and_remove() {
@@ -352,5 +471,35 @@ mod tests {
         vfs.apply_change(change);
 
         assert_eq!(vfs.file_text(file_id).as_deref(), Some("last"));
+    }
+
+    #[test]
+    fn vfs_indexes_logical_paths_without_filesystem_access() {
+        let root_id = SourceRootId::new(1);
+        let file_id = FileId::new(3);
+        let path = VfsPath::new("src/./nested/../api.ruai");
+        let mut change = Change::new();
+        change.set_source_root(root_id, SourceRootKind::Library);
+        change.set_file_with_path(
+            file_id,
+            root_id,
+            FileKind::Declaration,
+            path,
+            "extern \"lua\" {}",
+        );
+
+        let mut vfs = Vfs::new();
+        vfs.apply_change(change);
+
+        let normalized = VfsPath::new("src/api.ruai");
+        assert_eq!(vfs.file_path(file_id), Some(&normalized));
+        assert_eq!(
+            vfs.file_for_path_in_root(&normalized, root_id),
+            Some(file_id)
+        );
+        assert_eq!(
+            vfs.file_for_path_in_root(&VfsPath::new("src/missing.ruai"), root_id),
+            None
+        );
     }
 }

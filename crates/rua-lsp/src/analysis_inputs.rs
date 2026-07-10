@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rua_analysis::{AnalysisHost, Change, FileId, FileKind, SourceRootId, SourceRootKind};
+use rua_analysis::{AnalysisHost, Change, FileId, FileKind, SourceRootId, SourceRootKind, VfsPath};
 use serde_json::Value;
 
 const LIBRARY_ROOT_ID: SourceRootId = SourceRootId::new(u32::MAX);
@@ -74,6 +74,11 @@ fn parse_mounts(value: Option<&Value>) -> Result<BTreeMap<String, PathBuf>, Conf
     entries
         .iter()
         .map(|(mount, value)| {
+            if mount_logical_path(mount).is_none() {
+                return Err(ConfigError::new(format!(
+                    "rua.libraryMounts contains invalid module path {mount:?}"
+                )));
+            }
             value
                 .as_str()
                 .map(|path| (mount.clone(), PathBuf::from(path)))
@@ -146,9 +151,15 @@ impl AnalysisInputs {
         }
         if !config.is_empty() {
             change.set_source_root(LIBRARY_ROOT_ID, SourceRootKind::Library);
-            for (path, text) in files {
-                let file_id = self.file_id_for_path(path);
-                change.set_file(file_id, LIBRARY_ROOT_ID, FileKind::Declaration, text);
+            for (disk_path, file) in files {
+                let file_id = self.file_id_for_path(disk_path);
+                change.set_file_with_path(
+                    file_id,
+                    LIBRARY_ROOT_ID,
+                    FileKind::Declaration,
+                    file.logical_path,
+                    file.text,
+                );
                 report.file_count += 1;
             }
         }
@@ -175,22 +186,28 @@ impl AnalysisInputs {
 fn scan_configured_files(
     config: &LibraryConfig,
     warnings: &mut Vec<String>,
-) -> BTreeMap<PathBuf, String> {
+) -> BTreeMap<PathBuf, ScannedFile> {
     let mut files = BTreeMap::new();
-    let mut visited_dirs = HashSet::new();
     for path in &config.libraries {
-        scan_path(path, &mut files, &mut visited_dirs, warnings);
+        scan_path(path, None, &mut files, warnings);
     }
-    for path in config.mounts.values() {
-        scan_path(path, &mut files, &mut visited_dirs, warnings);
+    for (mount, path) in &config.mounts {
+        let mount = mount_logical_path(mount).expect("mount names validated with configuration");
+        scan_path(path, Some(&mount), &mut files, warnings);
     }
     files
 }
 
+#[derive(Debug)]
+struct ScannedFile {
+    logical_path: VfsPath,
+    text: String,
+}
+
 fn scan_path(
     configured_path: &Path,
-    files: &mut BTreeMap<PathBuf, String>,
-    visited_dirs: &mut HashSet<PathBuf>,
+    mount: Option<&Path>,
+    files: &mut BTreeMap<PathBuf, ScannedFile>,
     warnings: &mut Vec<String>,
 ) {
     let path = match fs::canonicalize(configured_path) {
@@ -201,15 +218,25 @@ fn scan_path(
         }
     };
     if path.is_file() {
-        load_declaration(&path, files, warnings);
+        let Some(file_name) = path.file_name() else {
+            return;
+        };
+        let logical_path = match mount {
+            Some(mount) => mount.with_extension("ruai"),
+            None => PathBuf::from(file_name),
+        };
+        load_declaration(&path, logical_path, files, warnings);
     } else if path.is_dir() {
-        scan_directory(&path, files, visited_dirs, warnings);
+        let mut visited_dirs = HashSet::new();
+        scan_directory(&path, &path, mount, files, &mut visited_dirs, warnings);
     }
 }
 
 fn scan_directory(
+    root: &Path,
     directory: &Path,
-    files: &mut BTreeMap<PathBuf, String>,
+    mount: Option<&Path>,
+    files: &mut BTreeMap<PathBuf, ScannedFile>,
     visited_dirs: &mut HashSet<PathBuf>,
     warnings: &mut Vec<String>,
 ) {
@@ -236,17 +263,22 @@ fn scan_directory(
     for path in paths {
         if path.is_dir() {
             if !is_hidden(&path) {
-                scan_directory(&path, files, visited_dirs, warnings);
+                scan_directory(root, &path, mount, files, visited_dirs, warnings);
             }
         } else {
-            load_declaration(&path, files, warnings);
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let logical_path = mount
+                .map(|mount| mount.join(relative))
+                .unwrap_or_else(|| relative.to_path_buf());
+            load_declaration(&path, logical_path, files, warnings);
         }
     }
 }
 
 fn load_declaration(
     path: &Path,
-    files: &mut BTreeMap<PathBuf, String>,
+    logical_path: PathBuf,
+    files: &mut BTreeMap<PathBuf, ScannedFile>,
     warnings: &mut Vec<String>,
 ) {
     if path.extension().and_then(|extension| extension.to_str()) != Some("ruai") {
@@ -254,10 +286,33 @@ fn load_declaration(
     }
     match fs::read_to_string(path) {
         Ok(text) => {
-            files.insert(path.to_path_buf(), text);
+            files.insert(
+                path.to_path_buf(),
+                ScannedFile {
+                    logical_path: VfsPath::new(logical_path),
+                    text,
+                },
+            );
         }
         Err(error) => warnings.push(format!("{}: {error}", path.display())),
     }
+}
+
+fn mount_logical_path(mount: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    for segment in mount.split("::") {
+        if segment.is_empty() {
+            return None;
+        }
+        let mut components = Path::new(segment).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
 }
 
 fn is_hidden(path: &Path) -> bool {
@@ -277,7 +332,7 @@ mod tests {
     use serde_json::json;
 
     use super::{AnalysisInputs, LibraryConfig};
-    use rua_analysis::{FileKind, SourceRootKind};
+    use rua_analysis::{FileKind, SourceRootKind, VfsPath};
 
     struct TestDir(PathBuf);
 
@@ -324,6 +379,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_mount_names_that_escape_the_logical_root() {
+        let error = LibraryConfig::from_settings(&json!({
+            "rua.libraryMounts": {"../clock": "/lib/clock.ruai"}
+        }))
+        .expect_err("invalid mount must be rejected");
+
+        assert!(error.to_string().contains("invalid module path"));
+    }
+
+    #[test]
     fn configured_ruai_files_become_read_only_analysis_inputs() {
         let temp = TestDir::new("library-inputs");
         let library = temp.path().join("meta");
@@ -360,6 +425,14 @@ mod tests {
             assert!(analysis.is_file_read_only(file_id));
             assert!(analysis.parse(file_id).errors().is_empty());
         }
+        assert_eq!(
+            analysis.file_path(api_id),
+            Some(&VfsPath::new("nested/api.ruai"))
+        );
+        assert_eq!(
+            analysis.file_path(mounted_id),
+            Some(&VfsPath::new("clock.ruai"))
+        );
     }
 
     #[test]

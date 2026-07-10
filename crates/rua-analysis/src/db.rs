@@ -8,6 +8,7 @@ use crate::{
     hir::ItemTree,
     vfs::{
         Change, FileId, FileKind, SourceRoot, SourceRootChange, SourceRootId, SourceRootKind, Vfs,
+        VfsPath,
     },
 };
 
@@ -76,6 +77,22 @@ impl BaseDb {
 
     pub fn is_file_read_only(&self, file_id: FileId) -> bool {
         self.vfs.is_file_read_only(file_id)
+    }
+
+    pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
+        self.vfs.file_path(file_id)
+    }
+
+    pub(crate) fn source_roots(&self) -> impl Iterator<Item = (SourceRootId, &SourceRoot)> {
+        self.vfs.source_roots()
+    }
+
+    pub(crate) fn file_for_path_in_root(
+        &self,
+        path: &VfsPath,
+        source_root_id: SourceRootId,
+    ) -> Option<FileId> {
+        self.vfs.file_for_path_in_root(path, source_root_id)
     }
 
     fn invalidate_file(&mut self, file_id: FileId) {
