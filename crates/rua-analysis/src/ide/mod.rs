@@ -2,6 +2,8 @@
 //!
 //! Results exposed here remain independent of LSP protocol types.
 
+mod symbol;
+
 use std::{rc::Rc, sync::Arc};
 
 use rua_syntax::{Parse, ast::SourceFile};
@@ -13,6 +15,8 @@ use crate::{
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
+
+pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
 /// Mutable owner of the current analysis inputs.
 #[derive(Debug, Default)]
@@ -71,6 +75,14 @@ impl Analysis {
 
     pub fn semantics(&self, root_file: FileId) -> Semantics {
         Semantics::new(Rc::clone(&self.db), self.db.def_map(root_file))
+    }
+
+    pub fn document_symbols(&self, root_file: FileId, file_id: FileId) -> Vec<DocumentSymbol> {
+        symbol::document_symbols(&self.db.def_map(root_file), file_id)
+    }
+
+    pub fn workspace_symbols(&self, root_file: FileId, query: &str) -> Vec<WorkspaceSymbol> {
+        symbol::workspace_symbols(&self.db.def_map(root_file), query)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

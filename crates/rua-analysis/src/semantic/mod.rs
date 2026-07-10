@@ -131,16 +131,7 @@ fn next_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
 }
 
 fn module_at_position(map: &DefMap, file_id: FileId, offset: u32) -> Option<ModuleId> {
-    let mut module_id = map
-        .modules()
-        .find(|module| {
-            module.file_id() == Some(file_id)
-                && !map.definitions().any(|definition| {
-                    definition.target_module() == Some(module.id())
-                        && definition.file_id() == file_id
-                })
-        })?
-        .id();
+    let mut module_id = map.module_for_file(file_id)?;
 
     loop {
         let nested = map

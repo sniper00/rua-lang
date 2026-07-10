@@ -18,6 +18,6 @@ pub use hir::{
     DefId, DefKind, DefMap, Definition, ItemKind, ItemTree, ItemTreeItem, ModuleData, ModuleId,
     ModuleKind, TextRange, Visibility,
 };
-pub use ide::{Analysis, AnalysisHost};
+pub use ide::{Analysis, AnalysisHost, DocumentSymbol, WorkspaceSymbol};
 pub use semantic::{FilePosition, Semantics};
 pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};

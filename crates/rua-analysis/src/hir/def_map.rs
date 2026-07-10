@@ -202,6 +202,18 @@ impl DefMap {
         self.definitions.iter()
     }
 
+    pub fn module_for_file(&self, file_id: FileId) -> Option<ModuleId> {
+        self.modules()
+            .find(|module| {
+                module.file_id() == Some(file_id)
+                    && !self.definitions().any(|definition| {
+                        definition.target_module() == Some(module.id())
+                            && definition.file_id() == file_id
+                    })
+            })
+            .map(ModuleData::id)
+    }
+
     pub fn resolve_name(&self, module_id: ModuleId, name: &str) -> Option<&Definition> {
         let def_id = *self.module(module_id)?.definitions.get(name)?.first()?;
         self.definition(def_id)
