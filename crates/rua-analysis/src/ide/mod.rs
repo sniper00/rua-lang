@@ -9,6 +9,7 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     diagnostic::Diagnostic,
+    hir::ItemTree,
     vfs::{Change, FileId, FileKind, SourceRootKind},
 };
 
@@ -49,6 +50,10 @@ impl Analysis {
     /// Semantic diagnostics are introduced after the analysis skeleton.
     pub fn diagnostics(&self, _file_id: FileId) -> Vec<Diagnostic> {
         Vec::new()
+    }
+
+    pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        self.db.item_tree(file_id)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

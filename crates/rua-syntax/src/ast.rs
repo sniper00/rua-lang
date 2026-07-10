@@ -508,6 +508,9 @@ impl ExternBlock {
 }
 
 impl ExternFn {
+    pub fn is_pub(&self) -> bool {
+        token(&self.syntax, K::KwPub).is_some()
+    }
     /// True when the last parameter is `...` (variadic Lua function).
     pub fn variadic(&self) -> bool {
         token(&self.syntax, K::DotDot).is_some()

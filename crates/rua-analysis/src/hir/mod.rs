@@ -2,3 +2,7 @@
 //!
 //! Compiler AST and type-checker types do not cross into this module; parity
 //! with `ruac` is maintained through conformance tests.
+
+mod item_tree;
+
+pub use item_tree::{ItemKind, ItemTree, ItemTreeItem, TextRange, Visibility};
