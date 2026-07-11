@@ -447,41 +447,70 @@ fn visible_locals(
     result
 }
 
-/// Find the innermost scope whose associated element contains `offset`.
+/// Find the innermost scope containing `offset`.
+///
+/// For "forward" scopes (AfterLet, ForBody), the scope extends from after the
+/// element forward to the end of the parent scope, so we check whether the
+/// offset is *after* the element range rather than *inside* it.
 fn find_innermost_scope(
     _body: &Body,
     source_map: &BodySourceMap,
     scopes: &BodyScopes,
     offset: u32,
 ) -> Option<crate::hir::ScopeId> {
+    #[derive(Clone, Copy)]
+    enum ScopeRange {
+        /// offset must be inside the element range.
+        Within(TextRange),
+        /// offset must be at or after the element's end (forward-extending scope).
+        After(u32),
+    }
+
+    // Collect candidate scopes that contain the offset.
     let mut best: Option<(u32, crate::hir::ScopeId)> = None;
 
     for (scope_id, scope_data) in scopes.scopes() {
-        let range: Option<TextRange> = match scope_data.kind() {
+        let candidate: Option<ScopeRange> = match scope_data.kind() {
             ScopeKind::Root => continue,
-            ScopeKind::Block { expr } => source_map.expr_range(expr).map(|fr| fr.range),
-            ScopeKind::AfterLet { binding } => {
-                source_map.binding_range(binding).map(|fr| fr.range)
+            ScopeKind::Block { expr } => {
+                source_map.expr_range(expr).map(|fr| ScopeRange::Within(fr.range))
             }
-            ScopeKind::Closure { expr } => source_map.expr_range(expr).map(|fr| fr.range),
-            ScopeKind::ForBody { binding } => {
-                source_map.binding_range(binding).map(|fr| fr.range)
+            // AfterLet: scope covers code after the semicolon, i.e. after the
+            // binding identifier (which sits inside the `let` statement).
+            ScopeKind::AfterLet { binding } => source_map
+                .binding_range(binding)
+                .map(|fr| ScopeRange::After(fr.range.end())),
+            ScopeKind::Closure { expr } => {
+                source_map.expr_range(expr).map(|fr| ScopeRange::Within(fr.range))
             }
+            // ForBody: scope covers the loop body, which starts after the
+            // binding identifier in the `for` header.
+            ScopeKind::ForBody { binding } => source_map
+                .binding_range(binding)
+                .map(|fr| ScopeRange::After(fr.range.end())),
             ScopeKind::IfLetBody { pattern } => {
-                source_map.pat_range(pattern).map(|fr| fr.range)
+                source_map.pat_range(pattern).map(|fr| ScopeRange::Within(fr.range))
             }
             ScopeKind::WhileLetBody { pattern } => {
-                source_map.pat_range(pattern).map(|fr| fr.range)
+                source_map.pat_range(pattern).map(|fr| ScopeRange::Within(fr.range))
             }
             ScopeKind::MatchArm => continue,
         };
-        if let Some(range) = range {
-            if range.contains(offset) {
+
+        match candidate {
+            Some(ScopeRange::Within(range)) if range.contains(offset) => {
                 let len = range.len();
                 if best.map_or(true, |(best_len, _)| len < best_len) {
                     best = Some((len, scope_id));
                 }
             }
+            Some(ScopeRange::After(end)) if offset >= end => {
+                let len = offset - end; // prefer latest (smallest distance).
+                if best.map_or(true, |(best_len, _)| len < best_len) {
+                    best = Some((len, scope_id));
+                }
+            }
+            _ => {}
         }
     }
 

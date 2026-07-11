@@ -17,6 +17,11 @@ lsp-server = { version = "0.7", optional = true }
 lsp-types = { version = "0.97", optional = true }
 serde_json = { version = "1", optional = true }
 
+[dev-dependencies]
+rua-analysis = { workspace = true }
+lsp-types = { version = "0.97" }
+serde_json = { version = "1" }
+
 [[bin]]
 name = "rua-fmt"
 path = "src/fmt.rs"
