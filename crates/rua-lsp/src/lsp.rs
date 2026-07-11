@@ -11,8 +11,8 @@ use std::{
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
-    Notification as _, PublishDiagnostics,
+    DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
+    DidOpenTextDocument, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
@@ -20,14 +20,15 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionResponse, Diagnostic,
-    DiagnosticSeverity, DocumentFormattingParams, DocumentSymbol, DocumentSymbolResponse,
-    Documentation, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
-    InitializeParams, InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, Position,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, RenameOptions, ServerCapabilities,
+    DiagnosticSeverity, DidChangeWatchedFilesParams, DocumentFormattingParams, DocumentSymbol,
+    DocumentSymbolResponse, Documentation, FileSystemWatcher, GotoDefinitionResponse, Hover,
+    HoverContents, HoverProviderCapability, InitializeParams, InsertTextFormat, Location,
+    MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
+    Range, Registration, RegistrationParams, RenameOptions, ServerCapabilities,
     SemanticToken as LspSemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensResult,
     SemanticTokensServerCapabilities, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
+    TextDocumentSyncKind, TextEdit, Uri, WatchKind, WorkspaceEdit,
 };
 
 use rua_analysis::{
@@ -56,6 +57,10 @@ struct Server {
     /// library config state
     library_roots: Vec<PathBuf>,
     library_mounts: HashMap<String, PathBuf>,
+    /// Paths currently watched via `workspace/didChangeWatchedFiles`.
+    watched_paths: Vec<PathBuf>,
+    /// Timestamp of last watcher-triggered reload (debounce, 100ms).
+    last_watcher_event: Option<std::time::Instant>,
 }
 
 impl Server {
@@ -69,6 +74,8 @@ impl Server {
             next_root_id: 1, // 0 is workspace root
             library_roots: Vec::new(),
             library_mounts: HashMap::new(),
+            watched_paths: Vec::new(),
+            last_watcher_event: None,
         }
     }
 
@@ -535,6 +542,17 @@ impl Server {
                     };
                 self.reload_configuration(&params.settings);
             }
+            DidChangeWatchedFiles::METHOD => {
+                let params: DidChangeWatchedFilesParams =
+                    match serde_json::from_value(not.params) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("rua-lsp: bad didChangeWatchedFiles params: {e}");
+                            return;
+                        }
+                    };
+                self.handle_watched_file_change(&params);
+            }
             _ => {}
         }
     }
@@ -585,6 +603,116 @@ impl Server {
             self.host.apply_change(change);
             self.library_roots = config.roots;
             self.library_mounts = config.mounts;
+            self.register_watchers();
+        }
+    }
+
+    // -- file watchers --------------------------------------------------------
+
+    /// Register `workspace/didChangeWatchedFiles` for configured library roots.
+    fn register_watchers(&mut self) {
+        let mut watchers: Vec<FileSystemWatcher> = Vec::new();
+
+        for root in &self.library_roots {
+            if let Ok(canonical) = std::fs::canonicalize(root) {
+                let pattern = if canonical.is_dir() {
+                    canonical.join("**/*.ruai")
+                } else {
+                    canonical
+                };
+                let glob = pattern.to_string_lossy().to_string();
+                // Only register if not already watching this path.
+                if !self.watched_paths.iter().any(|p| p.to_string_lossy() == glob) {
+                    watchers.push(FileSystemWatcher {
+                        glob_pattern: lsp_types::GlobPattern::String(glob.clone()),
+                        kind: Some(WatchKind::all()),
+                    });
+                    self.watched_paths.push(PathBuf::from(&glob));
+                }
+            }
+        }
+        for mount_path in self.library_mounts.values() {
+            if let Ok(canonical) = std::fs::canonicalize(mount_path) {
+                let glob = canonical.to_string_lossy().to_string();
+                if !self.watched_paths.iter().any(|p| p.to_string_lossy() == glob) {
+                    watchers.push(FileSystemWatcher {
+                        glob_pattern: lsp_types::GlobPattern::String(glob.clone()),
+                        kind: Some(WatchKind::all()),
+                    });
+                    self.watched_paths.push(PathBuf::from(&glob));
+                }
+            }
+        }
+
+        if watchers.is_empty() {
+            return;
+        }
+
+        let registration = Registration {
+            id: "rua-library-watcher".to_string(),
+            method: DidChangeWatchedFiles::METHOD.to_string(),
+            register_options: Some(
+                serde_json::to_value(lsp_types::DidChangeWatchedFilesRegistrationOptions {
+                    watchers,
+                })
+                .unwrap_or_default(),
+            ),
+        };
+        let params = RegistrationParams {
+            registrations: vec![registration],
+        };
+        let request = lsp_server::Request::new(
+            1.into(), // id for the registration request
+            "client/registerCapability".to_string(),
+            params,
+        );
+        let _ = self
+            .connection
+            .sender
+            .send(lsp_server::Message::Request(request));
+    }
+
+    fn handle_watched_file_change(&mut self, params: &DidChangeWatchedFilesParams) {
+        // Debounce: skip if within 100ms of the last event.
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_watcher_event {
+            if now.duration_since(last) < std::time::Duration::from_millis(100) {
+                return;
+            }
+        }
+        self.last_watcher_event = Some(now);
+
+        let mut change = Change::new();
+        let root_id = SourceRootId::new(self.next_root_id);
+        // Use the same root as library files (increment for reload).
+        self.next_root_id += 1;
+        change.set_source_root(root_id, SourceRootKind::Library);
+
+        for event in &params.changes {
+            let Some(path) = uri_to_path(&event.uri) else {
+                continue;
+            };
+            let file_id = self.ensure_file_id_for_path(&path);
+            match event.typ {
+                lsp_types::FileChangeType::CREATED | lsp_types::FileChangeType::CHANGED => {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        change.set_file(file_id, root_id, FileKind::Declaration, &*text);
+                    }
+                }
+                lsp_types::FileChangeType::DELETED => {
+                    change.remove_file(file_id);
+                }
+                _ => {}
+            }
+        }
+
+        self.host.apply_change(change);
+
+        // Republish diagnostics for any open files that may be affected.
+        let open_uris: Vec<Uri> =
+            self.open_buffers.values().map(|(uri, _)| uri.clone()).collect();
+        for uri in open_uris {
+            self.publish_diagnostics(&uri);
         }
     }
 
