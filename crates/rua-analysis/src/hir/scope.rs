@@ -396,9 +396,10 @@ impl<'body> ScopeBuilder<'body> {
         match expr {
             Expr::Missing | Expr::Literal(_) => {}
             Expr::Path(path) => self.visit_expr_path(path, scope, use_kind),
-            Expr::Unary { expr, .. } | Expr::Try { expr } | Expr::Paren { expr } => {
+            Expr::Unary { expr, .. } | Expr::Try { expr } => {
                 self.visit_expr(*expr, scope, LocalUseKind::Read);
             }
+            Expr::Paren { expr } => self.visit_expr(*expr, scope, use_kind),
             Expr::Binary { lhs, rhs, .. } => {
                 self.visit_expr(*lhs, scope, LocalUseKind::Read);
                 self.visit_expr(*rhs, scope, LocalUseKind::Read);
@@ -417,7 +418,7 @@ impl<'body> ScopeBuilder<'body> {
                 self.visit_expr(*body, closure_scope, LocalUseKind::Read);
             }
             Expr::Assign { target, value } => {
-                if matches!(self.body.expr(*target), Some(Expr::Path(path)) if path.len() == 1) {
+                if self.is_local_assignment_target(*target) {
                     self.visit_expr(*target, scope, LocalUseKind::Write);
                 } else {
                     self.visit_expr(*target, scope, LocalUseKind::Read);
@@ -641,6 +642,14 @@ impl<'body> ScopeBuilder<'body> {
             for name_ref in path {
                 self.visit_non_local(*name_ref, scope);
             }
+        }
+    }
+
+    fn is_local_assignment_target(&self, expr_id: ExprId) -> bool {
+        match self.body.expr(expr_id) {
+            Some(Expr::Path(path)) => path.len() == 1,
+            Some(Expr::Paren { expr }) => self.is_local_assignment_target(*expr),
+            _ => false,
         }
     }
 

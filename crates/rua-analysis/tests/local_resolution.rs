@@ -756,6 +756,7 @@ fn local_reference_index_tracks_reads_writes_and_source_order() {
 fn refs(/*seed_def*/seed: i64) -> i64 {
     let mut /*value_def*/value = /*seed_init*/seed;
     /*write_value*/value = /*read_value*/value + /*seed_rhs*/seed;
+    (/*paren_write*/value) = /*paren_read*/value;
     println!("{}", /*macro_value*/value);
     /*tail_value*/value
 }
@@ -764,19 +765,22 @@ fn refs(/*seed_def*/seed: i64) -> i64 {
     let value = binding_at(&fixture, "/*value_def*/");
     let write = name_ref_at(&fixture, "/*write_value*/", NameRefKind::Path);
     let read = name_ref_at(&fixture, "/*read_value*/", NameRefKind::Path);
+    let paren_write = name_ref_at(&fixture, "/*paren_write*/", NameRefKind::Path);
+    let paren_read = name_ref_at(&fixture, "/*paren_read*/", NameRefKind::Path);
     let macro_use = name_ref_at(&fixture, "/*macro_value*/", NameRefKind::Path);
     let tail = name_ref_at(&fixture, "/*tail_value*/", NameRefKind::Path);
     let local = resolved(&fixture, write, value);
-    for name_ref in [read, macro_use, tail] {
+    for name_ref in [read, paren_write, paren_read, macro_use, tail] {
         resolved(&fixture, name_ref, value);
     }
 
     assert_use(&fixture, local, write, LocalUseKind::Write);
-    for name_ref in [read, macro_use, tail] {
+    assert_use(&fixture, local, paren_write, LocalUseKind::Write);
+    for name_ref in [read, paren_read, macro_use, tail] {
         assert_use(&fixture, local, name_ref, LocalUseKind::Read);
     }
     let uses = fixture.resolution.uses_for(local).collect::<Vec<_>>();
-    assert_eq!(uses.len(), 4);
+    assert_eq!(uses.len(), 6);
     let starts = uses
         .into_iter()
         .map(|local_use| {
@@ -789,7 +793,7 @@ fn refs(/*seed_def*/seed: i64) -> i64 {
         })
         .collect::<Vec<_>>();
     assert!(starts.windows(2).all(|pair| pair[0] < pair[1]));
-    assert_eq!(fixture.resolution.uses().len(), 6);
+    assert_eq!(fixture.resolution.uses().len(), 8);
 }
 
 #[test]
