@@ -1,25 +1,34 @@
 //! Lossless rowan CST for Rua — the **IDE/LSP-facing** syntax tree
 //! (see `docs/rua-design.md` §8 "two-tree" design).
 //!
-//! Two-tree architecture: the compiler (`ruac`) owns its own owned-AST
-//! pipeline (lexer → parser → AST → check/typeck/codegen) and is **rowan-free**.
-//! This crate provides a separate lossless **rowan CST** (parser → green/red
-//! tree with trivia) plus a typed **AstNode view layer**, consumed only by
-//! tooling (formatter / LSP). During the Phase 1 migration, compiler-backed
-//! lexer and semantic compatibility calls are isolated in one crate-private
-//! `transition` module; `rowan` stays confined to this crate.
+//! This crate provides a lossless **rowan CST** (native lexer → green/red tree
+//! with trivia) plus a typed **AstNode view layer**, consumed only by tooling
+//! (formatter / LSP / `rua-analysis`).
+//!
+//! ## Features
+//!
+//! - `legacy` (default): enables the deprecated `analysis`, `workspace`,
+//!   `nameres`, `completion`, and `transition` modules that bridge to `ruac`.
+//!   These only survive for integration tests; production consumers should opt
+//!   out with `default-features = false`.
 
-pub mod analysis;
 pub mod ast;
-pub mod completion;
 pub mod format;
-pub mod nameres;
 pub mod symbols;
-pub mod workspace;
 mod kind;
 mod lexer;
 mod line_index;
 mod parser;
+
+#[cfg(feature = "legacy")]
+pub mod analysis;
+#[cfg(feature = "legacy")]
+pub mod completion;
+#[cfg(feature = "legacy")]
+pub mod nameres;
+#[cfg(feature = "legacy")]
+pub mod workspace;
+#[cfg(feature = "legacy")]
 mod transition;
 
 pub use ast::{AstNode, Named};

@@ -10,8 +10,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-rua-syntax.workspace = true
+rua-syntax = { path = "../rua-syntax", default-features = false }
 rowan.workspace = true
 
 [dev-dependencies]
 ruac.workspace = true
+rua-syntax = { path = "../rua-syntax" }

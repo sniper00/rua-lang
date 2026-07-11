@@ -9,8 +9,14 @@ name = "rua_syntax"
 path = "src/lib.rs"
 doctest = false
 
+[features]
+default = ["legacy"]
+# The legacy feature gates analysis, workspace, nameres, completion, and
+# transition modules that use the compiler bridge. These only survive for
+# integration tests; production consumers should opt out with
+# `default-features = false`.
+legacy = ["dep:ruac"]
+
 [dependencies]
 rowan.workspace = true
-# Phase 1/5 transition-only bridge; all production access is isolated in
-# `src/transition.rs`, which documents the removal plan.
-ruac.workspace = true
+ruac = { workspace = true, optional = true }
