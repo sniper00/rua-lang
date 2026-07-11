@@ -4,6 +4,8 @@
 //! LSP transport. Each module marks an ownership boundary for the incremental
 //! implementation.
 
+mod base;
+
 pub mod db;
 pub mod db_index;
 pub mod diagnostic;
@@ -13,14 +15,20 @@ pub mod semantic;
 pub mod vfs;
 
 pub use db::BaseDb;
-pub use diagnostic::{Diagnostic, DiagnosticOrigin, reconcile_diagnostics};
+pub use diagnostic::{
+    Diagnostic, DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity,
+    normalize_diagnostics, reconcile_diagnostics,
+};
 pub use hir::{
     DefId, DefKind, DefMap, Definition, Import, ItemKind, ItemTree, ItemTreeItem, ModuleData,
-    ModuleId, ModuleKind, TextRange, Visibility,
+    ModuleId, ModuleKind, Visibility,
 };
 pub use ide::{
-    Analysis, AnalysisHost, ClosureParameterInfo, DocumentSymbol, SemanticToken,
-    SemanticTokenKind, WorkspaceSymbol,
+    Analysis, AnalysisHost, ClosureParameterInfo, CompletionInsert, CompletionItem, CompletionKind,
+    DocumentSymbol, FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter,
+    NavigationTarget, ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind,
+    ReferenceResult, RenameError, RenameTarget, SemanticToken, SemanticTokenKind,
+    SemanticTokenModifiers, SourceChange, TextEdit, TextRange, WorkspaceSymbol,
 };
-pub use semantic::{FilePosition, Semantics};
+pub use semantic::Semantics;
 pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};

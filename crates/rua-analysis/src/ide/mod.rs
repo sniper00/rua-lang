@@ -3,6 +3,7 @@
 //! Results exposed here remain independent of LSP protocol types.
 
 mod closure_iterator;
+mod contract;
 mod symbol;
 
 use std::{rc::Rc, sync::Arc};
@@ -11,14 +12,20 @@ use rua_syntax::{Parse, ast::SourceFile};
 
 use crate::{
     BaseDb,
-    diagnostic::Diagnostic,
     hir::{DefMap, ItemTree, module_resolution::resolve_module_file},
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
 
-pub use closure_iterator::{
-    ClosureParameterInfo, SemanticToken, SemanticTokenKind,
+pub use crate::diagnostic::{
+    Diagnostic, DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity,
+};
+pub use closure_iterator::ClosureParameterInfo;
+pub use contract::{
+    CompletionInsert, CompletionItem, CompletionKind, FileEdit, FilePosition, FileRange,
+    HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId, ProjectPosition,
+    QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget, SemanticToken,
+    SemanticTokenKind, SemanticTokenModifiers, SourceChange, TextEdit, TextRange,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 

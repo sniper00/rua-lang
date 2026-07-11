@@ -7,6 +7,7 @@ mod def_map;
 mod item_tree;
 pub(crate) mod module_resolution;
 
+pub use crate::base::TextRange;
 pub use def_map::{DefId, DefKind, DefMap, Definition, ModuleData, ModuleId};
-pub use item_tree::{Import, ItemKind, ItemTree, ItemTreeItem, ModuleKind, TextRange, Visibility};
+pub use item_tree::{Import, ItemKind, ItemTree, ItemTreeItem, ModuleKind, Visibility};
 pub use module_resolution::module_file_candidates;

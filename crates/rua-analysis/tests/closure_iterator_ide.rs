@@ -58,12 +58,12 @@ fn closure_iterator_ide_exposes_types_and_structural_tokens() {
     assert_eq!(
         tokens
             .iter()
-            .filter(|token| token.kind() == SemanticTokenKind::ClosureParameter)
+            .filter(|token| token.kind() == SemanticTokenKind::Parameter)
             .count(),
         4
     );
     assert!(tokens.iter().any(|token| {
-        token.kind() == SemanticTokenKind::RangeOperator
+        token.kind() == SemanticTokenKind::Operator
             && &source[token.range().start() as usize..token.range().end() as usize] == ".."
     }));
     for method in ["map", "filter", "count"] {

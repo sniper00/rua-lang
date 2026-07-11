@@ -13,17 +13,7 @@ use crate::{
     vfs::FileId,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FilePosition {
-    pub file_id: FileId,
-    pub offset: u32,
-}
-
-impl FilePosition {
-    pub const fn new(file_id: FileId, offset: u32) -> Self {
-        Self { file_id, offset }
-    }
-}
+pub use crate::base::FilePosition;
 
 #[derive(Clone, Debug)]
 pub struct Semantics {

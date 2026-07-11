@@ -5,7 +5,9 @@ use rua_syntax::{
     ast::{ClosureExpr, MethodCallExpr, RangeExpr},
 };
 
-use crate::{BaseDb, FileId, TextRange};
+use crate::{BaseDb, FileId, FileRange, TextRange};
+
+use super::{SemanticToken, SemanticTokenKind, SemanticTokenModifiers};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosureParameterInfo {
@@ -30,39 +32,6 @@ impl ClosureParameterInfo {
 
     pub fn ty(&self) -> &str {
         &self.ty
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SemanticTokenKind {
-    ClosureParameter,
-    Method,
-    RangeOperator,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SemanticToken {
-    file_id: FileId,
-    range: TextRange,
-    kind: SemanticTokenKind,
-    declaration: bool,
-}
-
-impl SemanticToken {
-    pub fn file_id(&self) -> FileId {
-        self.file_id
-    }
-
-    pub fn range(&self) -> TextRange {
-        self.range
-    }
-
-    pub fn kind(&self) -> SemanticTokenKind {
-        self.kind
-    }
-
-    pub fn is_declaration(&self) -> bool {
-        self.declaration
     }
 }
 
@@ -115,12 +84,16 @@ pub(super) fn semantic_tokens(db: &BaseDb, file_id: FileId) -> Vec<SemanticToken
                     definition.start() as usize,
                 ) {
                     let range = TextRange::new(start as u32, end as u32);
-                    tokens.push(SemanticToken {
-                        file_id,
-                        range,
-                        kind: SemanticTokenKind::ClosureParameter,
-                        declaration: range == definition,
-                    });
+                    let modifiers = if range == definition {
+                        SemanticTokenModifiers::DECLARATION
+                    } else {
+                        SemanticTokenModifiers::NONE
+                    };
+                    tokens.push(SemanticToken::new(
+                        FileRange::new(file_id, range),
+                        SemanticTokenKind::Parameter,
+                        modifiers,
+                    ));
                 }
             }
         }
@@ -128,12 +101,11 @@ pub(super) fn semantic_tokens(db: &BaseDb, file_id: FileId) -> Vec<SemanticToken
 
     for method in root.descendants().filter_map(MethodCallExpr::cast) {
         if let Some(name) = method.method_name() {
-            tokens.push(SemanticToken {
-                file_id,
-                range: text_range(name.text_range()),
-                kind: SemanticTokenKind::Method,
-                declaration: false,
-            });
+            tokens.push(SemanticToken::new(
+                FileRange::new(file_id, text_range(name.text_range())),
+                SemanticTokenKind::Method,
+                SemanticTokenModifiers::NONE,
+            ));
         }
     }
 
@@ -144,17 +116,15 @@ pub(super) fn semantic_tokens(db: &BaseDb, file_id: FileId) -> Vec<SemanticToken
             .filter_map(|element| element.into_token())
             .find(|token| matches!(token.kind(), SyntaxKind::DotDot | SyntaxKind::DotDotEq))
         {
-            tokens.push(SemanticToken {
-                file_id,
-                range: text_range(operator.text_range()),
-                kind: SemanticTokenKind::RangeOperator,
-                declaration: false,
-            });
+            tokens.push(SemanticToken::new(
+                FileRange::new(file_id, text_range(operator.text_range())),
+                SemanticTokenKind::Operator,
+                SemanticTokenModifiers::NONE,
+            ));
         }
     }
 
-    tokens.sort_by_key(|token| (token.range.start(), token.range.end()));
-    tokens.dedup_by_key(|token| (token.range, token.kind));
+    SemanticToken::normalize(&mut tokens);
     tokens
 }
 

@@ -5,38 +5,7 @@ use rua_syntax::{
     ast::{Item, SourceFile},
 };
 
-/// Byte range in a source file, independent of rowan and LSP protocol types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TextRange {
-    start: u32,
-    end: u32,
-}
-
-impl TextRange {
-    pub const fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
-    }
-
-    pub const fn start(self) -> u32 {
-        self.start
-    }
-
-    pub const fn end(self) -> u32 {
-        self.end
-    }
-
-    pub const fn len(self) -> u32 {
-        self.end - self.start
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.start == self.end
-    }
-
-    pub const fn contains(self, offset: u32) -> bool {
-        self.start <= offset && offset < self.end
-    }
-}
+use crate::base::TextRange;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ItemKind {

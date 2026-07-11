@@ -767,11 +767,52 @@ impl Server {
 fn semantic_token_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
-            SemanticTokenType::PARAMETER,
+            SemanticTokenType::NAMESPACE,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::STRUCT,
+            SemanticTokenType::ENUM,
+            SemanticTokenType::INTERFACE,
+            SemanticTokenType::FUNCTION,
             SemanticTokenType::METHOD,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::MACRO,
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::STRING,
+            SemanticTokenType::NUMBER,
+            SemanticTokenType::COMMENT,
             SemanticTokenType::OPERATOR,
         ],
-        token_modifiers: vec![SemanticTokenModifier::DECLARATION],
+        token_modifiers: vec![
+            SemanticTokenModifier::DECLARATION,
+            SemanticTokenModifier::READONLY,
+            SemanticTokenModifier::STATIC,
+            SemanticTokenModifier::DEFAULT_LIBRARY,
+        ],
+    }
+}
+
+const fn semantic_token_type_index(kind: SemanticTokenKind) -> u32 {
+    match kind {
+        SemanticTokenKind::Namespace => 0,
+        SemanticTokenKind::Type => 1,
+        SemanticTokenKind::Struct => 2,
+        SemanticTokenKind::Enum => 3,
+        SemanticTokenKind::Trait => 4,
+        SemanticTokenKind::Function => 5,
+        SemanticTokenKind::Method => 6,
+        SemanticTokenKind::Property => 7,
+        SemanticTokenKind::EnumMember => 8,
+        SemanticTokenKind::Variable => 9,
+        SemanticTokenKind::Parameter => 10,
+        SemanticTokenKind::Macro => 11,
+        SemanticTokenKind::Keyword => 12,
+        SemanticTokenKind::String => 13,
+        SemanticTokenKind::Number => 14,
+        SemanticTokenKind::Comment => 15,
+        SemanticTokenKind::Operator => 16,
     }
 }
 
@@ -800,17 +841,13 @@ fn semantic_tokens_for(source: &str) -> SemanticTokens {
         } else {
             column
         };
-        let token_type = match token.kind() {
-            SemanticTokenKind::ClosureParameter => 0,
-            SemanticTokenKind::Method => 1,
-            SemanticTokenKind::RangeOperator => 2,
-        };
+        let token_type = semantic_token_type_index(token.kind());
         data.push(LspSemanticToken {
             delta_line,
             delta_start,
             length: source[start..end].encode_utf16().count() as u32,
             token_type,
-            token_modifiers_bitset: u32::from(token.is_declaration()),
+            token_modifiers_bitset: token.modifiers().bits(),
         });
         previous_line = line;
         previous_start = column;
@@ -1415,8 +1452,9 @@ fn builtin_hover_detail(name: &str) -> Option<String> {
 mod tests {
     use super::{
         builtin_hover_detail, completion_items_at, completions_for, diag_to_lsp, format_edits,
-        member_to_item, percent_decode, range_from_bytes, semantic_tokens_for,
-        reconciled_diagnostics_for, to_lsp_symbol_kind, uri_to_path, whole_document_range, Server,
+        member_to_item, percent_decode, range_from_bytes, reconciled_diagnostics_for,
+        semantic_token_legend, semantic_token_type_index, semantic_tokens_for, to_lsp_symbol_kind,
+        uri_to_path, whole_document_range, SemanticTokenKind, Server,
     };
     use lsp_server::{Message, Request};
     use lsp_types::request::{PrepareRenameRequest, Request as _};
@@ -1847,17 +1885,65 @@ mod tests {
             decoded.push((src[start..end].to_string(), token.token_type, token.token_modifiers_bitset));
         }
         for method in ["map", "filter", "count"] {
-            assert!(decoded.iter().any(|token| token.0 == method && token.1 == 1));
+            assert!(decoded.iter().any(|token| {
+                token.0 == method
+                    && token.1 == semantic_token_type_index(SemanticTokenKind::Method)
+            }));
         }
-        assert!(decoded.iter().any(|token| token.0 == ".." && token.1 == 2));
+        assert!(decoded.iter().any(|token| {
+            token.0 == ".." && token.1 == semantic_token_type_index(SemanticTokenKind::Operator)
+        }));
         for parameter in ["value", "item"] {
             assert!(decoded.iter().any(|token| {
-                token.0 == parameter && token.1 == 0 && token.2 == 1
+                token.0 == parameter
+                    && token.1 == semantic_token_type_index(SemanticTokenKind::Parameter)
+                    && token.2 == 1
             }));
             assert!(decoded.iter().any(|token| {
-                token.0 == parameter && token.1 == 0 && token.2 == 0
+                token.0 == parameter
+                    && token.1 == semantic_token_type_index(SemanticTokenKind::Parameter)
+                    && token.2 == 0
             }));
         }
+    }
+
+    #[test]
+    fn semantic_token_contract_legend_matches_analysis_kinds() {
+        let legend = semantic_token_legend();
+        let expected = [
+            (SemanticTokenKind::Namespace, lsp_types::SemanticTokenType::NAMESPACE),
+            (SemanticTokenKind::Type, lsp_types::SemanticTokenType::TYPE),
+            (SemanticTokenKind::Struct, lsp_types::SemanticTokenType::STRUCT),
+            (SemanticTokenKind::Enum, lsp_types::SemanticTokenType::ENUM),
+            (SemanticTokenKind::Trait, lsp_types::SemanticTokenType::INTERFACE),
+            (SemanticTokenKind::Function, lsp_types::SemanticTokenType::FUNCTION),
+            (SemanticTokenKind::Method, lsp_types::SemanticTokenType::METHOD),
+            (SemanticTokenKind::Property, lsp_types::SemanticTokenType::PROPERTY),
+            (SemanticTokenKind::EnumMember, lsp_types::SemanticTokenType::ENUM_MEMBER),
+            (SemanticTokenKind::Variable, lsp_types::SemanticTokenType::VARIABLE),
+            (SemanticTokenKind::Parameter, lsp_types::SemanticTokenType::PARAMETER),
+            (SemanticTokenKind::Macro, lsp_types::SemanticTokenType::MACRO),
+            (SemanticTokenKind::Keyword, lsp_types::SemanticTokenType::KEYWORD),
+            (SemanticTokenKind::String, lsp_types::SemanticTokenType::STRING),
+            (SemanticTokenKind::Number, lsp_types::SemanticTokenType::NUMBER),
+            (SemanticTokenKind::Comment, lsp_types::SemanticTokenType::COMMENT),
+            (SemanticTokenKind::Operator, lsp_types::SemanticTokenType::OPERATOR),
+        ];
+        for (kind, token_type) in expected {
+            assert_eq!(
+                legend.token_types[semantic_token_type_index(kind) as usize],
+                token_type
+            );
+        }
+        assert_eq!(
+            legend.token_modifiers,
+            [
+                lsp_types::SemanticTokenModifier::DECLARATION,
+                lsp_types::SemanticTokenModifier::READONLY,
+                lsp_types::SemanticTokenModifier::STATIC,
+                lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
+            ]
+        );
     }
 
     #[test]
