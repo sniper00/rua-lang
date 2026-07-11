@@ -1438,6 +1438,9 @@ fn main() {
 
 ### Phase 4：HIR body + typeck
 
+> Phase 4/5 的逐 Step 施工、迁移门禁和验收命令见
+> `docs/rua-analysis-lsp-migration-plan.md`。
+
 目标：
 
 - 在 `rua-analysis` 中建立 IDE 专用 type inference 和 member lookup；以当前 `ruac::typeck` 行为作为 parity baseline。

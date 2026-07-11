@@ -13,3 +13,5 @@ tree changes present at import time.
 
 The repository split, analysis architecture baseline, and Phase 4A closure and
 fused-iterator implementation in `docs/rua-construction-plan.md` are complete.
+The next native-analysis and full LSP migration is specified in
+`docs/rua-analysis-lsp-migration-plan.md`.

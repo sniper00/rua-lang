@@ -4,6 +4,7 @@
 > `moon_rs` 的 workspace/doc 收尾分别记录在 `e126f2f` 和 `c5cca65`。
 > 架构依据：`docs/rua-ide-architecture.md`。
 > Golden 用例清单：`docs/rua-golden-cases.md`。
+> 下一阶段：`docs/rua-analysis-lsp-migration-plan.md`。
 > 固定目标仓库：`/Users/bruce/GitProjects/rua`。
 
 ## 1. 施工原则
