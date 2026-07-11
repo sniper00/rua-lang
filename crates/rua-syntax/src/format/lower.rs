@@ -759,6 +759,7 @@ fn macro_doc(m: &MacroCallExpr) -> Doc {
 
 fn pat_str(p: &Pattern) -> String {
     match p.kind() {
+        PatternKind::Missing => compact(p.syntax()),
         PatternKind::Wildcard => "_".into(),
         PatternKind::Binding => p.binding_name().map(tok_text).unwrap_or_else(|| "_".into()),
         PatternKind::Literal => p
@@ -768,10 +769,13 @@ fn pat_str(p: &Pattern) -> String {
             .filter(|t| !t.kind().is_trivia())
             .map(|t| t.text().to_string())
             .collect::<String>(),
-        PatternKind::Range => match p.range_bounds() {
-            Some((lo, hi, incl)) => {
-                format!("{}{}{}", lo.text(), if incl { "..=" } else { ".." }, hi.text())
-            }
+        PatternKind::Range => match p.range() {
+            Some(range) => format!(
+                "{}{}{}",
+                range.start().map(|literal| literal.text()).unwrap_or_default(),
+                range.operator_token().text(),
+                range.end().map(|literal| literal.text()).unwrap_or_default()
+            ),
             None => compact(p.syntax()),
         },
         PatternKind::Path => p.path_segments().map(tok_text).collect::<Vec<_>>().join("::"),
@@ -783,13 +787,14 @@ fn pat_str(p: &Pattern) -> String {
         PatternKind::StructVariant => {
             let path = p.path_segments().map(tok_text).collect::<Vec<_>>().join("::");
             let mut fields: Vec<String> = p
-                .struct_fields()
-                .map(|(name, sub)| match sub {
-                    Some(sp) => format!("{}: {}", name.text(), pat_str(&sp)),
-                    None => name.text().to_string(),
+                .pattern_fields()
+                .map(|field| match field.pattern() {
+                    Some(pattern) => format!("{}: {}", field.name().text(), pat_str(&pattern)),
+                    None if field.is_shorthand() => field.name().text().to_string(),
+                    None => format!("{}:", field.name().text()),
                 })
                 .collect();
-            if has_child_token(p.syntax(), K::DotDot) {
+            if p.rest_token().is_some() {
                 fields.push("..".into());
             }
             if fields.is_empty() {

@@ -3,11 +3,17 @@
 //! Compiler AST and type-checker types do not cross into this module; parity
 //! with `ruac` is maintained through conformance tests.
 
+pub mod body;
 mod def_map;
 mod item_tree;
 pub(crate) mod module_resolution;
 
 pub use crate::base::TextRange;
+pub use body::{
+    BinaryOp, Binding, BindingId, BindingKind, Block, Body, BodyId, BodySourceId, BodySourceMap,
+    Condition, Expr, ExprId, Literal, LiteralKind, MatchArm, NameRef, NameRefId, NameRefKind, Pat,
+    PatId, PatternField, Statement, StructField, UnaryOp,
+};
 pub use def_map::{
     DefId, DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, MemberId,
     ModuleData, ModuleId,

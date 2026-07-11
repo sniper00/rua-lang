@@ -20,11 +20,13 @@ pub use diagnostic::{
     normalize_diagnostics, reconcile_diagnostics,
 };
 pub use hir::{
-    AggregateSignature, CallableSignature, DefId, DefKind, DefMap, Definition, DefinitionSource,
-    DefinitionSourceKind, GenericParamData, ImplSignature, Import, ItemKind, ItemSignature,
-    ItemSourceKind, ItemTree, ItemTreeItem, MemberId, ModuleData, ModuleId, ModuleKind,
-    ParameterData, ReceiverKind, SignatureFingerprint, TypeRef, VariantKind, VariantSignature,
-    Visibility, WherePredicateData,
+    AggregateSignature, BinaryOp, Binding, BindingId, BindingKind, Block, Body, BodyId,
+    BodySourceId, BodySourceMap, CallableSignature, Condition, DefId, DefKind, DefMap, Definition,
+    DefinitionSource, DefinitionSourceKind, Expr, ExprId, GenericParamData, ImplSignature, Import,
+    ItemKind, ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, Literal, LiteralKind,
+    MatchArm, MemberId, ModuleData, ModuleId, ModuleKind, NameRef, NameRefId, NameRefKind,
+    ParameterData, Pat, PatId, PatternField, ReceiverKind, SignatureFingerprint, Statement,
+    StructField, TypeRef, UnaryOp, VariantKind, VariantSignature, Visibility, WherePredicateData,
 };
 pub use ide::{
     Analysis, AnalysisHost, ClosureParameterInfo, CompletionInsert, CompletionItem, CompletionKind,

@@ -364,6 +364,8 @@ impl Change {
 #[derive(Clone, Debug, Default)]
 pub struct Vfs {
     file_texts: HashMap<FileId, Arc<str>>,
+    file_revisions: HashMap<FileId, u64>,
+    next_revision: u64,
     file_kinds: HashMap<FileId, FileKind>,
     file_roots: HashMap<FileId, SourceRootId>,
     file_paths: HashMap<FileId, VfsPath>,
@@ -380,6 +382,7 @@ impl Vfs {
     pub fn set_file_text(&mut self, file_id: FileId, text: impl Into<Arc<str>>) {
         self.file_texts.insert(file_id, text.into());
         self.file_kinds.entry(file_id).or_insert(FileKind::Source);
+        self.bump_file_revision(file_id);
     }
 
     pub fn set_file(
@@ -430,6 +433,7 @@ impl Vfs {
     }
 
     pub fn remove_file(&mut self, file_id: FileId) -> Option<Arc<str>> {
+        self.bump_file_revision(file_id);
         self.file_kinds.remove(&file_id);
         self.remove_file_path(file_id);
         if let Some(source_root_id) = self.file_roots.remove(&file_id)
@@ -462,6 +466,7 @@ impl Vfs {
     pub fn remove_source_root(&mut self, source_root_id: SourceRootId) -> Option<SourceRoot> {
         let source_root = self.source_roots.remove(&source_root_id)?;
         for file_id in source_root.files() {
+            self.bump_file_revision(file_id);
             self.file_texts.remove(&file_id);
             self.file_kinds.remove(&file_id);
             self.file_roots.remove(&file_id);
@@ -517,6 +522,13 @@ impl Vfs {
         self.file_texts.get(&file_id).cloned()
     }
 
+    pub fn file_revision(&self, file_id: FileId) -> Option<u64> {
+        self.file_texts
+            .contains_key(&file_id)
+            .then(|| self.file_revisions.get(&file_id).copied())
+            .flatten()
+    }
+
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {
         self.file_kinds.get(&file_id).copied()
     }
@@ -559,6 +571,14 @@ impl Vfs {
         self.source_root_id(file_id)
             .and_then(|source_root_id| self.source_root(source_root_id))
             .is_some_and(SourceRoot::is_read_only)
+    }
+
+    fn bump_file_revision(&mut self, file_id: FileId) {
+        self.next_revision = self
+            .next_revision
+            .checked_add(1)
+            .expect("VFS revision space exhausted");
+        self.file_revisions.insert(file_id, self.next_revision);
     }
 }
 

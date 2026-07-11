@@ -211,8 +211,9 @@ fn definition_name_at(
                     PatternKind::StructVariant => {
                         // Struct-pattern shorthand `P { x, y }`: the field name
                         // token (no sub-pattern) is itself the binding.
-                        for (field_name, sub) in pat.struct_fields() {
-                            if sub.is_none() && token_range_contains(&field_name, offset) {
+                        for field in pat.pattern_fields() {
+                            let field_name = field.name();
+                            if field.is_shorthand() && token_range_contains(&field_name, offset) {
                                 let r = field_name.text_range();
                                 return Some(Resolution {
                                     kind: RefKind::Local,
@@ -697,21 +698,23 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<(String, (usize, usize)
             }
         }
         PatternKind::StructVariant => {
-            for (field_name, sub_pat) in pat.struct_fields() {
+            for field in pat.pattern_fields() {
+                let field_name = field.name();
                 let r = field_name.text_range();
-                match sub_pat {
+                match field.pattern() {
                     Some(sp) => collect_pattern_bindings(&sp, out),
-                    None => {
+                    None if field.is_shorthand() => {
                         // Shorthand: `Point { x, y }` — the field name IS the binding.
                         out.push((
                             field_name.text().to_string(),
                             (usize::from(r.start()), usize::from(r.end())),
                         ));
                     }
+                    None => {}
                 }
             }
         }
-        // Wildcard, Literal, Range, Path — no bindings.
+        // Missing, Wildcard, Literal, Range, Path — no bindings.
         _ => {}
     }
 }

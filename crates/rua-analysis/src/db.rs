@@ -2,10 +2,18 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
-use rua_syntax::{Parse, ast::SourceFile, parse_source_file};
+use rua_syntax::{
+    AstNode, Parse,
+    ast::{FnDecl, SourceFile, TraitMethod},
+    parse_source_file,
+};
 
 use crate::{
-    hir::{DefId, DefMap, IdentityContext, IdentityInterner, ItemTree, ModuleId},
+    hir::{
+        Body, BodySourceMap, DefId, DefKind, DefMap, IdentityContext, IdentityInterner,
+        ItemSourceKind, ItemTree, ModuleId,
+        body::{lower_fn_body, lower_trait_method_body},
+    },
     vfs::{
         Change, FileId, FileKind, ProjectData, ProjectId, SourceRoot, SourceRootChange,
         SourceRootId, SourceRootKind, Vfs, VfsPath,
@@ -20,6 +28,14 @@ pub struct BaseDb {
     parse_cache: RefCell<HashMap<FileId, Arc<Parse<SourceFile>>>>,
     item_tree_cache: RefCell<HashMap<FileId, Arc<ItemTree>>>,
     def_map_cache: RefCell<HashMap<DefMapKey, Arc<DefMap>>>,
+    body_cache: RefCell<HashMap<DefId, BodyCacheEntry>>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyCacheEntry {
+    file_revision: u64,
+    body: Arc<Body>,
+    source_map: Arc<BodySourceMap>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,6 +82,10 @@ impl BaseDb {
 
     pub fn file_text(&self, file_id: FileId) -> Option<Arc<str>> {
         self.vfs.file_text(file_id)
+    }
+
+    pub(crate) fn file_revision(&self, file_id: FileId) -> Option<u64> {
+        self.vfs.file_revision(file_id)
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {
@@ -174,6 +194,26 @@ impl BaseDb {
             .intern_child_module(context, parent, name, occurrence)
     }
 
+    fn definition_context(&self, def_id: DefId) -> Option<(IdentityContext, FileId)> {
+        // Building a DefMap may intern more definitions, so the shared
+        // interner borrow must not be held while the map is queried.
+        self.identity_interner.borrow().definition_location(def_id)
+    }
+
+    pub(crate) fn current_definition_map(&self, def_id: DefId) -> Option<Arc<DefMap>> {
+        let (context, file_id) = self.definition_context(def_id)?;
+        let map = match context {
+            IdentityContext::Implicit(root_file) => {
+                self.file_text(root_file)?;
+                self.def_map(root_file)
+            }
+            IdentityContext::Project(project_id) => self.project_def_map(project_id)?,
+        };
+        map.definition(def_id)
+            .is_some_and(|definition| definition.file_id() == file_id)
+            .then_some(map)
+    }
+
     pub fn def_map(&self, root_file: FileId) -> Arc<DefMap> {
         let key = DefMapKey::Implicit(root_file);
         if let Some(def_map) = self.def_map_cache.borrow().get(&key).cloned() {
@@ -195,6 +235,88 @@ impl BaseDb {
         self.def_map_cache.borrow_mut().insert(key, def_map.clone());
         Some(def_map)
     }
+
+    /// Returns the semantic body owned by `def_id` in the current input revision.
+    pub fn body(&self, def_id: DefId) -> Option<Arc<Body>> {
+        self.body_with_source_map(def_id).map(|(body, _)| body)
+    }
+
+    /// Returns the current-revision syntax mapping for a semantic body.
+    pub fn body_source_map(&self, def_id: DefId) -> Option<Arc<BodySourceMap>> {
+        self.body_with_source_map(def_id)
+            .map(|(_, source_map)| source_map)
+    }
+
+    pub(crate) fn body_with_source_map(
+        &self,
+        def_id: DefId,
+    ) -> Option<(Arc<Body>, Arc<BodySourceMap>)> {
+        let Some(map) = self.current_definition_map(def_id) else {
+            self.body_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        let definition = map.definition(def_id)?.clone();
+        let file_id = definition.file_id();
+        let file_revision = self.file_revision(file_id)?;
+
+        if let Some(cached) = self.body_cache.borrow().get(&def_id)
+            && cached.file_revision == file_revision
+        {
+            return Some((cached.body.clone(), cached.source_map.clone()));
+        }
+
+        let Some((lowered, source_map)) = self.lower_body(def_id, &definition) else {
+            self.body_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        let body = self
+            .body_cache
+            .borrow()
+            .get(&def_id)
+            .filter(|cached| cached.body.as_ref() == &lowered)
+            .map(|cached| cached.body.clone())
+            .unwrap_or_else(|| Arc::new(lowered));
+        let source_map = Arc::new(source_map);
+        self.body_cache.borrow_mut().insert(
+            def_id,
+            BodyCacheEntry {
+                file_revision,
+                body: body.clone(),
+                source_map: source_map.clone(),
+            },
+        );
+        Some((body, source_map))
+    }
+
+    fn lower_body(
+        &self,
+        def_id: DefId,
+        definition: &crate::hir::Definition,
+    ) -> Option<(Body, BodySourceMap)> {
+        let source_kind = definition.source_kind().item_kind();
+        let parse = self.parse(definition.file_id());
+        match (definition.kind(), source_kind) {
+            (DefKind::Function, ItemSourceKind::Definition)
+            | (DefKind::Method, ItemSourceKind::ImplMethod) => parse
+                .syntax_node()
+                .descendants()
+                .filter_map(FnDecl::cast)
+                .find(|function| syntax_range(function.syntax()) == definition.range())
+                .map(|function| lower_fn_body(def_id, definition.file_id(), &function)),
+            (DefKind::Method, ItemSourceKind::TraitDefault) => parse
+                .syntax_node()
+                .descendants()
+                .filter_map(TraitMethod::cast)
+                .find(|method| syntax_range(method.syntax()) == definition.range())
+                .map(|method| lower_trait_method_body(def_id, definition.file_id(), &method)),
+            _ => None,
+        }
+    }
+}
+
+fn syntax_range(node: &rua_syntax::SyntaxNode) -> crate::base::TextRange {
+    let range = node.text_range();
+    crate::base::TextRange::new(range.start().into(), range.end().into())
 }
 
 #[cfg(test)]

@@ -80,6 +80,7 @@ enum ModuleLoc {
 #[derive(Debug, Default)]
 pub(crate) struct IdentityInterner {
     definitions: HashMap<DefLoc, DefId>,
+    definition_locations: Vec<DefLoc>,
     modules: HashMap<ModuleLoc, ModuleId>,
 }
 
@@ -101,8 +102,15 @@ impl IdentityInterner {
         let raw =
             u32::try_from(self.definitions.len()).expect("definition identity space exhausted");
         let id = DefId::new(raw);
-        self.definitions.insert(location, id);
+        self.definitions.insert(location.clone(), id);
+        self.definition_locations.push(location);
         id
+    }
+
+    pub(crate) fn definition_location(&self, id: DefId) -> Option<(IdentityContext, FileId)> {
+        self.definition_locations
+            .get(id.index() as usize)
+            .map(|location| (location.context, location.file_id))
     }
 
     pub(crate) fn intern_root_module(

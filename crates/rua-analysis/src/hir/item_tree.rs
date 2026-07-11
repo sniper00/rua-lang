@@ -132,6 +132,10 @@ impl TypeRef {
         self.syntax.as_ref().map(SignatureSyntax::display)
     }
 
+    pub const fn is_missing(&self) -> bool {
+        self.syntax.is_none()
+    }
+
     fn missing() -> Self {
         Self { syntax: None }
     }
@@ -150,7 +154,7 @@ impl TypeRef {
         Self::from_signature(SignatureSyntax::from_display(syntax))
     }
 
-    fn from_type(ty: Option<Type>) -> Self {
+    pub(crate) fn from_type(ty: Option<Type>) -> Self {
         ty.map(|ty| Self::from_signature(canonical_syntax(ty.syntax())))
             .unwrap_or_else(Self::missing)
     }

@@ -196,11 +196,14 @@ impl FnDecl {
     }
     /// True when the signature declares a `self` receiver.
     pub fn has_self(&self) -> bool {
-        token(&self.syntax, K::KwSelf).is_some()
+        self_receiver_token(&self.syntax).is_some()
     }
 
     pub fn receiver(&self) -> Option<ReceiverKind> {
         receiver_kind(&self.syntax)
+    }
+    pub fn receiver_token(&self) -> Option<SyntaxToken> {
+        self_receiver_token(&self.syntax)
     }
 }
 
@@ -217,7 +220,10 @@ fn receiver_kind(node: &SyntaxNode) -> Option<ReceiverKind> {
         .filter_map(|element| element.into_token())
         .filter(|token| !token.kind().is_trivia())
         .collect();
-    let receiver = tokens.iter().position(|token| token.kind() == K::KwSelf)?;
+    let receiver_token = self_receiver_token(node)?;
+    let receiver = tokens
+        .iter()
+        .position(|token| token == &receiver_token)?;
     Some(match tokens.get(receiver.wrapping_sub(1)).map(|token| token.kind()) {
         Some(K::KwMut)
             if tokens
@@ -228,6 +234,15 @@ fn receiver_kind(node: &SyntaxNode) -> Option<ReceiverKind> {
         }
         Some(K::Amp) => ReceiverKind::SharedRef,
         _ => ReceiverKind::Value,
+    })
+}
+
+fn self_receiver_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let left = token(node, K::LParen)?.text_range().end();
+    let right = token(node, K::RParen).map(|token| token.text_range().start());
+    tokens(node, K::KwSelf).find(|token| {
+        left <= token.text_range().start()
+            && right.is_none_or(|right| token.text_range().end() <= right)
     })
 }
 
@@ -495,10 +510,13 @@ impl TraitMethod {
     }
     /// True when the signature declares a `self` receiver.
     pub fn has_self(&self) -> bool {
-        token(&self.syntax, K::KwSelf).is_some()
+        self_receiver_token(&self.syntax).is_some()
     }
     pub fn receiver(&self) -> Option<ReceiverKind> {
         receiver_kind(&self.syntax)
+    }
+    pub fn receiver_token(&self) -> Option<SyntaxToken> {
+        self_receiver_token(&self.syntax)
     }
     pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
         children::<Param>(&self.syntax)
@@ -873,6 +891,9 @@ impl ExprStmt {
     pub fn expr(&self) -> Option<Expr> {
         child::<Expr>(&self.syntax)
     }
+    pub fn has_semicolon(&self) -> bool {
+        token(&self.syntax, K::Semi).is_some()
+    }
 }
 
 impl ReturnStmt {
@@ -892,10 +913,15 @@ impl WhileStmt {
     }
     /// The condition (`while COND`) or scrutinee expression (`while let PAT = EXPR`).
     pub fn condition(&self) -> Option<Expr> {
-        child::<Expr>(&self.syntax)
+        let body_start = self.body()?.syntax().text_range().start();
+        self.syntax
+            .children()
+            .filter_map(Expr::cast)
+            .take_while(|expr| expr.syntax().text_range().start() < body_start)
+            .last()
     }
     pub fn body(&self) -> Option<Block> {
-        child(&self.syntax)
+        children::<Block>(&self.syntax).last()
     }
 }
 
@@ -910,10 +936,15 @@ impl ForStmt {
         name_token(&self.syntax)
     }
     pub fn iter(&self) -> Option<Expr> {
-        child::<Expr>(&self.syntax)
+        let body_start = self.body()?.syntax().text_range().start();
+        self.syntax
+            .children()
+            .filter_map(Expr::cast)
+            .take_while(|expr| expr.syntax().text_range().start() < body_start)
+            .last()
     }
     pub fn body(&self) -> Option<Block> {
-        child(&self.syntax)
+        children::<Block>(&self.syntax).last()
     }
 }
 
@@ -1182,18 +1213,36 @@ impl IfExpr {
     }
     /// The condition (`if COND`) or scrutinee expression (`if let PAT = EXPR`).
     pub fn condition(&self) -> Option<Expr> {
-        child::<Expr>(&self.syntax)
+        let then_start = self.then_block()?.syntax().text_range().start();
+        self.syntax
+            .children()
+            .filter_map(Expr::cast)
+            .take_while(|expr| expr.syntax().text_range().start() < then_start)
+            .last()
     }
     pub fn then_block(&self) -> Option<Block> {
-        child(&self.syntax)
+        let else_start = token(&self.syntax, K::KwElse).map(|token| token.text_range().start());
+        self.syntax
+            .children()
+            .filter_map(Block::cast)
+            .take_while(|block| {
+                else_start.is_none_or(|start| block.syntax().text_range().start() < start)
+            })
+            .last()
     }
     /// The `else` branch, either a `Block` or a nested `IfExpr` (`else if`).
     pub fn else_block(&self) -> Option<Block> {
-        nth_child::<Block>(&self.syntax, 1)
+        let else_end = token(&self.syntax, K::KwElse)?.text_range().end();
+        self.syntax
+            .children()
+            .filter_map(Block::cast)
+            .find(|block| block.syntax().text_range().start() >= else_end)
     }
     pub fn else_if(&self) -> Option<IfExpr> {
-        // A nested `if` under this `if` marks an `else if`.
-        self.syntax.children().skip(1).find_map(IfExpr::cast)
+        let else_end = token(&self.syntax, K::KwElse)?.text_range().end();
+        self.syntax.children().filter_map(IfExpr::cast).find(|branch| {
+            branch.syntax().text_range().start() >= else_end
+        })
     }
 }
 
@@ -1212,9 +1261,8 @@ impl MatchArm {
     }
     /// An optional `if` guard expression, e.g. `pat if x > 0 => ...`.
     pub fn guard(&self) -> Option<Expr> {
-        // The guard is an Expr child after the `if` token and before `=>`.
-        if token(&self.syntax, K::KwIf).is_some() {
-            let fat = token(&self.syntax, K::FatArrow)?;
+        token(&self.syntax, K::KwIf)?;
+        if let Some(fat) = token(&self.syntax, K::FatArrow) {
             let fa = fat.text_range().start();
             self.syntax
                 .children()
@@ -1222,7 +1270,9 @@ impl MatchArm {
                 .filter(|e| e.syntax().text_range().start() < fa)
                 .last()
         } else {
-            None
+            // Recovery: without `=>`, the first expression still belongs to
+            // the syntactically present `if` guard. It must not become the arm body.
+            child::<Expr>(&self.syntax)
         }
     }
     /// The arm body expression (after `=>`). A guarded arm has two `Expr`
@@ -1236,9 +1286,13 @@ impl MatchArm {
                 .filter_map(Expr::cast)
                 .find(|e| e.syntax().text_range().start() >= fa)
         } else {
-            // Resilience: malformed arm with no `=>`; the body, if any, is the
-            // last expression child.
-            self.syntax.children().filter_map(Expr::cast).last()
+            // A guarded arm reserves its first expression for the guard even
+            // when the arrow is missing. An unguarded arm's first expression
+            // is its recovered body.
+            nth_child::<Expr>(
+                &self.syntax,
+                usize::from(token(&self.syntax, K::KwIf).is_some()),
+            )
         }
     }
 }
@@ -1252,8 +1306,11 @@ impl StructLitExpr {
         let limit = brace
             .map(|b| b.text_range().start())
             .unwrap_or(rowan::TextSize::from(u32::MAX));
-        tokens(&self.syntax, K::Ident)
-            .filter(move |t| t.text_range().start() < limit)
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| matches!(token.kind(), K::Ident | K::KwSelf))
+            .filter(move |token| token.text_range().start() < limit)
     }
     pub fn fields(&self) -> impl Iterator<Item = FieldInit> + '_ {
         children::<FieldInit>(&self.syntax)
@@ -1266,6 +1323,9 @@ impl FieldInit {
     }
     pub fn value(&self) -> Option<Expr> {
         child::<Expr>(&self.syntax)
+    }
+    pub fn is_shorthand(&self) -> bool {
+        token(&self.syntax, K::Colon).is_none()
     }
 }
 
@@ -1289,6 +1349,8 @@ impl ArgList {
 /// The kind of a [`Pattern`] node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternKind {
+    /// Missing or recovered pattern syntax.
+    Missing,
     /// `_` wildcard.
     Wildcard,
     /// `x` — a variable binding.
@@ -1311,14 +1373,14 @@ impl Pattern {
         let syntax = self.syntax();
 
         // Trivial token-based checks.
-        if token(syntax, K::DotDot).is_some() || token(syntax, K::DotDotEq).is_some() {
-            return PatternKind::Range;
-        }
         if token(syntax, K::LParen).is_some() {
             return PatternKind::TupleVariant;
         }
         if token(syntax, K::LBrace).is_some() {
             return PatternKind::StructVariant;
+        }
+        if token(syntax, K::DotDot).is_some() || token(syntax, K::DotDotEq).is_some() {
+            return PatternKind::Range;
         }
         if token(syntax, K::ColonColon).is_some() {
             return PatternKind::Path;
@@ -1331,7 +1393,16 @@ impl Pattern {
             .find(|t| !t.kind().is_trivia());
         match first_tok {
             Some(t) if t.text() == "_" => PatternKind::Wildcard,
-            Some(t) if t.kind() == K::Ident => PatternKind::Binding,
+            Some(t)
+                if matches!(t.kind(), K::Ident | K::KwSelf)
+                    && t.text()
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first == '_' || first.is_lowercase()) =>
+            {
+                PatternKind::Binding
+            }
+            Some(t) if matches!(t.kind(), K::Ident | K::KwSelf) => PatternKind::Path,
             Some(t)
                 if matches!(
                     t.kind(),
@@ -1340,7 +1411,7 @@ impl Pattern {
             {
                 PatternKind::Literal
             }
-            _ => PatternKind::Wildcard, // fallback: empty pattern (error tree)
+            _ => PatternKind::Missing,
         }
     }
 
@@ -1350,7 +1421,7 @@ impl Pattern {
             self.syntax()
                 .children_with_tokens()
                 .filter_map(|e| e.into_token())
-                .find(|t| t.kind() == K::Ident)
+                .find(|t| matches!(t.kind(), K::Ident | K::KwSelf))
         } else {
             None
         }
@@ -1364,6 +1435,7 @@ impl Pattern {
         self.syntax()
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
             .take_while(|t| matches!(t.kind(), K::Ident | K::KwSelf | K::ColonColon))
             .filter(|t| matches!(t.kind(), K::Ident | K::KwSelf))
     }
@@ -1374,14 +1446,21 @@ impl Pattern {
         children::<Pattern>(self.syntax())
     }
 
-    /// For `StructVariant` patterns: iterate `(field_name, optional sub-pattern)`.
-    /// Returns field identifier tokens paired with their sub-pattern (`None` for
-    /// shorthand `Point { x }` where the binding reuses the field name).
-    pub fn struct_fields(
-        &self,
-    ) -> impl Iterator<Item = (SyntaxToken, Option<Pattern>)> + '_ {
-        StructFieldIter {
-            tokens: self
+    pub fn rest_token(&self) -> Option<SyntaxToken> {
+        (self.kind() == PatternKind::StructVariant)
+            .then(|| token(self.syntax(), K::DotDot))
+            .flatten()
+    }
+
+    pub fn has_rest(&self) -> bool {
+        self.rest_token().is_some()
+    }
+
+    /// Structured fields for a struct pattern. Unlike [`Pattern::struct_fields`],
+    /// this preserves whether a colon was written when its sub-pattern is missing.
+    pub fn pattern_fields(&self) -> impl Iterator<Item = PatternField> + '_ {
+        PatternFieldIter {
+            elements: self
                 .syntax()
                 .children_with_tokens()
                 .collect::<Vec<_>>(),
@@ -1389,62 +1468,195 @@ impl Pattern {
         }
     }
 
+    /// For `StructVariant` patterns: iterate `(field_name, optional sub-pattern)`.
+    /// Returns field identifier tokens paired with their sub-pattern (`None` for
+    /// shorthand `Point { x }` where the binding reuses the field name).
+    pub fn struct_fields(
+        &self,
+    ) -> impl Iterator<Item = (SyntaxToken, Option<Pattern>)> + '_ {
+        self.pattern_fields()
+            .map(|field| (field.name, field.pattern))
+    }
+
     /// For `Literal` patterns: the literal expression. Returns the token text
     /// wrapped as appropriate.
-    pub fn literal_token(&self) -> Option<SyntaxToken> {
+    pub fn literal(&self) -> Option<PatternLiteral> {
         if self.kind() != PatternKind::Literal {
             return None;
         }
-        self.syntax()
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| {
-                matches!(
-                    t.kind(),
-                    K::Int | K::Float | K::Str | K::KwTrue | K::KwFalse
-                )
-            })
+        pattern_literal(
+            self.syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token()),
+        )
     }
 
-    /// For `Range` patterns: the lower and upper bound tokens, plus whether the
-    /// range is inclusive (`..=`).
-    pub fn range_bounds(&self) -> Option<(SyntaxToken, SyntaxToken, bool)> {
+    /// Legacy value-token accessor. Use [`Pattern::literal`] when the sign matters.
+    pub fn literal_token(&self) -> Option<SyntaxToken> {
+        self.literal().map(|literal| literal.token)
+    }
+
+    pub fn range(&self) -> Option<PatternRange> {
         if self.kind() != PatternKind::Range {
             return None;
         }
-        let toks: Vec<_> = self
-            .syntax()
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| {
-                matches!(
-                    t.kind(),
-                    K::Int | K::Float | K::KwTrue | K::KwFalse | K::Minus
-                )
-            })
-            .collect();
-        // Combine `Minus` + literal into the value token where possible.
-        // For now, return tokens as-is; consumers handle the minus.
-        let inclusive = token(self.syntax(), K::DotDotEq).is_some();
-        let lo = toks.first()?.clone();
-        let hi = toks.last()?.clone();
-        Some((lo, hi, inclusive))
+        let elements: Vec<_> = self.syntax().children_with_tokens().collect();
+        let operator_index = elements.iter().position(|element| {
+            element
+                .as_token()
+                .is_some_and(|token| matches!(token.kind(), K::DotDot | K::DotDotEq))
+        })?;
+        let operator = elements[operator_index].as_token()?.clone();
+        let start = pattern_literal(
+            elements[..operator_index]
+                .iter()
+                .filter_map(SyntaxElement::as_token)
+                .cloned(),
+        );
+        let end = pattern_literal(
+            elements[operator_index + 1..]
+                .iter()
+                .filter_map(SyntaxElement::as_token)
+                .cloned(),
+        );
+        Some(PatternRange {
+            start,
+            operator,
+            end,
+        })
+    }
+
+    /// For `Range` patterns: the lower and upper bound tokens, plus whether the
+    /// range is inclusive (`..=`). Use [`Pattern::range`] when signs matter.
+    pub fn range_bounds(&self) -> Option<(SyntaxToken, SyntaxToken, bool)> {
+        let range = self.range()?;
+        let inclusive = range.is_inclusive();
+        Some((range.start?.token, range.end?.token, inclusive))
     }
 }
 
-struct StructFieldIter {
-    tokens: Vec<SyntaxElement>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PatternLiteral {
+    minus_tokens: Vec<SyntaxToken>,
+    token: SyntaxToken,
+}
+
+impl PatternLiteral {
+    pub fn token(&self) -> SyntaxToken {
+        self.token.clone()
+    }
+
+    pub fn minus_tokens(&self) -> &[SyntaxToken] {
+        &self.minus_tokens
+    }
+
+    pub fn is_negative(&self) -> bool {
+        self.minus_tokens.len() % 2 == 1
+    }
+
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        for minus in &self.minus_tokens {
+            text.push_str(minus.text());
+        }
+        text.push_str(self.token.text());
+        text
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PatternRange {
+    start: Option<PatternLiteral>,
+    operator: SyntaxToken,
+    end: Option<PatternLiteral>,
+}
+
+impl PatternRange {
+    pub fn start(&self) -> Option<PatternLiteral> {
+        self.start.clone()
+    }
+
+    pub fn operator_token(&self) -> SyntaxToken {
+        self.operator.clone()
+    }
+
+    pub fn end(&self) -> Option<PatternLiteral> {
+        self.end.clone()
+    }
+
+    pub fn is_inclusive(&self) -> bool {
+        self.operator.kind() == K::DotDotEq
+    }
+}
+
+fn pattern_literal(tokens: impl IntoIterator<Item = SyntaxToken>) -> Option<PatternLiteral> {
+    let mut minus_tokens = Vec::new();
+    for token in tokens {
+        match token.kind() {
+            K::Minus => minus_tokens.push(token),
+            K::Int | K::Float | K::Str | K::KwTrue | K::KwFalse => {
+                return Some(PatternLiteral {
+                    minus_tokens,
+                    token,
+                });
+            }
+            kind if kind.is_trivia() => {}
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PatternField {
+    name: SyntaxToken,
+    colon: Option<SyntaxToken>,
+    pattern: Option<Pattern>,
+}
+
+impl PatternField {
+    pub fn name(&self) -> SyntaxToken {
+        self.name.clone()
+    }
+
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        self.colon.clone()
+    }
+
+    pub fn pattern(&self) -> Option<Pattern> {
+        self.pattern.clone()
+    }
+
+    pub const fn is_shorthand(&self) -> bool {
+        self.colon.is_none()
+    }
+}
+
+struct PatternFieldIter {
+    elements: Vec<SyntaxElement>,
     pos: usize,
 }
 
-impl Iterator for StructFieldIter {
-    type Item = (SyntaxToken, Option<Pattern>);
+impl PatternFieldIter {
+    fn skip_trivia(&mut self) {
+        while self.pos < self.elements.len()
+            && self.elements[self.pos]
+                .as_token()
+                .is_some_and(|token| token.kind().is_trivia())
+        {
+            self.pos += 1;
+        }
+    }
+}
+
+impl Iterator for PatternFieldIter {
+    type Item = PatternField;
 
     fn next(&mut self) -> Option<Self::Item> {
         // On first call, skip everything before the opening `{`.
         if self.pos == 0 {
-            while self.pos < self.tokens.len() {
-                if let Some(tok) = self.tokens[self.pos].as_token()
+            while self.pos < self.elements.len() {
+                if let Some(tok) = self.elements[self.pos].as_token()
                     && tok.kind() == K::LBrace
                 {
                     self.pos += 1;
@@ -1455,46 +1667,65 @@ impl Iterator for StructFieldIter {
         }
 
         // Skip until we find an Ident that names a field (skip commas, trivia).
-        while self.pos < self.tokens.len() {
-            let e = &self.tokens[self.pos];
+        while self.pos < self.elements.len() {
+            let e = &self.elements[self.pos];
             if let Some(tok) = e.as_token() {
-                if tok.kind() == K::Ident {
+                if matches!(tok.kind(), K::Ident | K::KwSelf) {
                     break;
                 }
-                if tok.kind() == K::RBrace {
+                if matches!(tok.kind(), K::RBrace | K::DotDot) {
                     // End of struct pattern.
-                    self.pos = self.tokens.len();
+                    self.pos = self.elements.len();
                     return None;
                 }
             }
             self.pos += 1;
         }
-        if self.pos >= self.tokens.len() {
+        if self.pos >= self.elements.len() {
             return None;
         }
-        let name = self.tokens[self.pos].as_token()?.clone();
+        let name = self.elements[self.pos].as_token()?.clone();
         self.pos += 1;
+        self.skip_trivia();
 
         // Check for `:` then sub-pattern, or just binding shorthand.
-        if self.pos < self.tokens.len()
-            && let Some(tok) = self.tokens[self.pos].as_token()
-            && tok.kind() == K::Colon
+        let colon = if self.pos < self.elements.len()
+            && self.elements[self.pos]
+                .as_token()
+                .is_some_and(|token| token.kind() == K::Colon)
         {
+            let colon = self.elements[self.pos].as_token().cloned();
             self.pos += 1;
-            // The sub-pattern is the next Pattern node.
-            while self.pos < self.tokens.len() {
-                if let Some(node) = self.tokens[self.pos].as_node()
-                    && let Some(pat) = Pattern::cast(node.clone())
+            self.skip_trivia();
+            colon
+        } else {
+            None
+        };
+
+        let mut pattern = None;
+        if colon.is_some() {
+            while self.pos < self.elements.len() {
+                if let Some(node) = self.elements[self.pos].as_node()
+                    && let Some(found) = Pattern::cast(node.clone())
                 {
+                    pattern = Some(found);
                     self.pos += 1;
-                    return Some((name, Some(pat)));
+                    break;
+                }
+                if self.elements[self.pos].as_token().is_some_and(|token| {
+                    matches!(token.kind(), K::Comma | K::RBrace | K::DotDot)
+                }) {
+                    break;
                 }
                 self.pos += 1;
             }
-            return Some((name, None));
         }
-        // Shorthand: `Point { x }` — no colon, the field name is also the binding.
-        Some((name, None))
+
+        Some(PatternField {
+            name,
+            colon,
+            pattern,
+        })
     }
 }
 
@@ -1899,6 +2130,46 @@ mod tests {
         assert!(matches!(arms[1].body().unwrap(), Expr::Literal(_)));
     }
 
+    #[test]
+    fn match_arm_without_arrow_keeps_guard_out_of_body() {
+        let sf = source_file("fn f(x: i64) { match x { n if n > 0 } }");
+        let arms = match_arms(&sf);
+        assert!(matches!(arms[0].guard(), Some(Expr::Bin(_))));
+        assert!(arms[0].body().is_none());
+    }
+
+    #[test]
+    fn block_conditions_are_not_mistaken_for_control_flow_bodies() {
+        let sf = source_file(
+            "fn f() { if {} {} else {} while {} {} for value in {} {} }",
+        );
+        let Item::Fn(function) = sf.items().next().unwrap() else { panic!() };
+        let statements: Vec<_> = function.body().unwrap().stmts().collect();
+
+        let Stmt::Expr(if_statement) = &statements[0] else { panic!() };
+        let Expr::If(if_expression) = if_statement.expr().unwrap() else { panic!() };
+        let Expr::Block(condition) = if_expression.condition().unwrap() else { panic!() };
+        assert_ne!(
+            condition.syntax().text_range(),
+            if_expression.then_block().unwrap().syntax().text_range()
+        );
+        assert!(if_expression.else_block().is_some());
+
+        let Stmt::While(while_statement) = &statements[1] else { panic!() };
+        let Expr::Block(condition) = while_statement.condition().unwrap() else { panic!() };
+        assert_ne!(
+            condition.syntax().text_range(),
+            while_statement.body().unwrap().syntax().text_range()
+        );
+
+        let Stmt::For(for_statement) = &statements[2] else { panic!() };
+        let Expr::Block(iterable) = for_statement.iter().unwrap() else { panic!() };
+        assert_ne!(
+            iterable.syntax().text_range(),
+            for_statement.body().unwrap().syntax().text_range()
+        );
+    }
+
     // --- Pattern accessor tests --------------------------------------------
 
     #[test]
@@ -1917,6 +2188,25 @@ mod tests {
         let pat = arms[0].patterns().next().unwrap();
         assert_eq!(pat.kind(), PatternKind::Binding);
         assert_eq!(pat.binding_name().unwrap().text(), "n");
+    }
+
+    #[test]
+    fn pattern_classifies_missing_and_single_segment_names() {
+        let sf = source_file(
+            "fn f(x: i64) { match x { _value => 0, self => 1, Ready => 2, => 3 } }",
+        );
+        let arms = match_arms(&sf);
+        let patterns: Vec<_> = arms
+            .iter()
+            .map(|arm| arm.patterns().next().unwrap())
+            .collect();
+
+        assert_eq!(patterns[0].kind(), PatternKind::Binding);
+        assert_eq!(patterns[0].binding_name().unwrap().text(), "_value");
+        assert_eq!(patterns[1].kind(), PatternKind::Binding);
+        assert_eq!(patterns[1].binding_name().unwrap().text(), "self");
+        assert_eq!(patterns[2].kind(), PatternKind::Path);
+        assert_eq!(patterns[3].kind(), PatternKind::Missing);
     }
 
     #[test]
@@ -1939,6 +2229,37 @@ mod tests {
         assert_eq!(lo.text(), "1");
         assert_eq!(hi.text(), "9");
         assert!(incl);
+    }
+
+    #[test]
+    fn pattern_range_preserves_signed_and_string_bounds() {
+        let sf = source_file(
+            "fn f(x: i64) { match x { -10..=-1 => 0, \"a\"..=\"z\" => 1 } }",
+        );
+        let arms = match_arms(&sf);
+
+        let signed = arms[0].patterns().next().unwrap().range().unwrap();
+        let start = signed.start().unwrap();
+        let end = signed.end().unwrap();
+        assert_eq!(start.text(), "-10");
+        assert!(start.is_negative());
+        assert_eq!(end.text(), "-1");
+        assert!(end.is_negative());
+        assert!(signed.is_inclusive());
+
+        let strings = arms[1].patterns().next().unwrap().range().unwrap();
+        assert_eq!(strings.start().unwrap().text(), "\"a\"");
+        assert_eq!(strings.end().unwrap().text(), "\"z\"");
+        assert!(strings.is_inclusive());
+        let (start, end, inclusive) = arms[1]
+            .patterns()
+            .next()
+            .unwrap()
+            .range_bounds()
+            .unwrap();
+        assert_eq!(start.text(), "\"a\"");
+        assert_eq!(end.text(), "\"z\"");
+        assert!(inclusive);
     }
 
     #[test]
@@ -2006,6 +2327,34 @@ mod tests {
     }
 
     #[test]
+    fn pattern_fields_preserve_colons_missing_patterns_and_rest() {
+        let sf = source_file(
+            "fn f(value: Rec) { match value { Rec { short, explicit /*c*/ : nested, .. } => 0 } }",
+        );
+        let pattern = match_arms(&sf)[0].patterns().next().unwrap();
+        let fields: Vec<_> = pattern.pattern_fields().collect();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name().text(), "short");
+        assert!(fields[0].is_shorthand());
+        assert!(fields[0].colon_token().is_none());
+        assert!(fields[0].pattern().is_none());
+        assert_eq!(fields[1].name().text(), "explicit");
+        assert!(!fields[1].is_shorthand());
+        assert_eq!(fields[1].colon_token().unwrap().text(), ":");
+        assert_eq!(fields[1].pattern().unwrap().kind(), PatternKind::Binding);
+        assert_eq!(pattern.rest_token().unwrap().text(), "..");
+        assert_eq!(pattern.struct_fields().count(), 2);
+
+        let missing = source_file(
+            "fn f(value: Rec) { match value { Rec { missing: } => 0 } }",
+        );
+        let pattern = match_arms(&missing)[0].patterns().next().unwrap();
+        let field = pattern.pattern_fields().next().unwrap();
+        assert!(!field.is_shorthand());
+        assert_eq!(field.pattern().unwrap().kind(), PatternKind::Missing);
+    }
+
+    #[test]
     fn pattern_size_guard() {
         use std::mem::size_of;
         // Pattern is a thin wrapper around a SyntaxNode.
@@ -2031,6 +2380,28 @@ mod tests {
         };
         let segs: Vec<_> = sl.path_segments().map(|t| t.text().to_string()).collect();
         assert_eq!(segs, vec!["geo", "Point"]);
+    }
+
+    #[test]
+    fn struct_lit_path_segments_include_self() {
+        let sf = source_file("fn f() { g(self::Point { x: 1 }); }");
+        let Item::Fn(function) = sf.items().next().unwrap() else {
+            panic!()
+        };
+        let Stmt::Expr(statement) = function.body().unwrap().stmts().next().unwrap() else {
+            panic!()
+        };
+        let Expr::Call(call) = statement.expr().unwrap() else {
+            panic!()
+        };
+        let Expr::StructLit(literal) = call.arg_list().unwrap().args().next().unwrap() else {
+            panic!()
+        };
+        let segments = literal
+            .path_segments()
+            .map(|token| token.text().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(segments, ["self", "Point"]);
     }
 
     // --- Helpers ------------------------------------------------------------
