@@ -1112,6 +1112,10 @@ fn completion_to_lsp(
         None => (None, None),
     };
 
+    // If there's a replacement range (partial prefix), wrap the effective
+    // insert text in a textEdit so VS Code replaces the prefix. Otherwise
+    // use bare insertText.
+    let new_text = insert_text.clone().unwrap_or_else(|| item.label().to_string());
     let text_edit = item.replacement_range().map(|r| {
         let start = r.start() as usize;
         let end = r.end() as usize;
@@ -1122,9 +1126,16 @@ fn completion_to_lsp(
                 start: Position::new(sl as u32, sc as u32),
                 end: Position::new(el as u32, ec as u32),
             },
-            new_text: item.label().to_string(),
+            new_text,
         })
     });
+
+    let (insert_text, insert_text_format) = if text_edit.is_some() {
+        // Don't set insertText when using textEdit — VS Code ignores it anyway.
+        (None, None)
+    } else {
+        (insert_text, insert_text_format)
+    };
 
     CompletionItem {
         label: item.label().to_string(),
