@@ -234,7 +234,7 @@ fn member_completions(
 }
 
 /// Try to infer the type of the expression immediately left of `.`.
-fn infer_dot_receiver(
+pub(crate) fn infer_dot_receiver(
     db: &Rc<BaseDb>,
     def_map: &DefMap,
     position: FilePosition,
@@ -650,7 +650,7 @@ fn definition_signature(
 // Syntax navigation
 // ---------------------------------------------------------------------------
 
-fn token_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Option<SyntaxToken> {
+pub(crate) fn token_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Option<SyntaxToken> {
     let end: u32 = node.text_range().end().into();
     match node.token_at_offset(offset.min(end).into()) {
         rowan::TokenAtOffset::Single(token) => Some(token),
@@ -663,7 +663,7 @@ fn is_path_identifier(token: &SyntaxToken) -> bool {
     matches!(token.kind(), SyntaxKind::Ident | SyntaxKind::KwSelf)
 }
 
-fn previous_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+pub(crate) fn previous_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
     let mut token = token.prev_token();
     while token.as_ref().is_some_and(|token| token.kind().is_trivia()) {
         token = token.and_then(|token| token.prev_token());

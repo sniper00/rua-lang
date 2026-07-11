@@ -182,6 +182,7 @@ fn demo_extern() {
 // --- entry point ---
 fn main() {
     let origin = Point { x: 0, y: 0, label: "origin".to_string() };
+
     let dist = distance_sq(&origin);
 
     let mut p = Point { x: 3, y: 4, label: "p".to_string() };

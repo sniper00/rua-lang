@@ -213,6 +213,72 @@ impl Analysis {
             }
         }
 
+        // 3. Try member access hover (field/method after `.`).
+        if let Some(hover) = self.member_hover(position) {
+            return Some(hover);
+        }
+
+        None
+    }
+
+    /// Hover for `receiver.field` or `receiver.method()`.
+    fn member_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
+        let Some(text) = self.db.file_text(position.position.file_id) else {
+            return None;
+        };
+        let parse = self.db.parse(position.position.file_id);
+        let root = parse.syntax_node();
+        let offset = position.position.offset.min(text.len() as u32);
+        let token = completion::token_at_offset(root, offset)?;
+
+        // Only if preceded by `.`
+        if !completion::previous_significant(&token).is_some_and(|t| t.kind() == rua_syntax::SyntaxKind::Dot) {
+            return None;
+        }
+
+        // Find the field name token (the current token or the one after `.`)
+        let field_name = if token.kind() == rua_syntax::SyntaxKind::Ident {
+            token.text().to_string()
+        } else {
+            return None;
+        };
+
+        // Try to infer the receiver type
+        let def_map = self.db.def_map(position.position.file_id);
+        let member_index = self.db.member_index(position.position.file_id);
+        let receiver_ty = completion::infer_dot_receiver(&self.db, &def_map, position.position, offset)?;
+
+        // Try field resolution
+        if let Some(resolution) = member_index.resolve_field(&receiver_ty, &field_name) {
+            let tr = token.text_range();
+            let range = FileRange::new(
+                position.position.file_id,
+                TextRange::new(tr.start().into(), tr.end().into()),
+            );
+            return Some(HoverResult::new(
+                range,
+                format!("{}: {}", field_name, resolution.ty()),
+            ));
+        }
+
+        // Try method resolution
+        if let Some(resolution) = member_index.resolve_method(&receiver_ty, &field_name) {
+            let tr = token.text_range();
+            let range = FileRange::new(
+                position.position.file_id,
+                TextRange::new(tr.start().into(), tr.end().into()),
+            );
+            let params: Vec<String> = resolution
+                .generic_params()
+                .iter()
+                .map(|_| "?".to_string())
+                .collect();
+            return Some(HoverResult::new(
+                range,
+                format!("fn {}({}) -> {}", field_name, params.join(", "), resolution.ty()),
+            ));
+        }
+
         None
     }
 
