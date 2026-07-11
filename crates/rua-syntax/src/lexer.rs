@@ -35,19 +35,25 @@ fn native_lex(text: &str) -> Vec<LexToken> {
         let start = cursor;
         let byte = bytes[cursor];
         let (kind, len) = match byte {
-            // Whitespace
+            // Whitespace — aggregate all consecutive whitespace (spaces, tabs,
+            // newlines, CRLF) into a single token. This matches the ruac transition
+            // lexer behaviour that the format layer depends on for blank-line
+            // detection (two \n in one Whitespace token = blank line).
             b' ' | b'\t' | b'\n' | b'\r' => {
-                if byte == b'\n' || (byte == b'\r' && bytes.get(cursor + 1) != Some(&b'\n')) {
-                    (SyntaxKind::Whitespace, 1)
-                } else if byte == b'\r' {
-                    (SyntaxKind::Whitespace, 2) // \r\n
-                } else {
-                    let mut end = cursor + 1;
-                    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
-                        end += 1;
+                let mut end = cursor;
+                while end < bytes.len() {
+                    match bytes[end] {
+                        b' ' | b'\t' | b'\n' => end += 1,
+                        b'\r' => {
+                            end += 1;
+                            if bytes.get(end) == Some(&b'\n') {
+                                end += 1; // \r\n as one unit
+                            }
+                        }
+                        _ => break,
                     }
-                    (SyntaxKind::Whitespace, end - cursor)
                 }
+                (SyntaxKind::Whitespace, end - cursor)
             }
 
             // Line comment
