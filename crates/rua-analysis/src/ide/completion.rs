@@ -39,11 +39,12 @@ pub(crate) fn completions(
 
     let token = token_at_offset(root, offset);
 
-    // Member access: cursor is after `.`
-    if let Some(ref tok) = token
-        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::Dot) {
-            return member_completions(db, position, tok, offset);
-        }
+    // Member access: cursor right after `.` (token IS the dot) or after `.x`
+    let after_dot = token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
+        || token.as_ref().and_then(|t| previous_significant(t)).is_some_and(|t| t.kind() == SyntaxKind::Dot);
+    if after_dot {
+        return member_completions(db, position, token.as_ref(), offset);
+    }
 
     // Path context: cursor is after `::`
     if let Some(ref tok) = token
@@ -222,7 +223,7 @@ fn scope_completions(
 fn member_completions(
     db: &Rc<BaseDb>,
     position: FilePosition,
-    _token: &SyntaxToken,
+    _token: Option<&SyntaxToken>,
     offset: u32,
 ) -> Vec<CompletionItem> {
     let def_map = db.def_map(position.file_id);
