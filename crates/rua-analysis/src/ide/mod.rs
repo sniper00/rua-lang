@@ -13,8 +13,9 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     hir::{
-        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefMap, InferenceResult, ItemTree,
-        MemberIndex, module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
+        Body, BodyResolution, BodyScopes, BodySourceMap, CallableTy, DefId, DefKind, DefMap,
+        Definition, InferenceResult, ItemTree, MemberIndex,
+        module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
@@ -162,6 +163,167 @@ impl Analysis {
         closure_iterator::semantic_tokens(&self.db, file_id)
     }
 
+    // ------------------------------------------------------------------
+    // Navigation and hover
+    // ------------------------------------------------------------------
+
+    /// Type and signature information at a cursor position.
+    pub fn hover(&self, position: ProjectPosition) -> Option<HoverResult> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+
+        // 1. Try item/definition hover.
+        if let Some(definition) = semantics.find_def_at(position.position) {
+            let root_file = position.position.file_id;
+            let signature = item_hover_text(&definition, &self.db, root_file);
+            return Some(HoverResult::new(
+                FileRange::new(definition.file_id(), definition.name_range()),
+                signature,
+            ));
+        }
+
+        // 2. Try local binding hover.
+        let local = semantics.resolve_local_at(position.position);
+        if let crate::hir::LocalResolveResult::Resolved(target) = local {
+            let owner_def = target.owner().owner();
+            if let Some(inference) = self.db.infer(owner_def) {
+                let ty = inference
+                    .type_of_binding(target.binding())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                if let Some(body) = self.db.body(owner_def) {
+                    let name = body
+                        .binding(target.binding())
+                        .and_then(|b| b.name())
+                        .unwrap_or("?");
+                    if let Some(source_map) = self.db.body_source_map(owner_def) {
+                        if let Some(file_range) = source_map.binding_range(target.binding()) {
+                            return Some(HoverResult::new(
+                                file_range,
+                                format!("let {name}: {ty}"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Navigate to the definition of the symbol at a cursor position.
+    pub fn goto_definition(&self, position: ProjectPosition) -> Option<NavigationTarget> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+
+        // 1. Try item definition.
+        if let Some(definition) = semantics.find_def_at(position.position) {
+            return Some(NavigationTarget::new(
+                FileRange::new(definition.file_id(), definition.name_range()),
+                None,
+            ));
+        }
+
+        // 2. Try local definition.
+        if let Some(local_range) = semantics.local_definition_at(position.position) {
+            return Some(NavigationTarget::new(local_range, None));
+        }
+
+        None
+    }
+
+    /// Find all references to the symbol at a cursor position.
+    pub fn references(
+        &self,
+        position: ProjectPosition,
+        include_declaration: bool,
+    ) -> Vec<ReferenceResult> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+
+        // 1. Try local references.
+        let local_refs = semantics.local_references_at(position.position, include_declaration);
+        if !local_refs.is_empty() {
+            let mut results: Vec<ReferenceResult> = local_refs
+                .into_iter()
+                .map(|range| {
+                    let kind = if let Some(def_range) = semantics.local_definition_at(position.position)
+                        && range == def_range
+                    {
+                        ReferenceKind::Declaration
+                    } else {
+                        ReferenceKind::Read
+                    };
+                    ReferenceResult::new(range, kind)
+                })
+                .collect();
+            ReferenceResult::normalize(&mut results);
+            return results;
+        }
+
+        Vec::new()
+    }
+
+    /// Check whether the symbol at the cursor can be renamed.
+    pub fn prepare_rename(&self, position: ProjectPosition) -> Option<RenameTarget> {
+        if self.is_file_read_only(position.position.file_id) {
+            return None;
+        }
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+
+        // Local binding rename.
+        if let crate::hir::LocalResolveResult::Resolved(target) =
+            semantics.resolve_local_at(position.position)
+        {
+            let owner_def = target.owner().owner();
+            if let Some(body) = self.db.body(owner_def) {
+                if let Some(source_map) = self.db.body_source_map(owner_def) {
+                    if let Some(file_range) = source_map.binding_range(target.binding()) {
+                        let name = body
+                            .binding(target.binding())
+                            .and_then(|b| b.name())
+                            .unwrap_or("?");
+                        return Some(RenameTarget::new(file_range, name));
+                    }
+                }
+            }
+        }
+
+        // Item rename.
+        if let Some(definition) = semantics.find_def_at(position.position) {
+            return Some(RenameTarget::new(
+                FileRange::new(definition.file_id(), definition.name_range()),
+                definition.name(),
+            ));
+        }
+
+        None
+    }
+
+    /// Rename the symbol at the cursor.
+    pub fn rename(
+        &self,
+        position: ProjectPosition,
+        new_name: &str,
+    ) -> Result<SourceChange, RenameError> {
+        if !is_valid_identifier(new_name) {
+            return Err(RenameError::InvalidName {
+                name: new_name.to_string(),
+            });
+        }
+
+        let refs = self.references(position, true);
+        if refs.is_empty() {
+            return Err(RenameError::NoTarget);
+        }
+
+        SourceChange::from_edits(
+            refs.iter().map(|r| (r.range().file_id, TextEdit::new(r.range().range, new_name))),
+            |file_id| self.is_file_read_only(file_id),
+        )
+    }
+
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {
         self.db.file_kind(file_id)
     }
@@ -173,6 +335,52 @@ impl Analysis {
     pub fn is_file_read_only(&self, file_id: FileId) -> bool {
         self.db.is_file_read_only(file_id)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn item_hover_text(definition: &Definition, db: &BaseDb, root_file: FileId) -> String {
+    match definition.kind() {
+        DefKind::Function | DefKind::ExternFunction | DefKind::Method => {
+            if let Some(callable) = db.member_index(root_file)
+                .callable(definition.id())
+            {
+                format!("fn {}{}", definition.name(), callable_display(&callable))
+            } else {
+                format!("fn {}", definition.name())
+            }
+        }
+        DefKind::Struct => format!("struct {}", definition.name()),
+        DefKind::Enum => format!("enum {}", definition.name()),
+        DefKind::Trait => format!("trait {}", definition.name()),
+        DefKind::Module => format!("mod {}", definition.name()),
+        DefKind::Impl => format!("impl {}", definition.name()),
+        DefKind::Field | DefKind::Variant | DefKind::TypeAlias => definition.name().to_string(),
+    }
+}
+
+fn callable_display(callable: &CallableTy) -> String {
+    let params: Vec<String> = callable
+        .params()
+        .iter()
+        .map(|ty| ty.to_string())
+        .collect();
+    format!("({}) -> {}", params.join(", "), callable.return_ty())
+}
+
+fn is_valid_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 #[cfg(test)]
