@@ -521,6 +521,29 @@ impl DefMap {
         self.definition(def_id)
     }
 
+    pub fn resolve_name_unique(&self, module_id: ModuleId, name: &str) -> Option<&Definition> {
+        let definitions = self.module(module_id)?.definitions.get(name)?;
+        let [def_id] = definitions.as_slice() else {
+            return None;
+        };
+        self.definition(*def_id)
+    }
+
+    pub fn name_is_defined_lexically(&self, mut module_id: ModuleId, name: &str) -> bool {
+        loop {
+            let Some(module) = self.module(module_id) else {
+                return false;
+            };
+            if module.definitions.contains_key(name) {
+                return true;
+            }
+            let Some(parent) = module.parent() else {
+                return false;
+            };
+            module_id = parent;
+        }
+    }
+
     pub fn resolve_path(&self, start: ModuleId, segments: &[&str]) -> Option<&Definition> {
         let (&last, parents) = segments.split_last()?;
         let mut module_id = start;
@@ -528,6 +551,17 @@ impl DefMap {
             module_id = self.resolve_name(module_id, segment)?.target_module()?;
         }
         self.resolve_name(module_id, last)
+    }
+
+    pub fn resolve_path_unique(&self, start: ModuleId, segments: &[&str]) -> Option<&Definition> {
+        let (&last, parents) = segments.split_last()?;
+        let mut module_id = start;
+        for segment in parents {
+            module_id = self
+                .resolve_name_unique(module_id, segment)?
+                .target_module()?;
+        }
+        self.resolve_name_unique(module_id, last)
     }
 
     pub fn resolve_path_lexical(
@@ -544,6 +578,24 @@ impl DefMap {
         };
         for segment in remaining {
             definition = self.resolve_name(definition.target_module()?, segment)?;
+        }
+        Some(definition)
+    }
+
+    pub fn resolve_path_lexical_unique(
+        &self,
+        mut start: ModuleId,
+        segments: &[&str],
+    ) -> Option<&Definition> {
+        let (&first, remaining) = segments.split_first()?;
+        let mut definition = loop {
+            if self.module(start)?.definitions.contains_key(first) {
+                break self.resolve_name_unique(start, first)?;
+            }
+            start = self.module(start)?.parent()?;
+        };
+        for segment in remaining {
+            definition = self.resolve_name_unique(definition.target_module()?, segment)?;
         }
         Some(definition)
     }

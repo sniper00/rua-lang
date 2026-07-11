@@ -11,8 +11,9 @@ use rua_syntax::{
 use crate::{
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, IdentityContext,
-        IdentityInterner, ItemSourceKind, ItemTree, ModuleId,
+        IdentityInterner, InferenceResult, ItemSourceKind, ItemTree, ModuleId,
         body::{lower_fn_body, lower_trait_method_body},
+        infer::infer_body,
     },
     vfs::{
         Change, FileId, FileKind, ProjectData, ProjectId, SourceRoot, SourceRootChange,
@@ -30,6 +31,7 @@ pub struct BaseDb {
     def_map_cache: RefCell<HashMap<DefMapKey, Arc<DefMap>>>,
     body_cache: RefCell<HashMap<DefId, BodyCacheEntry>>,
     local_resolution_cache: RefCell<HashMap<DefId, LocalResolutionCacheEntry>>,
+    inference_cache: RefCell<HashMap<DefId, InferenceCacheEntry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +46,14 @@ struct LocalResolutionCacheEntry {
     body: Arc<Body>,
     scopes: Arc<BodyScopes>,
     resolution: Arc<BodyResolution>,
+}
+
+#[derive(Clone, Debug)]
+struct InferenceCacheEntry {
+    body: Arc<Body>,
+    resolution: Arc<BodyResolution>,
+    def_map: Arc<DefMap>,
+    result: Arc<InferenceResult>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -262,6 +272,40 @@ impl BaseDb {
     pub fn body_resolution(&self, def_id: DefId) -> Option<Arc<BodyResolution>> {
         self.local_resolution(def_id)
             .map(|(_, resolution)| resolution)
+    }
+
+    pub fn infer(&self, def_id: DefId) -> Option<Arc<InferenceResult>> {
+        let Some(def_map) = self.current_definition_map(def_id) else {
+            self.inference_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        let Some(body) = self.body(def_id) else {
+            self.inference_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        let Some(resolution) = self.body_resolution(def_id) else {
+            self.inference_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        if let Some(cached) = self.inference_cache.borrow().get(&def_id)
+            && Arc::ptr_eq(&cached.body, &body)
+            && Arc::ptr_eq(&cached.resolution, &resolution)
+            && Arc::ptr_eq(&cached.def_map, &def_map)
+        {
+            return Some(cached.result.clone());
+        }
+
+        let result = Arc::new(infer_body(&body, &resolution, &def_map));
+        self.inference_cache.borrow_mut().insert(
+            def_id,
+            InferenceCacheEntry {
+                body,
+                resolution,
+                def_map,
+                result: result.clone(),
+            },
+        );
+        Some(result)
     }
 
     fn local_resolution(
