@@ -9,11 +9,31 @@ use rua_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::{
     BaseDb,
-    hir::{DefMap, Definition, ModuleId},
+    base::FileRange,
+    hir::{
+        Body, BodyResolution, BodySourceId, BodySourceMap, DefKind, DefMap, Definition,
+        LocalBindingId, LocalResolveResult, LocalUseKind, ModuleId, NameRefKind,
+    },
     vfs::FileId,
 };
 
 pub use crate::base::FilePosition;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LocalReference {
+    range: FileRange,
+    kind: LocalUseKind,
+}
+
+impl LocalReference {
+    pub const fn range(self) -> FileRange {
+        self.range
+    }
+
+    pub const fn kind(self) -> LocalUseKind {
+        self.kind
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Semantics {
@@ -42,6 +62,11 @@ impl Semantics {
             return Some(definition.clone());
         }
 
+        let local = self.local_at(position);
+        if !matches!(local.result, LocalResolveResult::NonLocal) || local.blocks_item_fallback {
+            return None;
+        }
+
         let (segments, selected) = path_around(&token);
         let current_module = module_at_position(&self.def_map, position.file_id, position.offset)?;
         resolve_path_segment(&self.def_map, current_module, &segments, selected).cloned()
@@ -50,16 +75,192 @@ impl Semantics {
     pub fn def_map(&self) -> &DefMap {
         &self.def_map
     }
+
+    pub fn resolve_local_at(&self, position: FilePosition) -> LocalResolveResult {
+        self.local_at(position).result
+    }
+
+    pub fn local_definition(&self, target: LocalBindingId) -> Option<FileRange> {
+        self.current_local_data(target)?
+            .1
+            .binding_range(target.binding())
+    }
+
+    pub fn local_definition_at(&self, position: FilePosition) -> Option<FileRange> {
+        let LocalResolveResult::Resolved(target) = self.resolve_local_at(position) else {
+            return None;
+        };
+        self.local_definition(target)
+    }
+
+    pub fn local_uses(&self, target: LocalBindingId) -> Vec<LocalReference> {
+        let (_, source_map, resolution) = match self.current_local_data(target) {
+            Some(data) => data,
+            None => return Vec::new(),
+        };
+        let mut uses = resolution
+            .uses_for(target)
+            .filter_map(|local_use| {
+                Some(LocalReference {
+                    range: source_map.name_ref_range(local_use.name_ref())?,
+                    kind: local_use.kind(),
+                })
+            })
+            .collect::<Vec<_>>();
+        uses.sort_by_key(|reference| (reference.range, reference.kind));
+        uses.dedup();
+        uses
+    }
+
+    pub fn local_references(
+        &self,
+        target: LocalBindingId,
+        include_declaration: bool,
+    ) -> Vec<FileRange> {
+        let mut references = self
+            .local_uses(target)
+            .into_iter()
+            .map(LocalReference::range)
+            .collect::<Vec<_>>();
+        if include_declaration
+            && let Some(declaration) = self.local_definition(target)
+        {
+            references.push(declaration);
+        }
+        references.sort();
+        references.dedup();
+        references
+    }
+
+    pub fn local_references_at(
+        &self,
+        position: FilePosition,
+        include_declaration: bool,
+    ) -> Vec<FileRange> {
+        let LocalResolveResult::Resolved(target) = self.resolve_local_at(position) else {
+            return Vec::new();
+        };
+        self.local_references(target, include_declaration)
+    }
+
+    fn local_at(&self, position: FilePosition) -> LocalAtResult {
+        let Some((body, source_map, resolution)) = self.body_data_at(position) else {
+            return LocalAtResult::non_local();
+        };
+        let ids = source_map.ids_at(position.file_id, position.offset);
+        for id in &ids {
+            let BodySourceId::Binding(binding) = id else {
+                continue;
+            };
+            if body
+                .binding(*binding)
+                .is_some_and(|binding| !binding.is_missing())
+            {
+                return LocalAtResult {
+                    result: LocalResolveResult::Resolved(LocalBindingId::new(
+                        body.id(),
+                        *binding,
+                    )),
+                    blocks_item_fallback: true,
+                };
+            }
+        }
+
+        let mut ambiguous = false;
+        let mut blocks_item_fallback = false;
+        for id in ids {
+            let BodySourceId::NameRef(name_ref) = id else {
+                continue;
+            };
+            match resolution.resolve(name_ref) {
+                Some(LocalResolveResult::Resolved(target)) => {
+                    return LocalAtResult {
+                        result: LocalResolveResult::Resolved(target),
+                        blocks_item_fallback: true,
+                    };
+                }
+                Some(LocalResolveResult::Ambiguous) => ambiguous = true,
+                Some(LocalResolveResult::NonLocal) | None => {}
+            }
+            blocks_item_fallback |= body.name_ref(name_ref).is_some_and(|name_ref| {
+                matches!(
+                    name_ref.kind(),
+                    NameRefKind::Method
+                        | NameRefKind::Field
+                        | NameRefKind::StructField
+                        | NameRefKind::PatternField
+                        | NameRefKind::Macro
+                )
+            });
+        }
+        LocalAtResult {
+            result: if ambiguous {
+                LocalResolveResult::Ambiguous
+            } else {
+                LocalResolveResult::NonLocal
+            },
+            blocks_item_fallback: blocks_item_fallback || ambiguous,
+        }
+    }
+
+    fn body_data_at(
+        &self,
+        position: FilePosition,
+    ) -> Option<(Arc<Body>, Arc<BodySourceMap>, Arc<BodyResolution>)> {
+        let owner = self
+            .def_map
+            .definitions()
+            .filter(|definition| {
+                definition.file_id() == position.file_id
+                    && definition.range().contains(position.offset)
+                    && matches!(definition.kind(), DefKind::Function | DefKind::Method)
+            })
+            .min_by_key(|definition| definition.range().len())?
+            .id();
+        Some((
+            self.db.body(owner)?,
+            self.db.body_source_map(owner)?,
+            self.db.body_resolution(owner)?,
+        ))
+    }
+
+    fn current_local_data(
+        &self,
+        target: LocalBindingId,
+    ) -> Option<(Arc<Body>, Arc<BodySourceMap>, Arc<BodyResolution>)> {
+        self.def_map.definition(target.owner().owner())?;
+        let body = self.db.body(target.owner().owner())?;
+        (body.id() == target.owner() && body.binding(target.binding()).is_some()).then_some((
+            body,
+            self.db.body_source_map(target.owner().owner())?,
+            self.db.body_resolution(target.owner().owner())?,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LocalAtResult {
+    result: LocalResolveResult,
+    blocks_item_fallback: bool,
+}
+
+impl LocalAtResult {
+    const fn non_local() -> Self {
+        Self {
+            result: LocalResolveResult::NonLocal,
+            blocks_item_fallback: false,
+        }
+    }
 }
 
 fn identifier_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Option<SyntaxToken> {
     let end: u32 = node.text_range().end().into();
     match node.token_at_offset(offset.min(end).into()) {
-        rowan::TokenAtOffset::Single(token) if token.kind() == SyntaxKind::Ident => Some(token),
+        rowan::TokenAtOffset::Single(token) if is_path_identifier(&token) => Some(token),
         rowan::TokenAtOffset::Between(left, right) => {
-            if right.kind() == SyntaxKind::Ident {
+            if is_path_identifier(&right) {
                 Some(right)
-            } else if left.kind() == SyntaxKind::Ident {
+            } else if is_path_identifier(&left) {
                 Some(left)
             } else {
                 None
@@ -67,6 +268,10 @@ fn identifier_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Option<Sy
         }
         _ => None,
     }
+}
+
+fn is_path_identifier(token: &SyntaxToken) -> bool {
+    matches!(token.kind(), SyntaxKind::Ident | SyntaxKind::KwSelf)
 }
 
 fn path_around(selected: &SyntaxToken) -> (Vec<String>, usize) {
@@ -79,7 +284,7 @@ fn path_around(selected: &SyntaxToken) -> (Vec<String>, usize) {
         let Some(segment) = previous_significant(&separator) else {
             break;
         };
-        if segment.kind() != SyntaxKind::Ident {
+        if !is_path_identifier(&segment) {
             break;
         }
         first = segment;
@@ -95,7 +300,7 @@ fn path_around(selected: &SyntaxToken) -> (Vec<String>, usize) {
         let Some(segment) = next_significant(&separator) else {
             break;
         };
-        if segment.kind() != SyntaxKind::Ident {
+        if !is_path_identifier(&segment) {
             break;
         }
         segments.push(segment.text().to_string());

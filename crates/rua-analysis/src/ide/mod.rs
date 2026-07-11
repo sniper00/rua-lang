@@ -13,7 +13,7 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     hir::{
-        Body, BodySourceMap, DefId, DefMap, ItemTree,
+        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefMap, ItemTree,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
@@ -113,6 +113,14 @@ impl Analysis {
 
     pub fn body_source_map(&self, def_id: DefId) -> Option<Arc<BodySourceMap>> {
         self.db.body_source_map(def_id)
+    }
+
+    pub fn body_scopes(&self, def_id: DefId) -> Option<Arc<BodyScopes>> {
+        self.db.body_scopes(def_id)
+    }
+
+    pub fn body_resolution(&self, def_id: DefId) -> Option<Arc<BodyResolution>> {
+        self.db.body_resolution(def_id)
     }
 
     pub fn semantics(&self, root_file: FileId) -> Semantics {

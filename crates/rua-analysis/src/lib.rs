@@ -21,12 +21,14 @@ pub use diagnostic::{
 };
 pub use hir::{
     AggregateSignature, BinaryOp, Binding, BindingId, BindingKind, Block, Body, BodyId,
-    BodySourceId, BodySourceMap, CallableSignature, Condition, DefId, DefKind, DefMap, Definition,
-    DefinitionSource, DefinitionSourceKind, Expr, ExprId, GenericParamData, ImplSignature, Import,
-    ItemKind, ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, Literal, LiteralKind,
-    MatchArm, MemberId, ModuleData, ModuleId, ModuleKind, NameRef, NameRefId, NameRefKind,
-    ParameterData, Pat, PatId, PatternField, ReceiverKind, SignatureFingerprint, Statement,
-    StructField, TypeRef, UnaryOp, VariantKind, VariantSignature, Visibility, WherePredicateData,
+    BodyResolution, BodyScopes, BodySourceId, BodySourceMap, CallableSignature, Condition, DefId,
+    DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, Expr, ExprId,
+    GenericParamData, ImplSignature, Import, ItemKind, ItemSignature, ItemSourceKind, ItemTree,
+    ItemTreeItem, Literal, LiteralKind, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
+    LocalUseKind, MatchArm, MemberId, ModuleData, ModuleId, ModuleKind, NameRef, NameRefId,
+    NameRefKind, ParameterData, Pat, PatId, PatternField, ReceiverKind, ScopeData, ScopeId,
+    ScopeKind, SignatureFingerprint, Statement, StructField, TypeRef, UnaryOp, VariantKind,
+    VariantSignature, Visibility, WherePredicateData,
 };
 pub use ide::{
     Analysis, AnalysisHost, ClosureParameterInfo, CompletionInsert, CompletionItem, CompletionKind,
@@ -35,7 +37,7 @@ pub use ide::{
     ReferenceResult, RenameError, RenameTarget, SemanticToken, SemanticTokenKind,
     SemanticTokenModifiers, SourceChange, TextEdit, TextRange, WorkspaceSymbol,
 };
-pub use semantic::Semantics;
+pub use semantic::{LocalReference, Semantics};
 pub use vfs::{
     Change, FileId, FileKind, ProjectData, ProjectRoot, SourceRoot, SourceRootId, SourceRootKind,
     VfsPath,

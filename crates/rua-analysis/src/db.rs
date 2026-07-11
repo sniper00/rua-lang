@@ -10,8 +10,8 @@ use rua_syntax::{
 
 use crate::{
     hir::{
-        Body, BodySourceMap, DefId, DefKind, DefMap, IdentityContext, IdentityInterner,
-        ItemSourceKind, ItemTree, ModuleId,
+        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, IdentityContext,
+        IdentityInterner, ItemSourceKind, ItemTree, ModuleId,
         body::{lower_fn_body, lower_trait_method_body},
     },
     vfs::{
@@ -29,6 +29,7 @@ pub struct BaseDb {
     item_tree_cache: RefCell<HashMap<FileId, Arc<ItemTree>>>,
     def_map_cache: RefCell<HashMap<DefMapKey, Arc<DefMap>>>,
     body_cache: RefCell<HashMap<DefId, BodyCacheEntry>>,
+    local_resolution_cache: RefCell<HashMap<DefId, LocalResolutionCacheEntry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +37,13 @@ struct BodyCacheEntry {
     file_revision: u64,
     body: Arc<Body>,
     source_map: Arc<BodySourceMap>,
+}
+
+#[derive(Clone, Debug)]
+struct LocalResolutionCacheEntry {
+    body: Arc<Body>,
+    scopes: Arc<BodyScopes>,
+    resolution: Arc<BodyResolution>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -245,6 +253,42 @@ impl BaseDb {
     pub fn body_source_map(&self, def_id: DefId) -> Option<Arc<BodySourceMap>> {
         self.body_with_source_map(def_id)
             .map(|(_, source_map)| source_map)
+    }
+
+    pub fn body_scopes(&self, def_id: DefId) -> Option<Arc<BodyScopes>> {
+        self.local_resolution(def_id).map(|(scopes, _)| scopes)
+    }
+
+    pub fn body_resolution(&self, def_id: DefId) -> Option<Arc<BodyResolution>> {
+        self.local_resolution(def_id)
+            .map(|(_, resolution)| resolution)
+    }
+
+    fn local_resolution(
+        &self,
+        def_id: DefId,
+    ) -> Option<(Arc<BodyScopes>, Arc<BodyResolution>)> {
+        let Some(body) = self.body(def_id) else {
+            self.local_resolution_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
+        if let Some(cached) = self.local_resolution_cache.borrow().get(&def_id)
+            && Arc::ptr_eq(&cached.body, &body)
+        {
+            return Some((cached.scopes.clone(), cached.resolution.clone()));
+        }
+
+        let scopes = Arc::new(BodyScopes::build(&body));
+        let resolution = Arc::new(BodyResolution::resolve_body(&body, &scopes));
+        self.local_resolution_cache.borrow_mut().insert(
+            def_id,
+            LocalResolutionCacheEntry {
+                body,
+                scopes: scopes.clone(),
+                resolution: resolution.clone(),
+            },
+        );
+        Some((scopes, resolution))
     }
 
     pub(crate) fn body_with_source_map(

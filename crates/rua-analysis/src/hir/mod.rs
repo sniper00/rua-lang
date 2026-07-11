@@ -7,6 +7,7 @@ pub mod body;
 mod def_map;
 mod item_tree;
 pub(crate) mod module_resolution;
+pub mod scope;
 
 pub use crate::base::TextRange;
 pub use body::{
@@ -25,3 +26,7 @@ pub use item_tree::{
     SignatureFingerprint, TypeRef, VariantKind, VariantSignature, Visibility, WherePredicateData,
 };
 pub use module_resolution::module_file_candidates;
+pub use scope::{
+    BodyResolution, BodyScopes, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
+    LocalUseKind, ScopeData, ScopeId, ScopeKind,
+};
