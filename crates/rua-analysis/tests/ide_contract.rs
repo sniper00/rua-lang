@@ -70,14 +70,14 @@ fn ide_contract_diagnostic_compatibility_and_normalization() {
         "type mismatch",
         DiagnosticOrigin::FastAnalysis,
     )
-    .with_code(DiagnosticCode::new("type-mismatch"))
+    .with_code(DiagnosticCode::TypeMismatch)
     .with_severity(DiagnosticSeverity::Warning)
     .with_related([related.clone(), related]);
 
     assert_eq!(diagnostic.file_id(), file_id);
     assert_eq!(diagnostic.range(), primary);
     assert_eq!(diagnostic.file_range(), FileRange::new(file_id, primary));
-    assert_eq!(diagnostic.code().unwrap().as_str(), "type-mismatch");
+    assert_eq!(diagnostic.code(), Some(DiagnosticCode::TypeMismatch));
     assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
     assert_eq!(diagnostic.related().len(), 1);
     assert_eq!(diagnostic.origin(), DiagnosticOrigin::FastAnalysis);
