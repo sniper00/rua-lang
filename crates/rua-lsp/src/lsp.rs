@@ -314,14 +314,23 @@ impl Server {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
+        let Some(file_id) = self.file_id_for_uri(uri) else {
+            let resp = Response::new_ok(id, CompletionResponse::Array(Vec::new()));
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+
+        let analysis = self.host.analysis();
+        let source = analysis.parse(file_id).syntax_node().text().to_string();
+        let line_index = LineIndex::new(&source);
+
         let items = self
             .project_position(uri, pos)
             .map(|pp| {
-                let analysis = self.host.analysis();
                 let native_items = analysis.completions(pp);
                 native_items
                     .into_iter()
-                    .map(|item| completion_to_lsp(&item))
+                    .map(|item| completion_to_lsp(&item, &line_index, &source))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1060,7 +1069,11 @@ fn to_lsp_hover(hover: &HoverResult) -> Hover {
     }
 }
 
-fn completion_to_lsp(item: &rua_analysis::CompletionItem) -> CompletionItem {
+fn completion_to_lsp(
+    item: &rua_analysis::CompletionItem,
+    line_index: &LineIndex,
+    source: &str,
+) -> CompletionItem {
     let kind = match item.kind() {
         CompletionKind::Keyword => Some(CompletionItemKind::KEYWORD),
         CompletionKind::Variable | CompletionKind::Parameter => {
@@ -1099,6 +1112,20 @@ fn completion_to_lsp(item: &rua_analysis::CompletionItem) -> CompletionItem {
         None => (None, None),
     };
 
+    let text_edit = item.replacement_range().map(|r| {
+        let start = r.start() as usize;
+        let end = r.end() as usize;
+        let (sl, sc) = line_index.line_col(start, source);
+        let (el, ec) = line_index.line_col(end, source);
+        lsp_types::CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: Position::new(sl as u32, sc as u32),
+                end: Position::new(el as u32, ec as u32),
+            },
+            new_text: item.label().to_string(),
+        })
+    });
+
     CompletionItem {
         label: item.label().to_string(),
         kind,
@@ -1112,6 +1139,7 @@ fn completion_to_lsp(item: &rua_analysis::CompletionItem) -> CompletionItem {
         insert_text,
         insert_text_format,
         filter_text: item.lookup().map(|l| l.to_string()),
+        text_edit,
         ..Default::default()
     }
 }

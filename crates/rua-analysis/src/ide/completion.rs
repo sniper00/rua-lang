@@ -33,6 +33,10 @@ pub(crate) fn completions(
     let parse = db.parse(position.file_id);
     let root = parse.syntax_node();
     let offset = position.offset.min(text.len() as u32);
+
+    // Find the partial identifier prefix at the cursor (e.g. `val` before `ues`).
+    let partial_range = partial_ident_range(text.as_ref(), offset);
+
     let token = token_at_offset(root, offset);
 
     // Member access: cursor is after `.`
@@ -44,11 +48,31 @@ pub(crate) fn completions(
     // Path context: cursor is after `::`
     if let Some(ref tok) = token
         && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon) {
-            return path_completions(db, position, tok);
+            return path_completions(db, position, tok, partial_range);
         }
 
     // Default: scope completion
-    scope_completions(db, position, offset)
+    scope_completions(db, position, offset, partial_range)
+}
+
+/// Walk backwards from `offset` to find the start of a partial identifier.
+/// Returns the byte range `[start, offset)` of the prefix, or a zero-width
+/// range at `offset` if there is no identifier character before the cursor.
+fn partial_ident_range(text: &str, offset: u32) -> TextRange {
+    let bytes = text.as_bytes();
+    let mut start = offset as usize;
+    if start > bytes.len() {
+        start = bytes.len();
+    }
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    TextRange::new(start as u32, offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +118,7 @@ fn scope_completions(
     db: &Rc<BaseDb>,
     position: FilePosition,
     offset: u32,
+    partial_range: TextRange,
 ) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
@@ -174,6 +199,15 @@ fn scope_completions(
                     })
                     .with_relevance(60),
             );
+        }
+    }
+
+    // Set replacement range: VS Code uses this to replace the typed prefix.
+    if !partial_range.is_empty() {
+        for item in &mut items {
+            if item.replacement_range().is_none() {
+                *item = item.clone().with_replacement_range(partial_range);
+            }
         }
     }
 
@@ -274,6 +308,7 @@ fn path_completions(
     db: &Rc<BaseDb>,
     position: FilePosition,
     token: &SyntaxToken,
+    partial_range: TextRange,
 ) -> Vec<CompletionItem> {
     let def_map = db.def_map(position.file_id);
     let segments = path_segments_before(token);
@@ -320,6 +355,14 @@ fn path_completions(
                         }
                     }
                 }
+        }
+    }
+
+    if !partial_range.is_empty() {
+        for item in &mut items {
+            if item.replacement_range().is_none() {
+                *item = item.clone().with_replacement_range(partial_range);
+            }
         }
     }
 
