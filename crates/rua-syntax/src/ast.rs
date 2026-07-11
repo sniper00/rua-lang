@@ -1090,7 +1090,7 @@ impl UnaryExpr {
         self.syntax
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| matches!(t.kind(), K::Minus | K::Not))
+            .find(|t| matches!(t.kind(), K::Minus | K::Not | K::Amp))
     }
     pub fn operand(&self) -> Option<Expr> {
         child::<Expr>(&self.syntax)

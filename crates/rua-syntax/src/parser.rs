@@ -861,7 +861,7 @@ impl<'a> Parser<'a> {
 
     fn unary(&mut self) {
         self.eat_trivia();
-        if self.at(K::Minus) || self.at(K::Not) {
+        if self.at(K::Minus) || self.at(K::Not) || self.at(K::Amp) {
             let cp = self.builder.checkpoint();
             self.bump();
             self.unary();
