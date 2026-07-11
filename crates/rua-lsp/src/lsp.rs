@@ -314,15 +314,13 @@ impl Server {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
-        let Some(file_id) = self.file_id_for_uri(uri) else {
+        if self.file_id_for_uri(uri).is_none() {
             let resp = Response::new_ok(id, CompletionResponse::Array(Vec::new()));
             let _ = self.connection.sender.send(Message::Response(resp));
             return;
         };
 
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
 
         let items = self
             .project_position(uri, pos)
@@ -330,7 +328,7 @@ impl Server {
                 let native_items = analysis.completions(pp);
                 native_items
                     .into_iter()
-                    .map(|item| completion_to_lsp(&item, &line_index, &source))
+                    .map(|item| completion_to_lsp(&item))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1069,11 +1067,7 @@ fn to_lsp_hover(hover: &HoverResult) -> Hover {
     }
 }
 
-fn completion_to_lsp(
-    item: &rua_analysis::CompletionItem,
-    line_index: &LineIndex,
-    source: &str,
-) -> CompletionItem {
+fn completion_to_lsp(item: &rua_analysis::CompletionItem) -> CompletionItem {
     let kind = match item.kind() {
         CompletionKind::Keyword => Some(CompletionItemKind::KEYWORD),
         CompletionKind::Variable | CompletionKind::Parameter => {
@@ -1112,31 +1106,6 @@ fn completion_to_lsp(
         None => (None, None),
     };
 
-    // If there's a replacement range (partial prefix), wrap the effective
-    // insert text in a textEdit so VS Code replaces the prefix. Otherwise
-    // use bare insertText.
-    let new_text = insert_text.clone().unwrap_or_else(|| item.label().to_string());
-    let text_edit = item.replacement_range().map(|r| {
-        let start = r.start() as usize;
-        let end = r.end() as usize;
-        let (sl, sc) = line_index.line_col(start, source);
-        let (el, ec) = line_index.line_col(end, source);
-        lsp_types::CompletionTextEdit::Edit(TextEdit {
-            range: Range {
-                start: Position::new(sl as u32, sc as u32),
-                end: Position::new(el as u32, ec as u32),
-            },
-            new_text,
-        })
-    });
-
-    let (insert_text, insert_text_format) = if text_edit.is_some() {
-        // Don't set insertText when using textEdit — VS Code ignores it anyway.
-        (None, None)
-    } else {
-        (insert_text, insert_text_format)
-    };
-
     CompletionItem {
         label: item.label().to_string(),
         kind,
@@ -1150,7 +1119,6 @@ fn completion_to_lsp(
         insert_text,
         insert_text_format,
         filter_text: item.lookup().map(|l| l.to_string()),
-        text_edit,
         ..Default::default()
     }
 }
