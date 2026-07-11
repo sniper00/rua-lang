@@ -663,6 +663,7 @@ impl<'a> Parser<'a> {
             let cp = self.builder.checkpoint();
             self.bump();
             let _ = self.accept(K::KwMut);
+            let _ = self.accept(K::KwDyn);
             self.ty();
             self.wrap(cp, K::RefType);
             return;

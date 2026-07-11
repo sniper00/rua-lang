@@ -31,6 +31,7 @@ pub enum SyntaxKind {
     KwReturn,
     KwBreak,
     KwContinue,
+    KwDyn,
     KwTrue,
     KwFalse,
     KwStruct,

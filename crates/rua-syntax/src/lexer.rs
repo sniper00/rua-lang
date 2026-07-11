@@ -223,6 +223,7 @@ fn keyword_or_ident(word: &str) -> SyntaxKind {
         "return" => SyntaxKind::KwReturn,
         "break" => SyntaxKind::KwBreak,
         "continue" => SyntaxKind::KwContinue,
+        "dyn" => SyntaxKind::KwDyn,
         "match" => SyntaxKind::KwMatch,
         "struct" => SyntaxKind::KwStruct,
         "enum" => SyntaxKind::KwEnum,

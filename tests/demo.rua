@@ -1,0 +1,203 @@
+//! Rua LSP 能力演示脚本 — 覆盖 hover / goto / references / rename /
+//! completion / diagnostics / semantic-tokens / document-symbols / formatting.
+//!
+//! 在 VS Code 中逐行体验：把光标放在标识符上等待 hover，F12 跳转定义，
+//! Shift+F12 查找引用，F2 重命名，Ctrl+Space 触发补全。
+// ---------------------------------------------------------------------------
+// 1. 结构体、字段、方法 — 体验 hover / goto / completion / references
+// ---------------------------------------------------------------------------
+/// A point in 2D space with an optional label.
+
+struct Point {
+    x: i64,
+    y: i64,
+    label: String,
+}
+
+/// Compute the squared distance from origin.
+fn distance_sq(p: &Point) -> i64 {
+    p.x * p.x + p.y * p.y
+}
+
+impl Point {
+    /// Move the point by (dx, dy).
+    fn translate(&mut self, dx: i64, dy: i64) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. 枚举 + match narrowing — 体验补全（Color:: 后触发路径补全）
+// ---------------------------------------------------------------------------
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(i64, i64, i64),
+}
+
+fn describe_color(c: Color) -> String {
+    match c {
+        Color::Red => "red",
+        Color::Green => "green",
+        Color::Blue => "blue",
+        Color::Rgb(r, g, b) => "custom",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Trait + impl — 体验 interface 类型补全
+// ---------------------------------------------------------------------------
+trait Greet {
+    fn hello(&self) -> String;
+
+    fn bye(&self) -> String {
+        "bye".to_string()
+    }
+}
+
+struct Person {
+    name: String,
+}
+
+impl Greet for Person {
+    fn hello(&self) -> String {
+        format!("Hello, {}!", self.name)
+    }
+}
+
+fn greet_someone(g: &dyn Greet) -> String {
+    g.hello()
+}
+
+// ---------------------------------------------------------------------------
+// 4. 闭包 + 迭代器 — 体验 closure parameter 类型推断 + iterator 补全
+// ---------------------------------------------------------------------------
+fn demo_iterators() -> i64 {
+    let values = vec![1, 2, 3, 4, 5];
+
+    let doubled: Vec<i64> = values.iter().map(| x | x * 2).filter(| x | x> 5).collect();
+
+    let total = values.iter().fold(0, | acc, x | acc + x);
+
+    let found: Option<i64> = values.iter().find(| x | x> 3).map(| v | v);
+
+    let has_big = values.iter().any(| x | x> 10);
+    let all_small = values.iter().all(| x | x<100);
+
+    total
+}
+
+// ---------------------------------------------------------------------------
+// 5. 模式匹配 — 体验 narrowing + if-let / while-let
+// ---------------------------------------------------------------------------
+fn demo_patterns(maybe_point: Option<Point>) -> i64 {
+    let mut result = 0;
+
+    // if-let narrowing — 在 body 内 `p` 推断为 Point
+    if let Some(p) = maybe_point {
+        result = p.x + p.y;
+    }
+
+    // match with pattern narrowing
+    match maybe_point {
+        Some(p) => p.x,
+        None => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. 局部变量 + 赋值 — 体验局部补全 / hover / references / rename
+// ---------------------------------------------------------------------------
+fn demo_locals() -> i64 {
+    let mut counter = 0;
+    let message = "hello";
+
+    counter = counter + 1;
+    counter = counter + 2;
+
+    let answer: i64 = 42;
+    answer + counter
+}
+
+// ---------------------------------------------------------------------------
+// 7. Result 类型 — 体验 builtin variant 补全 (Ok / Err)
+// ---------------------------------------------------------------------------
+fn demo_result(should_fail: bool) -> Result<i64, String> {
+    if should_fail {
+        Err("something went wrong".to_string())
+    } else {
+        Ok(42)
+    }
+}
+
+fn use_result() -> i64 {
+    match demo_result(false) {
+        Ok(value) => value,
+        Err(msg) => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8. 泛型函数 — 体验类型参数
+// ---------------------------------------------------------------------------
+fn identity<T>(value: T) -> T {
+    value
+}
+
+fn demo_generics() {
+    let a: i64 = identity(1);
+    let b: String = identity("hi".to_string());
+}
+
+// ---------------------------------------------------------------------------
+// 9. 模块 — 体验 document symbols 树形结构
+// ---------------------------------------------------------------------------
+mod utils {
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    pub fn multiply(a: i64, b: i64) -> i64 {
+        a * b
+    }
+}
+
+fn demo_module() -> i64 {
+    utils::add(3, 4)
+}
+
+// ---------------------------------------------------------------------------
+// 10. 外部函数声明 — 体验 hover 显示签名
+// ---------------------------------------------------------------------------
+extern "lua" {
+    pub fn log(msg: String);
+}
+
+fn demo_extern() {
+    log("LSP demo is running!".to_string());
+}
+
+// --- entry point ---
+fn main() {
+    let origin = Point { x: 0, y: 0, label: "origin".to_string() };
+    let dist = distance_sq(&origin);
+
+    let mut p = Point { x: 3, y: 4, label: "p".to_string() };
+    p.translate(1, 2);
+
+    let c = Color::Rgb(255, 128, 0);
+    describe_color(c);
+
+    let person = Person { name: "Alice".to_string() };
+    greet_someone(&person);
+
+    demo_iterators();
+    demo_patterns(Some(Point { x: 10, y: 20, label: "demo".to_string() }));
+    demo_locals();
+    use_result();
+    demo_generics();
+    demo_module();
+    demo_extern();
+}

@@ -773,6 +773,9 @@ impl RefType {
     pub fn is_mut(&self) -> bool {
         token(&self.syntax, K::KwMut).is_some()
     }
+    pub fn is_dyn(&self) -> bool {
+        token(&self.syntax, K::KwDyn).is_some()
+    }
     pub fn inner(&self) -> Option<Type> {
         child::<Type>(&self.syntax)
     }
