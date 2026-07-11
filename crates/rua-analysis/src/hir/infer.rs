@@ -903,7 +903,12 @@ impl<'a> InferenceContext<'a> {
             }
         }
         let inferred_return = explicit_return.join(&actual_return);
-        let callable = CallableTy::new(param_types, expected_return.unwrap_or(inferred_return));
+        // Prefer the inferred return type when the expected type is Unknown.
+        let proclaimed_return = match expected_return {
+            Some(ref ty) if !ty.is_unknown() => ty.clone(),
+            _ => inferred_return,
+        };
+        let callable = CallableTy::new(param_types, proclaimed_return);
         let ty = Ty::Closure(callable);
         self.set_expr(closure, ty.clone());
         ty
@@ -1051,10 +1056,26 @@ impl<'a> InferenceContext<'a> {
         else {
             return self.infer_unresolved_member_call(call, args);
         };
-        let Some(resolution) =
+        let resolution =
             self.member_index
-                .resolve_method_in(&receiver_ty, name, self.owner.id())
-        else {
+                .resolve_method_in(&receiver_ty, name, self.owner.id());
+        let Some(resolution) = resolution else {
+            // Fallback: Vec -> Iterator conversion methods.
+            if let Ty::Vec(item) = &receiver_ty {
+                if let Some(result) =
+                    self.infer_vec_to_iterator(call, item, name, args)
+                {
+                    return result;
+                }
+            }
+            // Fallback: iterator adapter methods not yet in the member index.
+            if let Ty::Iterator(item) = &receiver_ty {
+                if let Some(result) =
+                    self.infer_iterator_adapter(call, item, name, args, expected)
+                {
+                    return result;
+                }
+            }
             return self.infer_unresolved_member_call(call, args);
         };
         let Ty::Function(callable) = resolution.ty() else {
@@ -1092,6 +1113,165 @@ impl<'a> InferenceContext<'a> {
             substitution: Substitution::new(),
         });
         if diverges { Ty::Never } else { Ty::Unknown }
+    }
+
+    /// Handle `.iter()` and `.into_iter()` on `Vec<T>` returning `Iterator<T>`.
+    fn infer_vec_to_iterator(
+        &mut self,
+        call: ExprId,
+        item: &Ty,
+        method_name: &str,
+        args: &[ExprId],
+    ) -> Option<Ty> {
+        match method_name {
+            "iter" | "into_iter" if args.is_empty() => {
+                let result = Ty::Iterator(Box::new(item.clone()));
+                self.calls[call.index() as usize] = Some(CallInfo {
+                    target: CallTarget::Builtin,
+                    parameters: Vec::new(),
+                    return_type: result.clone(),
+                    substitution: Substitution::new(),
+                });
+                Some(result)
+            }
+            _ => None,
+        }
+    }
+
+    /// Infer iterator adapter method calls like `.map()`, `.filter()`, `.collect()`.
+    /// These are not yet in the MemberIndex; we handle them inline until 4B.6's
+    /// builtin metadata is complete enough.
+    fn infer_iterator_adapter(
+        &mut self,
+        call: ExprId,
+        item: &Ty,
+        method_name: &str,
+        args: &[ExprId],
+        _expected: Option<&Ty>,
+    ) -> Option<Ty> {
+        let result = match method_name {
+            // Consumers — return a non-iterator value.
+            "count" => {
+                if let [arg] = args {
+                    self.infer_expr(*arg, None);
+                }
+                Ty::I64
+            }
+            "any" | "all" => {
+                if let [predicate] = args {
+                    let pred_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![item.clone()],
+                        Ty::BOOL,
+                    ));
+                    self.infer_expr(*predicate, Some(&pred_closure_ty));
+                }
+                Ty::BOOL
+            }
+            "find" => {
+                if let [predicate] = args {
+                    let pred_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![item.clone()],
+                        Ty::BOOL,
+                    ));
+                    self.infer_expr(*predicate, Some(&pred_closure_ty));
+                }
+                Ty::Option(Box::new(item.clone()))
+            }
+            "fold" => {
+                match args {
+                    [init, closure] => {
+                        let init_ty = self.infer_expr(*init, None);
+                        let fold_closure_ty = Ty::Closure(CallableTy::new(
+                            vec![init_ty.clone(), item.clone()],
+                            init_ty.clone(),
+                        ));
+                        self.infer_expr(*closure, Some(&fold_closure_ty));
+                        init_ty
+                    }
+                    _ => {
+                        for arg in args {
+                            self.infer_expr(*arg, None);
+                        }
+                        return Some(Ty::Unknown);
+                    }
+                }
+            }
+            // Collectors / terminal adapters.
+            "collect" => {
+                for arg in args {
+                    self.infer_expr(*arg, None);
+                }
+                Ty::Vec(Box::new(item.clone()))
+            }
+            // Adapters that preserve the item type.
+            "filter" | "take" | "skip" => {
+                if let [arg] = args {
+                    let pred_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![item.clone()],
+                        if method_name == "filter" { Ty::BOOL } else { Ty::Unknown },
+                    ));
+                    self.infer_expr(*arg, Some(&pred_closure_ty));
+                }
+                Ty::Iterator(Box::new(item.clone()))
+            }
+            // map: iterator item becomes the closure's return type.
+            "map" => {
+                if let [closure] = args {
+                    // Infer the closure with expected type: |T| -> ?
+                    let map_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![item.clone()],
+                        Ty::Unknown,
+                    ));
+                    let closure_ty = self.infer_expr(*closure, Some(&map_closure_ty));
+                    // Extract the closure's return type as the new item type.
+                    let new_item = match &closure_ty {
+                        Ty::Closure(callable) | Ty::Function(callable) => {
+                            callable.return_ty().clone()
+                        }
+                        _ => Ty::Unknown,
+                    };
+                    Ty::Iterator(Box::new(new_item))
+                } else {
+                    Ty::Iterator(Box::new(item.clone()))
+                }
+            }
+            // filter_map: extract Option<U>'s U as new item type.
+            "filter_map" => {
+                if let [closure] = args {
+                    let map_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![item.clone()],
+                        Ty::Unknown,
+                    ));
+                    let closure_ty = self.infer_expr(*closure, Some(&map_closure_ty));
+                    let new_item = match &closure_ty {
+                        Ty::Closure(callable) | Ty::Function(callable) => {
+                            match callable.return_ty() {
+                                Ty::Option(inner) => (**inner).clone(),
+                                _ => Ty::Unknown,
+                            }
+                        }
+                        _ => Ty::Unknown,
+                    };
+                    Ty::Iterator(Box::new(new_item))
+                } else {
+                    Ty::Iterator(Box::new(item.clone()))
+                }
+            }
+            // enumerate: pair items with index.
+            "enumerate" => {
+                Ty::Iterator(Box::new(Ty::Tuple(vec![Ty::I64, item.clone()])))
+            }
+            _ => return None,
+        };
+
+        let diverges = result.is_never();
+        self.calls[call.index() as usize] = Some(CallInfo {
+            target: CallTarget::Builtin,
+            parameters: Vec::new(),
+            return_type: result.clone(),
+            substitution: Substitution::new(),
+        });
+        Some(if diverges { Ty::Never } else { result })
     }
 
     fn infer_call(

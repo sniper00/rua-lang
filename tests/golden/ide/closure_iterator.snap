@@ -1,5 +1,5 @@
-parameter: value 44..49 type=?
-parameter: item 79..83 type=?
+parameter: value 44..49 type=i64
+parameter: item 79..83 type=i64
 token: Operator 25..27 text=".." declaration=false
 token: Method 39..42 text="map" declaration=false
 token: Parameter 44..49 text="value" declaration=true
