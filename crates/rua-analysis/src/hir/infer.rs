@@ -540,9 +540,11 @@ impl<'a> InferenceContext<'a> {
     fn infer_match(&mut self, arms: &[MatchArm], scrutinee: &Ty, expected: Option<&Ty>) -> Ty {
         let mut result = Ty::Never;
         let mut arm_facts = Vec::with_capacity(arms.len());
+        // Each arm has its own unique BindingIds for pattern bindings, so no
+        // explicit snapshot/restore is needed — arm bindings are independent.
         for arm in arms {
             for pattern in arm.patterns() {
-                self.infer_pattern(*pattern, scrutinee);
+                self.infer_pattern_with_narrow(*pattern, scrutinee);
             }
             if let Some(guard) = arm.guard() {
                 let guard_ty = self.infer_expr(guard, Some(&Ty::BOOL));
@@ -568,12 +570,18 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn infer_pattern(&mut self, pattern_id: PatId, expected: &Ty) {
+        self.infer_pattern_with_narrow(pattern_id, expected);
+    }
+
+    /// Like `infer_pattern` but when `expected` is an enum/aggregate type, resolves
+    /// the variant path so inner bindings receive narrowed types instead of Unknown.
+    fn infer_pattern_with_narrow(&mut self, pattern_id: PatId, expected: &Ty) {
         let Some(pattern) = self.body.pattern(pattern_id).cloned() else {
             return;
         };
         self.set_pattern(pattern_id, expected.clone());
-        match pattern {
-            Pat::Binding { binding } => self.set_binding(binding, expected.clone()),
+        match &pattern {
+            Pat::Binding { binding } => self.set_binding(*binding, expected.clone()),
             Pat::Literal(literal) => {
                 let actual = literal_ty(literal.kind());
                 self.set_pattern(pattern_id, actual.clone());
@@ -594,17 +602,106 @@ impl<'a> InferenceContext<'a> {
                     TypeMismatchContext::Branch,
                 );
             }
-            Pat::TupleVariant { subpatterns, .. } => {
-                for pattern in subpatterns {
-                    self.infer_pattern(pattern, &Ty::Unknown);
+            Pat::Path(_path) => {
+                // For unit-variant patterns like `None`, `Ok`, `Err` — no bindings to
+                // narrow, but the pattern type is validated against the scrutinee.
+            }
+            Pat::TupleVariant { path, subpatterns } => {
+                let narrowed = self.resolve_variant_payload(path, expected);
+                let narrowed_fields = narrowed.unwrap_or_else(|| {
+                    vec![Ty::Unknown; subpatterns.len()]
+                });
+                for (index, subpattern) in subpatterns.iter().enumerate() {
+                    let field_ty = narrowed_fields.get(index).cloned().unwrap_or(Ty::Unknown);
+                    self.infer_pattern_with_narrow(*subpattern, &field_ty);
                 }
             }
-            Pat::StructVariant { fields, .. } => {
+            Pat::StructVariant { path, fields, .. } => {
+                let variant_def = self.resolve_variant_def(path, expected);
                 for field in fields {
-                    self.infer_pattern(field.pattern(), &Ty::Unknown);
+                    let field_name = self
+                        .body
+                        .name_ref(field.name())
+                        .and_then(|name_ref| name_ref.name())
+                        .unwrap_or_default();
+                    let field_ty = variant_def
+                        .and_then(|variant| {
+                            self.member_index
+                                .resolve_variant_field(variant, expected, field_name)
+                        })
+                        .map(|resolution| resolution.ty().clone())
+                        .unwrap_or(Ty::Unknown);
+                    self.infer_pattern_with_narrow(field.pattern(), &field_ty);
                 }
             }
-            Pat::Missing | Pat::Wildcard | Pat::Path(_) => {}
+            Pat::Missing | Pat::Wildcard => {}
+        }
+    }
+
+    /// Given a variant path like `["Some"]` and a scrutinee type like `Option<i64>`,
+    /// resolve the variant and return its payload field types.
+    fn resolve_variant_payload(&self, path: &[NameRefId], scrutinee: &Ty) -> Option<Vec<Ty>> {
+        let name = self
+            .body
+            .name_ref(*path.last()?)
+            .and_then(|name_ref| name_ref.name())?;
+        // Use resolve_associated_ty which works for both user-defined enums (via
+        // DefId) and builtin types like Option/Result.
+        let resolution = self.member_index.resolve_associated_ty(scrutinee, name)?;
+        if resolution.kind() != MemberKind::Variant {
+            return None;
+        }
+        let result_ty = resolution.ty().clone();
+        let substitution = resolution.substitution();
+        let payload = substitution.instantiate(&result_ty);
+        self.extract_payload_types(&payload)
+    }
+
+    /// Extract the inner field types from a variant's payload type, handling
+    /// both user-defined aggregate variants and builtin Function-wrapped variants.
+    fn extract_payload_types(&self, payload: &Ty) -> Option<Vec<Ty>> {
+        match payload {
+            Ty::Function(callable) | Ty::Closure(callable) => {
+                // Builtin variants like `Some(T)` are modelled as callables.
+                // The params are the variant fields; the return type is the enum.
+                if callable.params().is_empty() {
+                    // Unit variant like `None`.
+                    Some(Vec::new())
+                } else {
+                    Some(callable.params().to_vec())
+                }
+            }
+            Ty::Named(payload_named) => {
+                let mut field_types = Vec::new();
+                let candidates =
+                    self.member_index
+                        .field_candidates(&Ty::Named(payload_named.clone()));
+                for candidate in candidates {
+                    if candidate.kind() == MemberKind::Field {
+                        field_types.push(candidate.ty().clone());
+                    }
+                }
+                Some(field_types)
+            }
+            Ty::Tuple(items) => Some(items.clone()),
+            _ => Some(Vec::new()),
+        }
+    }
+
+    /// Resolve the variant DefId from a pattern path like `["Rect"]` against a
+    /// scrutinee type. Returns the variant's DefId for subsequent field lookup.
+    fn resolve_variant_def(&self, path: &[NameRefId], scrutinee: &Ty) -> Option<DefId> {
+        let name = self
+            .body
+            .name_ref(*path.last()?)
+            .and_then(|name_ref| name_ref.name())?;
+        let resolution = self.member_index.resolve_associated_ty(scrutinee, name)?;
+        if resolution.kind() != MemberKind::Variant {
+            return None;
+        }
+        match resolution.target() {
+            MemberTarget::Definition(def) => Some(def),
+            _ => None,
         }
     }
 
