@@ -1050,10 +1050,11 @@ fn is_hidden(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 fn to_lsp_hover(hover: &HoverResult) -> Hover {
+    let value = format!("```rua\n{}\n```", hover.signature());
     Hover {
         contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::PlainText,
-            value: hover.signature().to_string(),
+            kind: MarkupKind::Markdown,
+            value,
         }),
         range: None,
     }
