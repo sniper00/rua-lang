@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::{
     BaseDb,
-    vfs::{FileId, SourceRootKind, VfsPath},
+    vfs::{FileId, ProjectId, ProjectRoot, SourceRootKind, VfsPath},
 };
 
 /// Ordered logical paths considered for a file module declaration.
@@ -23,15 +23,68 @@ pub fn module_file_candidates(directory: &VfsPath, name: &str) -> Option<[VfsPat
 
 pub(crate) fn resolve_module_file(db: &BaseDb, from_file: FileId, name: &str) -> Option<FileId> {
     let directory = db.file_path(from_file)?.parent()?;
-    let candidates = module_file_candidates(&directory, name)?;
-    let mut source_roots: Vec<_> = db.source_roots().collect();
-    source_roots.sort_by_key(|(source_root_id, source_root)| {
-        (root_priority(source_root.kind()), source_root_id.index())
+    resolve_module_file_at(db, from_file, &directory, name)
+}
+
+pub(crate) fn resolve_module_file_at(
+    db: &BaseDb,
+    from_file: FileId,
+    directory: &VfsPath,
+    name: &str,
+) -> Option<FileId> {
+    let candidates = module_file_candidates(directory, name)?;
+    let source_root_id = db.source_root_id(from_file)?;
+    for candidate in &candidates {
+        if let Some(file_id) = db.file_for_path_in_root(candidate, source_root_id) {
+            return Some(file_id);
+        }
+    }
+    None
+}
+
+pub(crate) fn project_file_logical_directory(
+    db: &BaseDb,
+    project_id: ProjectId,
+    file_id: FileId,
+) -> Option<VfsPath> {
+    let project = db.project(project_id)?;
+    let source_root_id = db.source_root_id(file_id)?;
+    let directory = db.file_path(file_id)?.parent()?;
+    project
+        .roots()
+        .filter(|root| root.source_root_id() == source_root_id)
+        .find_map(|root| directory.strip_prefix(root.logical_base()))
+}
+
+pub(crate) fn resolve_module_file_in_project_at(
+    db: &BaseDb,
+    project_id: ProjectId,
+    from_file: FileId,
+    directory: &VfsPath,
+    name: &str,
+) -> Option<FileId> {
+    let project = db.project(project_id)?;
+    let from_root = db.source_root_id(from_file)?;
+    if !project
+        .roots()
+        .any(|root| root.source_root_id() == from_root)
+    {
+        return None;
+    }
+    let mut roots: Vec<(usize, &ProjectRoot)> = project.roots().enumerate().collect();
+    roots.sort_by_key(|(order, root)| {
+        let priority = db
+            .source_root(root.source_root_id())
+            .map(|source_root| root_priority(source_root.kind()))
+            .unwrap_or(u8::MAX);
+        (priority, *order)
     });
 
-    for (source_root_id, _) in source_roots {
+    for (_, root) in roots {
+        let directory = root.logical_base().join(directory.as_path());
+        let candidates = module_file_candidates(&directory, name)?;
         for candidate in &candidates {
-            if let Some(file_id) = db.file_for_path_in_root(candidate, source_root_id) {
+            if let Some(file_id) = db.file_for_path_in_root(candidate, root.source_root_id()) {
                 return Some(file_id);
             }
         }
@@ -57,7 +110,10 @@ const fn root_priority(kind: SourceRootKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::module_file_candidates;
-    use crate::{AnalysisHost, Change, FileId, FileKind, SourceRootId, SourceRootKind, VfsPath};
+    use crate::{
+        AnalysisHost, Change, FileId, FileKind, ProjectData, ProjectId, ProjectRoot, SourceRootId,
+        SourceRootKind, VfsPath,
+    };
 
     #[test]
     fn module_resolution_supports_all_file_layouts() {
@@ -138,6 +194,7 @@ mod tests {
 
     #[test]
     fn module_resolution_prefers_workspace_then_library_then_std() {
+        let project_id = ProjectId::new(0);
         let workspace_root = SourceRootId::new(10);
         let library_root = SourceRootId::new(1);
         let std_root = SourceRootId::new(0);
@@ -175,12 +232,42 @@ mod tests {
             "src/foo.ruai",
             "",
         );
+        change.set_project(
+            project_id,
+            ProjectData::new(
+                main_id,
+                [ProjectRoot::new(workspace_root, "src")],
+                [
+                    ProjectRoot::new(library_root, "src"),
+                    ProjectRoot::new(std_root, "src"),
+                ],
+            ),
+        );
         let mut host = AnalysisHost::new();
         host.apply_change(change);
 
         assert_eq!(
-            host.analysis().resolve_module(main_id, "foo"),
+            host.analysis()
+                .resolve_module_in_project(project_id, main_id, "foo"),
             Some(workspace_file)
+        );
+
+        let mut remove_workspace = Change::new();
+        remove_workspace.remove_file(workspace_file);
+        host.apply_change(remove_workspace);
+        assert_eq!(
+            host.analysis()
+                .resolve_module_in_project(project_id, main_id, "foo"),
+            Some(library_file)
+        );
+
+        let mut remove_library = Change::new();
+        remove_library.remove_file(library_file);
+        host.apply_change(remove_library);
+        assert_eq!(
+            host.analysis()
+                .resolve_module_in_project(project_id, main_id, "foo"),
+            Some(std_file)
         );
     }
 

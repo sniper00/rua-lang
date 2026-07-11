@@ -20,8 +20,11 @@ pub use diagnostic::{
     normalize_diagnostics, reconcile_diagnostics,
 };
 pub use hir::{
-    DefId, DefKind, DefMap, Definition, Import, ItemKind, ItemTree, ItemTreeItem, ModuleData,
-    ModuleId, ModuleKind, Visibility,
+    AggregateSignature, CallableSignature, DefId, DefKind, DefMap, Definition, DefinitionSource,
+    DefinitionSourceKind, GenericParamData, ImplSignature, Import, ItemKind, ItemSignature,
+    ItemSourceKind, ItemTree, ItemTreeItem, MemberId, ModuleData, ModuleId, ModuleKind,
+    ParameterData, ReceiverKind, SignatureFingerprint, TypeRef, VariantKind, VariantSignature,
+    Visibility, WherePredicateData,
 };
 pub use ide::{
     Analysis, AnalysisHost, ClosureParameterInfo, CompletionInsert, CompletionItem, CompletionKind,
@@ -31,4 +34,7 @@ pub use ide::{
     SemanticTokenModifiers, SourceChange, TextEdit, TextRange, WorkspaceSymbol,
 };
 pub use semantic::Semantics;
-pub use vfs::{Change, FileId, FileKind, SourceRoot, SourceRootId, SourceRootKind, VfsPath};
+pub use vfs::{
+    Change, FileId, FileKind, ProjectData, ProjectRoot, SourceRoot, SourceRootId, SourceRootKind,
+    VfsPath,
+};

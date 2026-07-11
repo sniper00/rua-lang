@@ -198,6 +198,37 @@ impl FnDecl {
     pub fn has_self(&self) -> bool {
         token(&self.syntax, K::KwSelf).is_some()
     }
+
+    pub fn receiver(&self) -> Option<ReceiverKind> {
+        receiver_kind(&self.syntax)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReceiverKind {
+    Value,
+    SharedRef,
+    MutRef,
+}
+
+fn receiver_kind(node: &SyntaxNode) -> Option<ReceiverKind> {
+    let tokens: Vec<_> = node
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !token.kind().is_trivia())
+        .collect();
+    let receiver = tokens.iter().position(|token| token.kind() == K::KwSelf)?;
+    Some(match tokens.get(receiver.wrapping_sub(1)).map(|token| token.kind()) {
+        Some(K::KwMut)
+            if tokens
+                .get(receiver.wrapping_sub(2))
+                .is_some_and(|token| token.kind() == K::Amp) =>
+        {
+            ReceiverKind::MutRef
+        }
+        Some(K::Amp) => ReceiverKind::SharedRef,
+        _ => ReceiverKind::Value,
+    })
 }
 
 ast_node!(GenericParams = GenericParams);
@@ -419,6 +450,23 @@ impl EnumVariant {
     pub fn field_list(&self) -> Option<FieldList> {
         child(&self.syntax)
     }
+
+    pub fn variant_kind(&self) -> VariantKind {
+        if self.field_list().is_some() {
+            VariantKind::Struct
+        } else if token(&self.syntax, K::LParen).is_some() {
+            VariantKind::Tuple
+        } else {
+            VariantKind::Unit
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VariantKind {
+    Unit,
+    Tuple,
+    Struct,
 }
 
 impl TraitDecl {
@@ -448,6 +496,9 @@ impl TraitMethod {
     /// True when the signature declares a `self` receiver.
     pub fn has_self(&self) -> bool {
         token(&self.syntax, K::KwSelf).is_some()
+    }
+    pub fn receiver(&self) -> Option<ReceiverKind> {
+        receiver_kind(&self.syntax)
     }
     pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
         children::<Param>(&self.syntax)

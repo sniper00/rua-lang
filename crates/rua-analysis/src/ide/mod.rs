@@ -12,7 +12,10 @@ use rua_syntax::{Parse, ast::SourceFile};
 
 use crate::{
     BaseDb,
-    hir::{DefMap, ItemTree, module_resolution::resolve_module_file},
+    hir::{
+        DefMap, ItemTree,
+        module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
+    },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
@@ -75,6 +78,23 @@ impl Analysis {
         resolve_module_file(&self.db, from_file, name)
     }
 
+    pub fn resolve_module_in_project(
+        &self,
+        project_id: ProjectId,
+        from_file: FileId,
+        name: &str,
+    ) -> Option<FileId> {
+        let map = self.db.project_def_map(project_id)?;
+        let module = map.module(map.module_for_file(from_file)?)?;
+        resolve_module_file_in_project_at(
+            &self.db,
+            project_id,
+            from_file,
+            module.resolution_directory()?,
+            name,
+        )
+    }
+
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
         self.db.file_path(file_id)
     }
@@ -83,8 +103,19 @@ impl Analysis {
         self.db.def_map(root_file)
     }
 
+    pub fn def_map_for_project(&self, project_id: ProjectId) -> Option<Arc<DefMap>> {
+        self.db.project_def_map(project_id)
+    }
+
     pub fn semantics(&self, root_file: FileId) -> Semantics {
         Semantics::new(Rc::clone(&self.db), self.db.def_map(root_file))
+    }
+
+    pub fn semantics_for_project(&self, project_id: ProjectId) -> Option<Semantics> {
+        Some(Semantics::new(
+            Rc::clone(&self.db),
+            self.db.project_def_map(project_id)?,
+        ))
     }
 
     pub fn document_symbols(&self, root_file: FileId, file_id: FileId) -> Vec<DocumentSymbol> {

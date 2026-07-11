@@ -8,6 +8,14 @@ mod item_tree;
 pub(crate) mod module_resolution;
 
 pub use crate::base::TextRange;
-pub use def_map::{DefId, DefKind, DefMap, Definition, ModuleData, ModuleId};
-pub use item_tree::{Import, ItemKind, ItemTree, ItemTreeItem, ModuleKind, Visibility};
+pub use def_map::{
+    DefId, DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, MemberId,
+    ModuleData, ModuleId,
+};
+pub(crate) use def_map::{IdentityContext, IdentityInterner};
+pub use item_tree::{
+    AggregateSignature, CallableSignature, GenericParamData, ImplSignature, Import, ItemKind,
+    ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, ModuleKind, ParameterData, ReceiverKind,
+    SignatureFingerprint, TypeRef, VariantKind, VariantSignature, Visibility, WherePredicateData,
+};
 pub use module_resolution::module_file_candidates;

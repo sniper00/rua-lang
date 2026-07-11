@@ -5,20 +5,7 @@ use std::{cmp::Reverse, collections::BTreeSet, fmt};
 use crate::vfs::FileId;
 
 pub use crate::base::{FilePosition, FileRange, TextRange};
-
-/// Stable project identity for the lifetime of an analysis session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectId(u32);
-
-impl ProjectId {
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    pub const fn index(self) -> u32 {
-        self.0
-    }
-}
+pub use crate::vfs::ProjectId;
 
 /// A file interpreted in one project's ordered dependency context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -42,6 +42,10 @@ impl VfsPath {
     pub fn join(&self, path: impl AsRef<Path>) -> Self {
         Self::new(self.0.join(path))
     }
+
+    pub fn strip_prefix(&self, base: &Self) -> Option<Self> {
+        self.0.strip_prefix(&base.0).ok().map(Self::new)
+    }
 }
 
 impl<P: AsRef<Path>> From<P> for VfsPath {
@@ -75,6 +79,86 @@ impl SourceRootId {
 
     pub const fn index(self) -> u32 {
         self.0
+    }
+}
+
+/// Stable identity of a workspace project for the lifetime of an analysis session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectId(u32);
+
+impl ProjectId {
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// One source root mounted at a logical module base within a project.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectRoot {
+    source_root_id: SourceRootId,
+    logical_base: VfsPath,
+}
+
+impl ProjectRoot {
+    pub fn new(source_root_id: SourceRootId, logical_base: impl Into<VfsPath>) -> Self {
+        Self {
+            source_root_id,
+            logical_base: logical_base.into(),
+        }
+    }
+
+    pub fn at_root(source_root_id: SourceRootId) -> Self {
+        Self::new(source_root_id, VfsPath::new(""))
+    }
+
+    pub const fn source_root_id(&self) -> SourceRootId {
+        self.source_root_id
+    }
+
+    pub const fn logical_base(&self) -> &VfsPath {
+        &self.logical_base
+    }
+}
+
+/// Explicit resolution boundary for one workspace and its ordered dependencies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectData {
+    root_file: FileId,
+    workspace_roots: Vec<ProjectRoot>,
+    dependency_roots: Vec<ProjectRoot>,
+}
+
+impl ProjectData {
+    pub fn new(
+        root_file: FileId,
+        workspace_roots: impl IntoIterator<Item = ProjectRoot>,
+        dependency_roots: impl IntoIterator<Item = ProjectRoot>,
+    ) -> Self {
+        Self {
+            root_file,
+            workspace_roots: workspace_roots.into_iter().collect(),
+            dependency_roots: dependency_roots.into_iter().collect(),
+        }
+    }
+
+    pub const fn root_file(&self) -> FileId {
+        self.root_file
+    }
+
+    pub fn workspace_roots(&self) -> &[ProjectRoot] {
+        &self.workspace_roots
+    }
+
+    pub fn dependency_roots(&self) -> &[ProjectRoot] {
+        &self.dependency_roots
+    }
+
+    pub fn roots(&self) -> impl Iterator<Item = &ProjectRoot> {
+        self.workspace_roots.iter().chain(&self.dependency_roots)
     }
 }
 
@@ -138,6 +222,17 @@ pub enum SourceRootChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectChange {
+    Set {
+        project_id: ProjectId,
+        data: ProjectData,
+    },
+    Remove {
+        project_id: ProjectId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileChange {
     SetText {
         file_id: FileId,
@@ -170,6 +265,7 @@ impl FileChange {
 pub struct Change {
     file_changes: Vec<FileChange>,
     source_root_changes: Vec<SourceRootChange>,
+    project_changes: Vec<ProjectChange>,
 }
 
 impl Change {
@@ -233,8 +329,20 @@ impl Change {
             .push(SourceRootChange::Remove { source_root_id });
     }
 
+    pub fn set_project(&mut self, project_id: ProjectId, data: ProjectData) {
+        self.project_changes
+            .push(ProjectChange::Set { project_id, data });
+    }
+
+    pub fn remove_project(&mut self, project_id: ProjectId) {
+        self.project_changes
+            .push(ProjectChange::Remove { project_id });
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.file_changes.is_empty() && self.source_root_changes.is_empty()
+        self.file_changes.is_empty()
+            && self.source_root_changes.is_empty()
+            && self.project_changes.is_empty()
     }
 
     pub fn file_changes(&self) -> &[FileChange] {
@@ -243,6 +351,10 @@ impl Change {
 
     pub fn source_root_changes(&self) -> &[SourceRootChange] {
         &self.source_root_changes
+    }
+
+    pub fn project_changes(&self) -> &[ProjectChange] {
+        &self.project_changes
     }
 }
 
@@ -257,6 +369,7 @@ pub struct Vfs {
     file_paths: HashMap<FileId, VfsPath>,
     path_files: HashMap<VfsPath, BTreeSet<FileId>>,
     source_roots: HashMap<SourceRootId, SourceRoot>,
+    projects: HashMap<ProjectId, ProjectData>,
 }
 
 impl Vfs {
@@ -387,6 +500,17 @@ impl Vfs {
                 }
             }
         }
+
+        for project_change in change.project_changes {
+            match project_change {
+                ProjectChange::Set { project_id, data } => {
+                    self.projects.insert(project_id, data);
+                }
+                ProjectChange::Remove { project_id } => {
+                    self.projects.remove(&project_id);
+                }
+            }
+        }
     }
 
     pub fn file_text(&self, file_id: FileId) -> Option<Arc<str>> {
@@ -409,6 +533,10 @@ impl Vfs {
         self.source_roots
             .iter()
             .map(|(source_root_id, source_root)| (*source_root_id, source_root))
+    }
+
+    pub fn project(&self, project_id: ProjectId) -> Option<&ProjectData> {
+        self.projects.get(&project_id)
     }
 
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {

@@ -1,14 +1,14 @@
 //! Root input database and hand-written per-file caches.
 
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use rua_syntax::{Parse, ast::SourceFile, parse_source_file};
 
 use crate::{
-    hir::{DefMap, ItemTree},
+    hir::{DefId, DefMap, IdentityContext, IdentityInterner, ItemTree, ModuleId},
     vfs::{
-        Change, FileId, FileKind, SourceRoot, SourceRootChange, SourceRootId, SourceRootKind, Vfs,
-        VfsPath,
+        Change, FileId, FileKind, ProjectData, ProjectId, SourceRoot, SourceRootChange,
+        SourceRootId, SourceRootKind, Vfs, VfsPath,
     },
 };
 
@@ -16,9 +16,16 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct BaseDb {
     vfs: Vfs,
+    identity_interner: Rc<RefCell<IdentityInterner>>,
     parse_cache: RefCell<HashMap<FileId, Arc<Parse<SourceFile>>>>,
     item_tree_cache: RefCell<HashMap<FileId, Arc<ItemTree>>>,
-    def_map_cache: RefCell<HashMap<FileId, Arc<DefMap>>>,
+    def_map_cache: RefCell<HashMap<DefMapKey, Arc<DefMap>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DefMapKey {
+    Implicit(FileId),
+    Project(ProjectId),
 }
 
 impl BaseDb {
@@ -37,6 +44,9 @@ impl BaseDb {
     }
 
     pub fn apply_change(&mut self, change: Change) {
+        if !change.project_changes().is_empty() || !change.source_root_changes().is_empty() {
+            self.def_map_cache.get_mut().clear();
+        }
         for source_root_change in change.source_root_changes() {
             let SourceRootChange::Remove { source_root_id } = source_root_change else {
                 continue;
@@ -70,6 +80,10 @@ impl BaseDb {
         self.vfs.source_root(source_root_id)
     }
 
+    pub fn project(&self, project_id: ProjectId) -> Option<&ProjectData> {
+        self.vfs.project(project_id)
+    }
+
     pub fn source_root_kind(&self, file_id: FileId) -> Option<SourceRootKind> {
         self.source_root_id(file_id)
             .and_then(|source_root_id| self.source_root(source_root_id))
@@ -82,10 +96,6 @@ impl BaseDb {
 
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
         self.vfs.file_path(file_id)
-    }
-
-    pub(crate) fn source_roots(&self) -> impl Iterator<Item = (SourceRootId, &SourceRoot)> {
-        self.vfs.source_roots()
     }
 
     pub(crate) fn file_for_path_in_root(
@@ -131,16 +141,59 @@ impl BaseDb {
         item_tree
     }
 
+    pub(crate) fn intern_definition(
+        &self,
+        context: IdentityContext,
+        file_id: FileId,
+        structural_path: &str,
+    ) -> DefId {
+        self.identity_interner
+            .borrow_mut()
+            .intern_definition(context, file_id, structural_path)
+    }
+
+    pub(crate) fn intern_root_module(
+        &self,
+        context: IdentityContext,
+        root_file: FileId,
+    ) -> ModuleId {
+        self.identity_interner
+            .borrow_mut()
+            .intern_root_module(context, root_file)
+    }
+
+    pub(crate) fn intern_child_module(
+        &self,
+        context: IdentityContext,
+        parent: ModuleId,
+        name: &str,
+        occurrence: u32,
+    ) -> ModuleId {
+        self.identity_interner
+            .borrow_mut()
+            .intern_child_module(context, parent, name, occurrence)
+    }
+
     pub fn def_map(&self, root_file: FileId) -> Arc<DefMap> {
-        if let Some(def_map) = self.def_map_cache.borrow().get(&root_file).cloned() {
+        let key = DefMapKey::Implicit(root_file);
+        if let Some(def_map) = self.def_map_cache.borrow().get(&key).cloned() {
             return def_map;
         }
 
         let def_map = Arc::new(DefMap::build(self, root_file));
-        self.def_map_cache
-            .borrow_mut()
-            .insert(root_file, def_map.clone());
+        self.def_map_cache.borrow_mut().insert(key, def_map.clone());
         def_map
+    }
+
+    pub fn project_def_map(&self, project_id: ProjectId) -> Option<Arc<DefMap>> {
+        let key = DefMapKey::Project(project_id);
+        if let Some(def_map) = self.def_map_cache.borrow().get(&key).cloned() {
+            return Some(def_map);
+        }
+
+        let def_map = Arc::new(DefMap::build_project(self, project_id)?);
+        self.def_map_cache.borrow_mut().insert(key, def_map.clone());
+        Some(def_map)
     }
 }
 

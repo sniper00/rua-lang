@@ -161,8 +161,13 @@ fn analysis_kind(kind: DefKind) -> &'static str {
     match kind {
         DefKind::Function => "function",
         DefKind::Struct => "struct",
+        DefKind::Field => "field",
         DefKind::Enum => "enum",
+        DefKind::Variant => "variant",
         DefKind::Trait => "trait",
+        DefKind::Impl => "impl",
+        DefKind::Method => "method",
+        DefKind::ExternFunction => "function",
         DefKind::Module => "module",
         DefKind::TypeAlias => "type_alias",
     }
