@@ -1,14 +1,12 @@
 //! Temporary compiler bridge for the pre-`rua-analysis` IDE implementation.
 //!
-//! This is the only production module in `rua-syntax` allowed to mention
-//! `ruac`. The syntax, AST, and parser layers use crate-owned data types and do
-//! not depend on compiler AST/type-checker/resolver types.
+//! This module is gated behind `#[cfg(feature = "legacy")]` and only survives
+//! for integration tests. All production code now uses `rua-analysis`.
 //!
-//! Removal plan:
-//! - during Phase 1, replace [`lex`] with a syntax-owned lexer or a small shared
-//!   lexer crate, guarded by token/range conformance tests;
-//! - during Phase 5, move member and binding queries to `rua-analysis`, then
-//!   remove this module and the normal `ruac` dependency.
+//! Removal plan: once the integration tests are migrated to native analysis,
+//! delete this module and its callers (analysis, workspace, nameres, completion).
+
+#![allow(dead_code)]
 
 use std::path::Path;
 

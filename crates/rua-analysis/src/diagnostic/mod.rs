@@ -348,8 +348,8 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
         if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
             continue;
         }
-        if let Some(source_map) = db.body_source_map(definition.id()) {
-            if let Some(inference) = db.infer(definition.id()) {
+        if let Some(source_map) = db.body_source_map(definition.id())
+            && let Some(inference) = db.infer(definition.id()) {
                 for inf_diag in inference.diagnostics() {
                     if let Some(diag) =
                         convert_inference_diagnostic(file_id, inf_diag, &source_map)
@@ -358,7 +358,6 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                     }
                 }
             }
-        }
     }
 
     normalize_diagnostics(&mut diagnostics);
@@ -475,7 +474,7 @@ fn inference_source_range(
 }
 
 fn expr_range(
-    file_id: FileId,
+    _file_id: FileId,
     expr: crate::hir::ExprId,
     source_map: &crate::hir::BodySourceMap,
 ) -> Option<TextRange> {

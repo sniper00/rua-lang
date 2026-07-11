@@ -2,13 +2,14 @@
 //! and consumer return types through native inference.
 
 use rua_analysis::{
-    AnalysisHost, BindingId, Body, BodySourceMap, Change, DefKind, FileId, FileKind,
+    AnalysisHost, Body, BodySourceMap, Change, DefKind, FileId, FileKind,
     InferenceResult, SourceRootId, SourceRootKind, Ty,
 };
 use std::sync::Arc;
 
 struct Fixture {
     body: Arc<Body>,
+    #[allow(dead_code)]
     source_map: Arc<BodySourceMap>,
     inference: Arc<InferenceResult>,
 }

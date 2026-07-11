@@ -36,18 +36,16 @@ pub(crate) fn completions(
     let token = token_at_offset(root, offset);
 
     // Member access: cursor is after `.`
-    if let Some(ref tok) = token {
-        if previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::Dot) {
+    if let Some(ref tok) = token
+        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::Dot) {
             return member_completions(db, position, tok, offset);
         }
-    }
 
     // Path context: cursor is after `::`
-    if let Some(ref tok) = token {
-        if previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon) {
+    if let Some(ref tok) = token
+        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon) {
             return path_completions(db, position, tok);
         }
-    }
 
     // Default: scope completion
     scope_completions(db, position, offset)
@@ -292,8 +290,8 @@ fn path_completions(
     {
         let member_index = db.member_index(position.file_id);
         for definition in def_map.definitions() {
-            if definition.module_id() == module_id {
-                if seen.insert(definition.name().to_string()) {
+            if definition.module_id() == module_id
+                && seen.insert(definition.name().to_string()) {
                     let kind = def_kind_to_completion_kind(definition.kind());
                     let mut item =
                         CompletionItem::new(definition.name(), kind).with_relevance(80);
@@ -302,15 +300,13 @@ fn path_completions(
                     }
                     items.push(item);
                 }
-            }
         }
 
         // Also try enum variants if the resolved module contains enums
         for definition in def_map.definitions() {
             if definition.module_id() == module_id
                 && definition.kind() == DefKind::Enum
-            {
-                if let Some(template_ty) = member_index.type_template(definition.id()) {
+                && let Some(template_ty) = member_index.type_template(definition.id()) {
                     for candidate in member_index.associated_candidates(template_ty) {
                         if seen.insert(candidate.name().to_string()) {
                             items.push(
@@ -324,7 +320,6 @@ fn path_completions(
                         }
                     }
                 }
-            }
         }
     }
 
@@ -500,13 +495,13 @@ fn find_innermost_scope(
         match candidate {
             Some(ScopeRange::Within(range)) if range.contains(offset) => {
                 let len = range.len();
-                if best.map_or(true, |(best_len, _)| len < best_len) {
+                if best.is_none_or(|(best_len, _)| len < best_len) {
                     best = Some((len, scope_id));
                 }
             }
             Some(ScopeRange::After(end)) if offset >= end => {
                 let len = offset - end; // prefer latest (smallest distance).
-                if best.map_or(true, |(best_len, _)| len < best_len) {
+                if best.is_none_or(|(best_len, _)| len < best_len) {
                     best = Some((len, scope_id));
                 }
             }

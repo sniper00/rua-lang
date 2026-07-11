@@ -202,14 +202,13 @@ impl Analysis {
                         .binding(target.binding())
                         .and_then(|b| b.name())
                         .unwrap_or("?");
-                    if let Some(source_map) = self.db.body_source_map(owner_def) {
-                        if let Some(file_range) = source_map.binding_range(target.binding()) {
+                    if let Some(source_map) = self.db.body_source_map(owner_def)
+                        && let Some(file_range) = source_map.binding_range(target.binding()) {
                             return Some(HoverResult::new(
                                 file_range,
                                 format!("let {name}: {ty}"),
                             ));
                         }
-                    }
                 }
             }
         }
@@ -283,17 +282,15 @@ impl Analysis {
             semantics.resolve_local_at(position.position)
         {
             let owner_def = target.owner().owner();
-            if let Some(body) = self.db.body(owner_def) {
-                if let Some(source_map) = self.db.body_source_map(owner_def) {
-                    if let Some(file_range) = source_map.binding_range(target.binding()) {
+            if let Some(body) = self.db.body(owner_def)
+                && let Some(source_map) = self.db.body_source_map(owner_def)
+                    && let Some(file_range) = source_map.binding_range(target.binding()) {
                         let name = body
                             .binding(target.binding())
                             .and_then(|b| b.name())
                             .unwrap_or("?");
                         return Some(RenameTarget::new(file_range, name));
                     }
-                }
-            }
         }
 
         // Item rename.

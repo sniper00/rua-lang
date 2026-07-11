@@ -440,7 +440,7 @@ impl Server {
             })
             .and_then(|target| {
                 self.range_for_file(target.range().file_id, target.range().range)
-                    .map(|range| PrepareRenameResponse::Range(range))
+                    .map(PrepareRenameResponse::Range)
             });
 
         let resp = Response::new_ok(id, result);
@@ -675,11 +675,10 @@ impl Server {
     fn handle_watched_file_change(&mut self, params: &DidChangeWatchedFilesParams) {
         // Debounce: skip if within 100ms of the last event.
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_watcher_event {
-            if now.duration_since(last) < std::time::Duration::from_millis(100) {
+        if let Some(last) = self.last_watcher_event
+            && now.duration_since(last) < std::time::Duration::from_millis(100) {
                 return;
             }
-        }
         self.last_watcher_event = Some(now);
 
         let mut change = Change::new();
@@ -831,12 +830,11 @@ impl LibraryConfig {
         for root in &roots {
             scan_library_root(root, &mut files);
         }
-        for (_, path) in &mounts {
-            if let Ok(canonical) = std::fs::canonicalize(path) {
-                if let Ok(text) = std::fs::read_to_string(&canonical) {
+        for path in mounts.values() {
+            if let Ok(canonical) = std::fs::canonicalize(path)
+                && let Ok(text) = std::fs::read_to_string(&canonical) {
                     files.push((canonical, text));
                 }
-            }
         }
 
         Ok(LibraryConfig {
@@ -904,11 +902,10 @@ fn scan_dir(dir: &Path, files: &mut Vec<(PathBuf, String)>) {
         for path in paths {
             if path.is_dir() {
                 scan_dir(&path, files);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("ruai") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
+            } else if path.extension().and_then(|e| e.to_str()) == Some("ruai")
+                && let Ok(text) = std::fs::read_to_string(&path) {
                     files.push((path, text));
                 }
-            }
         }
     }
 }
@@ -1016,11 +1013,10 @@ fn scan_workspace_files(
     if let Ok(canonical) = std::fs::canonicalize(root) {
         if canonical.is_dir() {
             scan_workspace_dir(&canonical, cb);
-        } else if canonical.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&canonical) {
+        } else if canonical.is_file()
+            && let Ok(text) = std::fs::read_to_string(&canonical) {
                 cb(&canonical, &text);
             }
-        }
     }
 }
 
@@ -1035,11 +1031,10 @@ fn scan_workspace_dir(dir: &Path, cb: &mut dyn FnMut(&Path, &str)) {
                 if !is_hidden(&path) {
                     scan_workspace_dir(&path, cb);
                 }
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rua") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rua")
+                && let Ok(text) = std::fs::read_to_string(&path) {
                     cb(&path, &text);
                 }
-            }
         }
     }
 }
@@ -1142,6 +1137,7 @@ fn core_diag_to_lsp(
     }
 }
 
+#[allow(clippy::mutable_key_type)]
 fn source_change_to_workspace_edit(
     analysis: &rua_analysis::Analysis,
     change: &SourceChange,

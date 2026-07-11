@@ -47,6 +47,17 @@
           "enum": ["off", "messages", "verbose"],
           "default": "off",
           "description": "Trace the JSON-RPC communication between VS Code and the Rua language server."
+        },
+        "rua.library": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Directories or files containing `.ruai` type declarations. The language server watches these paths and reloads declarations on change."
+        },
+        "rua.libraryMounts": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Named module path → file/directory mapping for `.ruai` declarations (e.g. `\"clock\": \"/lib/clock.ruai\"`)."
         }
       }
     },

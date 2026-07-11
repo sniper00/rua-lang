@@ -892,8 +892,8 @@ impl<'a> InferenceContext<'a> {
         let actual_return = self.infer_expr(body, expected_return.as_ref());
         let explicit_return = self.closure_returns.pop().unwrap_or(Ty::Never);
         self.return_ty = outer_return;
-        if let Some(expected_return) = expected_return.as_ref() {
-            if !actual_return.is_never() {
+        if let Some(expected_return) = expected_return.as_ref()
+            && !actual_return.is_never() {
                 self.report_mismatch(
                     InferenceSource::Expr(body),
                     expected_return,
@@ -901,7 +901,6 @@ impl<'a> InferenceContext<'a> {
                     TypeMismatchContext::ClosureReturn,
                 );
             }
-        }
         let inferred_return = explicit_return.join(&actual_return);
         // Prefer the inferred return type when the expected type is Unknown.
         let proclaimed_return = match expected_return {
@@ -1061,21 +1060,19 @@ impl<'a> InferenceContext<'a> {
                 .resolve_method_in(&receiver_ty, name, self.owner.id());
         let Some(resolution) = resolution else {
             // Fallback: Vec -> Iterator conversion methods.
-            if let Ty::Vec(item) = &receiver_ty {
-                if let Some(result) =
+            if let Ty::Vec(item) = &receiver_ty
+                && let Some(result) =
                     self.infer_vec_to_iterator(call, item, name, args)
                 {
                     return result;
                 }
-            }
             // Fallback: iterator adapter methods not yet in the member index.
-            if let Ty::Iterator(item) = &receiver_ty {
-                if let Some(result) =
+            if let Ty::Iterator(item) = &receiver_ty
+                && let Some(result) =
                     self.infer_iterator_adapter(call, item, name, args, expected)
                 {
                     return result;
                 }
-            }
             return self.infer_unresolved_member_call(call, args);
         };
         let Ty::Function(callable) = resolution.ty() else {

@@ -1,7 +1,7 @@
 # Rua Native Analysis 与 LSP 全量迁移施工计划
 
-> 状态：施工中（Step 4B.0-4B.6 已完成；下一步 Step 4B.7）。
-> 基线：`35f0d8b`（Phase -1 至 Phase 4A 已完成）。
+> 状态：已完成（Phase 4B + Phase 5 全部完成，2026-07-11）。
+> 最终基线：`a6eb7d1`（5.11 incremental stress tests）。
 > 架构依据：`docs/rua-ide-architecture.md` Phase 4 / Phase 5。
 > 前序计划：`docs/rua-construction-plan.md`。
 > 目标：完成 `rua-analysis` 原生 body/type analysis，并让 `rua-lsp` 的全部语义功能只通过长期 `AnalysisHost` 查询。

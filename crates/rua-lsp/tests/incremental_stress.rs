@@ -55,7 +55,7 @@ impl TestServer {
     fn open(&mut self, uri: &Uri, text: &str) -> FileId {
         let file_id = self.ensure_file_id(uri);
         let mut change = Change::new();
-        change.set_file_text(file_id, &*text);
+        change.set_file_text(file_id, text);
         self.host.apply_change(change);
         self.open_buffers.insert(file_id, (uri.clone(), text.to_string()));
         file_id
@@ -64,7 +64,7 @@ impl TestServer {
     fn change(&mut self, uri: &Uri, text: &str) {
         let file_id = self.ensure_file_id(uri);
         let mut change = Change::new();
-        change.set_file_text(file_id, &*text);
+        change.set_file_text(file_id, text);
         self.host.apply_change(change);
         self.open_buffers.insert(file_id, (uri.clone(), text.to_string()));
     }
