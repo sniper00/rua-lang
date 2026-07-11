@@ -7,6 +7,7 @@ pub mod body;
 mod def_map;
 pub mod infer;
 mod item_tree;
+mod member;
 pub(crate) mod module_resolution;
 pub mod scope;
 pub mod ty;
@@ -17,19 +18,24 @@ pub use body::{
     Condition, Expr, ExprId, Literal, LiteralKind, MatchArm, NameRef, NameRefId, NameRefKind, Pat,
     PatId, PatternField, Statement, StructField, UnaryOp,
 };
-pub use infer::{
-    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource,
-    TypeMismatchContext,
-};
 pub use def_map::{
     DefId, DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, MemberId,
     ModuleData, ModuleId,
 };
 pub(crate) use def_map::{IdentityContext, IdentityInterner};
+pub use infer::{
+    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource,
+    TypeMismatchContext,
+};
 pub use item_tree::{
     AggregateSignature, CallableSignature, GenericParamData, ImplSignature, Import, ItemKind,
     ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, ModuleKind, ParameterData, ReceiverKind,
     SignatureFingerprint, TypeRef, VariantKind, VariantSignature, Visibility, WherePredicateData,
+};
+pub(crate) use member::CallableRequirement;
+pub use member::{
+    BuiltinMemberId, BuiltinType, MemberCandidate, MemberIndex, MemberKind, MemberOrigin,
+    MemberResolution, MemberTarget, TraitBound,
 };
 pub use module_resolution::module_file_candidates;
 pub use scope::{

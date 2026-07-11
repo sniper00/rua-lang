@@ -1,10 +1,11 @@
 //! Native, error-tolerant type inference over lowered bodies.
 
 use super::{
-    BinaryOp, BindingId, BindingKind, Body, BodyId, BodyResolution, CallableSignature, CallableTy,
-    Condition, DefId, DefKind, DefMap, Definition, Expr, ExprId, GenericParamId, ItemSignature,
-    LiteralKind, LocalResolveResult, MatchArm, NameRefId, Pat, PatId, Statement, Substitution, Ty,
-    TypeLoweringContext, TypeRef, UnaryOp, unify,
+    BinaryOp, BindingId, BindingKind, Body, BodyId, BodyResolution, CallableRequirement,
+    CallableSignature, CallableTy, Condition, DefId, DefKind, DefMap, Definition, Expr, ExprId,
+    ItemSignature, LiteralKind, LocalResolveResult, MatchArm, MemberIndex, MemberKind,
+    MemberResolution, MemberTarget, NameRefId, Pat, PatId, Statement, StructField, Substitution,
+    Ty, TypeRef, UnaryOp, unify,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -62,6 +63,11 @@ pub enum InferenceDiagnostic {
         rhs: Ty,
         op: BinaryOp,
     },
+    UnsatisfiedTraitBound {
+        call: ExprId,
+        actual: Ty,
+        trait_id: DefId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -105,6 +111,7 @@ pub struct InferenceResult {
     pattern_types: Vec<Ty>,
     binding_types: Vec<Ty>,
     calls: Vec<Option<CallInfo>>,
+    member_resolutions: Vec<Option<MemberResolution>>,
     diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -129,6 +136,12 @@ impl InferenceResult {
         self.calls.get(call.index() as usize)?.as_ref()
     }
 
+    pub fn member_resolution(&self, name_ref: NameRefId) -> Option<&MemberResolution> {
+        self.member_resolutions
+            .get(name_ref.index() as usize)?
+            .as_ref()
+    }
+
     pub fn diagnostics(&self) -> &[InferenceDiagnostic] {
         &self.diagnostics
     }
@@ -138,14 +151,16 @@ pub(crate) fn infer_body(
     body: &Body,
     resolution: &BodyResolution,
     def_map: &DefMap,
+    member_index: &MemberIndex,
 ) -> InferenceResult {
-    InferenceContext::new(body, resolution, def_map).infer()
+    InferenceContext::new(body, resolution, def_map, member_index).infer()
 }
 
 struct InferenceContext<'a> {
     body: &'a Body,
     resolution: &'a BodyResolution,
     def_map: &'a DefMap,
+    member_index: &'a MemberIndex,
     owner: &'a Definition,
     return_ty: Ty,
     expr_types: Vec<Ty>,
@@ -153,22 +168,30 @@ struct InferenceContext<'a> {
     binding_types: Vec<Ty>,
     binding_closures: Vec<Option<ExprId>>,
     calls: Vec<Option<CallInfo>>,
+    member_resolutions: Vec<Option<MemberResolution>>,
     diagnostics: Vec<InferenceDiagnostic>,
     closure_returns: Vec<Ty>,
 }
 
 impl<'a> InferenceContext<'a> {
-    fn new(body: &'a Body, resolution: &'a BodyResolution, def_map: &'a DefMap) -> Self {
+    fn new(
+        body: &'a Body,
+        resolution: &'a BodyResolution,
+        def_map: &'a DefMap,
+        member_index: &'a MemberIndex,
+    ) -> Self {
         let owner = def_map
             .definition(body.owner())
             .expect("body owner must belong to its definition map");
-        let return_ty = lower_callable_signature(def_map, owner)
+        let return_ty = member_index
+            .callable(owner.id())
             .map(|callable| callable.return_ty().clone())
             .unwrap_or(Ty::Unknown);
         Self {
             body,
             resolution,
             def_map,
+            member_index,
             owner,
             return_ty,
             expr_types: vec![Ty::Unknown; body.exprs().len()],
@@ -176,6 +199,7 @@ impl<'a> InferenceContext<'a> {
             binding_types: vec![Ty::Unknown; body.bindings().len()],
             binding_closures: vec![None; body.bindings().len()],
             calls: vec![None; body.exprs().len()],
+            member_resolutions: vec![None; body.name_refs().len()],
             diagnostics: Vec::new(),
             closure_returns: Vec::new(),
         }
@@ -198,6 +222,7 @@ impl<'a> InferenceContext<'a> {
             pattern_types: self.pattern_types,
             binding_types: self.binding_types,
             calls: self.calls,
+            member_resolutions: self.member_resolutions,
             diagnostics: self.diagnostics,
         }
     }
@@ -206,12 +231,11 @@ impl<'a> InferenceContext<'a> {
         let signature = callable_signature(self.owner);
         let mut parameters = signature.into_iter().flat_map(CallableSignature::params);
         for binding in self.body.params() {
-            let signature_parameter = (!self
+            let is_self = self
                 .body
                 .binding(*binding)
-                .is_some_and(|binding| binding.kind() == BindingKind::SelfParameter))
-            .then(|| parameters.next())
-            .flatten();
+                .is_some_and(|binding| binding.kind() == BindingKind::SelfParameter);
+            let signature_parameter = (!is_self).then(|| parameters.next()).flatten();
             let ty = self
                 .body
                 .binding(*binding)
@@ -220,6 +244,11 @@ impl<'a> InferenceContext<'a> {
                 .or_else(|| {
                     signature_parameter
                         .map(|parameter| self.lower_type(self.owner, parameter.type_ref()))
+                })
+                .or_else(|| {
+                    is_self
+                        .then(|| self.member_index.receiver_type(self.owner.id()))
+                        .flatten()
                 })
                 .unwrap_or(Ty::Unknown);
             self.set_binding(*binding, ty);
@@ -239,13 +268,15 @@ impl<'a> InferenceContext<'a> {
                 LiteralKind::Boolean => Ty::BOOL,
             },
             Expr::Path(path) => {
-                let inferred = self.infer_path(&path);
+                let inferred = self.infer_path(&path, expected);
                 if inferred.is_unknown()
                     && matches!(expected, Some(Ty::Option(_)))
                     && path_display(self.body, &path) == "None"
                     && self.is_unshadowed_path(&path)
                 {
-                    expected.cloned().unwrap_or(Ty::Unknown)
+                    let ty = expected.cloned().unwrap_or(Ty::Unknown);
+                    self.record_builtin_associated(&path, "None", &ty);
+                    ty
                 } else {
                     inferred
                 }
@@ -296,20 +327,13 @@ impl<'a> InferenceContext<'a> {
                 _ => Ty::Unknown,
             },
             Expr::Call { callee, args } => self.infer_call(expr_id, callee, &args, expected),
-            Expr::MethodCall { receiver, args, .. } => {
-                let mut diverges = self.infer_expr(receiver, None).is_never();
-                for argument in args {
-                    diverges |= self.infer_expr(argument, None).is_never();
-                }
-                if diverges { Ty::Never } else { Ty::Unknown }
-            }
-            Expr::Field { base, .. } => {
-                if self.infer_expr(base, None).is_never() {
-                    Ty::Never
-                } else {
-                    Ty::Unknown
-                }
-            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                type_args,
+                args,
+            } => self.infer_method_call(expr_id, receiver, method, &type_args, &args, expected),
+            Expr::Field { base, field } => self.infer_field(base, field),
             Expr::Index { base, index } => {
                 let base_ty = self.infer_expr(base, None);
                 let index_expected = match &base_ty {
@@ -386,24 +410,7 @@ impl<'a> InferenceContext<'a> {
                 }
             }
             Expr::StructLiteral { path, fields } => {
-                let mut diverges = false;
-                for field in fields {
-                    diverges |= self.infer_expr(field.value(), None).is_never();
-                }
-                let ty = self
-                    .resolve_definition_path(&path)
-                    .filter(|definition| {
-                        matches!(definition.kind(), DefKind::Struct | DefKind::Enum)
-                    })
-                    .map(|definition| {
-                        Ty::Named(super::NamedTy::new(
-                            definition.id(),
-                            path_display(self.body, &path),
-                            Vec::new(),
-                        ))
-                    })
-                    .unwrap_or(Ty::Unknown);
-                if diverges { Ty::Never } else { ty }
+                self.infer_struct_literal(&path, &fields, expected)
             }
             Expr::MacroCall { macro_name, args } => self.infer_macro(macro_name, &args, expected),
             Expr::Block(block) => self.infer_block(block.statements(), block.tail(), expected),
@@ -682,7 +689,7 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
-    fn infer_path(&self, path: &[NameRefId]) -> Ty {
+    fn infer_path(&mut self, path: &[NameRefId], expected: Option<&Ty>) -> Ty {
         if let [name_ref] = path {
             match self.resolution.resolve(*name_ref) {
                 Some(LocalResolveResult::Resolved(local)) if local.owner() == self.body.id() => {
@@ -698,21 +705,53 @@ impl<'a> InferenceContext<'a> {
             }
         }
         let Some(definition) = self.resolve_definition_path(path) else {
-            return Ty::Unknown;
+            return self.infer_associated_path(path, expected);
         };
         match definition.kind() {
-            DefKind::Function | DefKind::ExternFunction => {
-                lower_callable_signature(self.def_map, definition)
-                    .map(Ty::Function)
-                    .unwrap_or(Ty::Unknown)
-            }
-            DefKind::Struct | DefKind::Enum => Ty::Named(super::NamedTy::new(
-                definition.id(),
-                path_display(self.body, path),
-                Vec::new(),
-            )),
+            DefKind::Function | DefKind::ExternFunction => self
+                .member_index
+                .callable(definition.id())
+                .map(Ty::Function)
+                .unwrap_or(Ty::Unknown),
+            DefKind::Struct | DefKind::Enum => self
+                .member_index
+                .type_template(definition.id())
+                .map(|template| Substitution::new().instantiate(template))
+                .unwrap_or(Ty::Unknown),
             _ => Ty::Unknown,
         }
+    }
+
+    fn infer_associated_path(&mut self, path: &[NameRefId], expected: Option<&Ty>) -> Ty {
+        let Some((member_ref, owner_path)) = path.split_last() else {
+            return Ty::Unknown;
+        };
+        let Some(owner) = self.resolve_definition_path(owner_path) else {
+            return Ty::Unknown;
+        };
+        if !matches!(owner.kind(), DefKind::Struct | DefKind::Enum) {
+            return Ty::Unknown;
+        }
+        let owner_id = owner.id();
+        let Some(name) = self
+            .body
+            .name_ref(*member_ref)
+            .and_then(|name_ref| name_ref.name())
+        else {
+            return Ty::Unknown;
+        };
+        let Some(resolution) = self.member_index.resolve_associated(owner_id, name) else {
+            return Ty::Unknown;
+        };
+        let mut ty = resolution.ty().clone();
+        if let Some(expected) = expected {
+            let mut substitution = resolution.substitution().clone();
+            if unify(&ty, expected, &mut substitution).is_match() {
+                ty = substitution.instantiate(&ty);
+            }
+        }
+        self.set_member(*member_ref, resolution);
+        ty
     }
 
     fn infer_closure(
@@ -771,6 +810,191 @@ impl<'a> InferenceContext<'a> {
         let ty = Ty::Closure(callable);
         self.set_expr(closure, ty.clone());
         ty
+    }
+
+    fn infer_field(&mut self, base: ExprId, field: NameRefId) -> Ty {
+        let receiver = self.infer_expr(base, None);
+        if receiver.is_never() {
+            return Ty::Never;
+        }
+        let Some(name) = self
+            .body
+            .name_ref(field)
+            .and_then(|name_ref| name_ref.name())
+        else {
+            return Ty::Unknown;
+        };
+        let Some(resolution) = self.member_index.resolve_field(&receiver, name) else {
+            return Ty::Unknown;
+        };
+        let ty = resolution.ty().clone();
+        self.set_member(field, resolution);
+        ty
+    }
+
+    fn infer_struct_literal(
+        &mut self,
+        path: &[NameRefId],
+        fields: &[StructField],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let Some((template, variant)) = self.struct_literal_target(path) else {
+            let mut diverges = false;
+            for field in fields {
+                diverges |= self.infer_expr(field.value(), None).is_never();
+            }
+            return if diverges { Ty::Never } else { Ty::Unknown };
+        };
+
+        let mut substitution = Substitution::new();
+        if let Some(expected) = expected {
+            let _ = unify(&template, expected, &mut substitution);
+        }
+        let mut diverges = false;
+        let mut resolved_fields = Vec::new();
+        for field in fields {
+            let Some(name) = self
+                .body
+                .name_ref(field.name())
+                .and_then(|name_ref| name_ref.name())
+            else {
+                diverges |= self.infer_expr(field.value(), None).is_never();
+                continue;
+            };
+            let current_ty = substitution.apply(&template);
+            let resolution = match variant {
+                Some(variant) => {
+                    self.member_index
+                        .resolve_variant_field(variant, &current_ty, name)
+                }
+                None => self.member_index.resolve_field(&current_ty, name),
+            };
+            let expected_field = resolution.as_ref().map(MemberResolution::ty);
+            let actual = self.infer_expr(field.value(), expected_field);
+            diverges |= actual.is_never();
+            if let Some(expected_field) = expected_field {
+                let _ = unify(expected_field, &actual, &mut substitution);
+                self.report_mismatch(
+                    InferenceSource::Expr(field.value()),
+                    expected_field,
+                    &actual,
+                    TypeMismatchContext::Assignment,
+                );
+                resolved_fields.push((field.name(), name.to_string()));
+            }
+        }
+
+        let result = substitution.instantiate(&template);
+        for (name_ref, name) in resolved_fields {
+            let resolution = match variant {
+                Some(variant) => self
+                    .member_index
+                    .resolve_variant_field(variant, &result, &name),
+                None => self.member_index.resolve_field(&result, &name),
+            };
+            if let Some(resolution) = resolution {
+                self.set_member(name_ref, resolution);
+            }
+        }
+        if diverges { Ty::Never } else { result }
+    }
+
+    fn struct_literal_target(&mut self, path: &[NameRefId]) -> Option<(Ty, Option<DefId>)> {
+        if let Some(definition) = self.resolve_definition_path(path)
+            && definition.kind() == DefKind::Struct
+        {
+            return Some((
+                self.member_index.type_template(definition.id())?.clone(),
+                None,
+            ));
+        }
+
+        let (member_ref, owner_path) = path.split_last()?;
+        let owner_id = {
+            let owner = self.resolve_definition_path(owner_path)?;
+            (owner.kind() == DefKind::Enum).then_some(owner.id())?
+        };
+        let name = self.body.name_ref(*member_ref)?.name()?;
+        let resolution = self.member_index.resolve_associated(owner_id, name)?;
+        if resolution.kind() != MemberKind::Variant {
+            return None;
+        }
+        let MemberTarget::Definition(variant) = resolution.target() else {
+            return None;
+        };
+        let template = resolution.ty().clone();
+        if !matches!(template, Ty::Named(_)) {
+            return None;
+        }
+        self.set_member(*member_ref, resolution);
+        Some((template, Some(variant)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_method_call(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        method: NameRefId,
+        type_args: &[TypeRef],
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let receiver_ty = self.infer_expr(receiver, None);
+        if receiver_ty.is_never() {
+            for argument in args {
+                self.infer_expr(*argument, None);
+            }
+            return Ty::Never;
+        }
+        let Some(name) = self
+            .body
+            .name_ref(method)
+            .and_then(|name_ref| name_ref.name())
+        else {
+            return self.infer_unresolved_member_call(call, args);
+        };
+        let Some(resolution) =
+            self.member_index
+                .resolve_method_in(&receiver_ty, name, self.owner.id())
+        else {
+            return self.infer_unresolved_member_call(call, args);
+        };
+        let Ty::Function(callable) = resolution.ty() else {
+            return self.infer_unresolved_member_call(call, args);
+        };
+        let callable = callable.clone();
+        let target = member_call_target(resolution.target());
+        let mut substitution = resolution.substitution().clone();
+        let requirements = resolution.requirements().to_vec();
+        for (generic, type_arg) in resolution.generic_params().iter().zip(type_args) {
+            substitution.insert(*generic, self.lower_type(self.owner, type_arg));
+        }
+        self.set_member(method, resolution);
+        self.infer_callable_call(
+            call,
+            target,
+            &callable,
+            args,
+            expected,
+            substitution,
+            &requirements,
+            false,
+        )
+    }
+
+    fn infer_unresolved_member_call(&mut self, call: ExprId, args: &[ExprId]) -> Ty {
+        let mut diverges = false;
+        for argument in args {
+            diverges |= self.infer_expr(*argument, None).is_never();
+        }
+        self.calls[call.index() as usize] = Some(CallInfo {
+            target: CallTarget::Unresolved,
+            parameters: Vec::new(),
+            return_type: Ty::Unknown,
+            substitution: Substitution::new(),
+        });
+        if diverges { Ty::Never } else { Ty::Unknown }
     }
 
     fn infer_call(
@@ -850,6 +1074,36 @@ impl<'a> InferenceContext<'a> {
             .and_then(|target| self.def_map.definition(target))
             .and_then(callable_signature)
             .is_some_and(CallableSignature::is_variadic);
+        let requirements = match target {
+            CallTarget::Definition(definition) => {
+                self.member_index.callable_requirements(definition).to_vec()
+            }
+            CallTarget::Closure(_) | CallTarget::Builtin | CallTarget::Unresolved => Vec::new(),
+        };
+        self.infer_callable_call(
+            call,
+            target,
+            &callable,
+            args,
+            expected,
+            Substitution::new(),
+            &requirements,
+            variadic,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_callable_call(
+        &mut self,
+        call: ExprId,
+        target: CallTarget,
+        callable: &CallableTy,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+        mut substitution: Substitution,
+        requirements: &[CallableRequirement],
+        variadic: bool,
+    ) -> Ty {
         if (!variadic && args.len() != callable.params().len())
             || (variadic && args.len() < callable.params().len())
         {
@@ -860,7 +1114,6 @@ impl<'a> InferenceContext<'a> {
             });
         }
 
-        let mut substitution = Substitution::new();
         let mut diverges = false;
         for (index, argument) in args.iter().enumerate() {
             let parameter = callable.params().get(index);
@@ -887,6 +1140,7 @@ impl<'a> InferenceContext<'a> {
         if let Some(expected) = expected {
             let _ = unify(callable.return_ty(), expected, &mut substitution);
         }
+        self.report_unsatisfied_bounds(call, &substitution, requirements);
         let parameters = callable
             .params()
             .iter()
@@ -900,6 +1154,45 @@ impl<'a> InferenceContext<'a> {
             substitution,
         });
         if diverges { Ty::Never } else { return_type }
+    }
+
+    fn report_unsatisfied_bounds(
+        &mut self,
+        call: ExprId,
+        substitution: &Substitution,
+        requirements: &[CallableRequirement],
+    ) {
+        let mut failures = std::collections::BTreeSet::new();
+        for (generic, actual) in substitution.iter() {
+            if !matches!(actual, Ty::Named(_)) || !actual.is_concrete() {
+                continue;
+            }
+            for bound in self.member_index.bounds(generic) {
+                if !self.member_index.implements_trait(actual, bound.trait_id()) {
+                    failures.insert((actual.clone(), bound.trait_id()));
+                }
+            }
+        }
+        for (target, bound) in requirements {
+            let actual = substitution.apply(target);
+            if !matches!(actual, Ty::Named(_)) || !actual.is_concrete() {
+                continue;
+            }
+            if !self
+                .member_index
+                .implements_trait(&actual, bound.trait_id())
+            {
+                failures.insert((actual, bound.trait_id()));
+            }
+        }
+        self.diagnostics
+            .extend(failures.into_iter().map(|(actual, trait_id)| {
+                InferenceDiagnostic::UnsatisfiedTraitBound {
+                    call,
+                    actual,
+                    trait_id,
+                }
+            }));
     }
 
     fn infer_builtin_call(
@@ -941,6 +1234,8 @@ impl<'a> InferenceContext<'a> {
                 expected: expected_arity,
                 actual: args.len(),
             });
+            let owner_ty = builtin_constructor_owner(&name, expected);
+            self.record_builtin_associated(&path, &name, &owner_ty);
             self.set_expr(callee, Ty::Unknown);
             return Some(CallInfo {
                 target: CallTarget::Builtin,
@@ -1000,6 +1295,7 @@ impl<'a> InferenceContext<'a> {
         } else {
             return_type
         };
+        self.record_builtin_associated(&path, &name, &return_type);
         self.set_expr(callee, Ty::Unknown);
         Some(CallInfo {
             target: CallTarget::Builtin,
@@ -1007,6 +1303,19 @@ impl<'a> InferenceContext<'a> {
             return_type,
             substitution: Substitution::new(),
         })
+    }
+
+    fn record_builtin_associated(&mut self, path: &[NameRefId], name: &str, owner_ty: &Ty) {
+        let member_name = name.rsplit("::").next().unwrap_or(name);
+        let Some(resolution) = self
+            .member_index
+            .resolve_associated_ty(owner_ty, member_name)
+        else {
+            return;
+        };
+        if let Some(name_ref) = path.last() {
+            self.set_member(*name_ref, resolution);
+        }
     }
 
     fn infer_macro(&mut self, name_ref: NameRefId, args: &[ExprId], expected: Option<&Ty>) -> Ty {
@@ -1111,7 +1420,7 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn lower_type(&self, definition: &Definition, type_ref: &TypeRef) -> Ty {
-        lower_type(self.def_map, definition, type_ref)
+        self.member_index.lower_type(definition.id(), type_ref)
     }
 
     fn expect_bool(&mut self, expr: ExprId, actual: &Ty) {
@@ -1281,6 +1590,19 @@ impl<'a> InferenceContext<'a> {
             *slot = ty;
         }
     }
+
+    fn set_member(&mut self, name_ref: NameRefId, resolution: MemberResolution) {
+        if let Some(slot) = self.member_resolutions.get_mut(name_ref.index() as usize) {
+            *slot = Some(resolution);
+        }
+    }
+}
+
+fn member_call_target(target: MemberTarget) -> CallTarget {
+    match target {
+        MemberTarget::Definition(definition) => CallTarget::Definition(definition),
+        MemberTarget::Builtin(_) => CallTarget::Builtin,
+    }
 }
 
 fn callable_signature(definition: &Definition) -> Option<&CallableSignature> {
@@ -1290,57 +1612,27 @@ fn callable_signature(definition: &Definition) -> Option<&CallableSignature> {
     }
 }
 
-fn lower_callable_signature(def_map: &DefMap, definition: &Definition) -> Option<CallableTy> {
-    let signature = callable_signature(definition)?;
-    let params = signature
-        .params()
-        .iter()
-        .map(|parameter| lower_type(def_map, definition, parameter.type_ref()))
-        .collect();
-    let return_ty = lower_type(def_map, definition, signature.return_type());
-    Some(CallableTy::new(params, return_ty).with_target(definition.id()))
-}
-
-fn lower_type(def_map: &DefMap, definition: &Definition, type_ref: &TypeRef) -> Ty {
-    let generics = callable_signature(definition)
-        .map(|signature| signature.generic_params())
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, parameter)| {
-            Some((
-                parameter.name()?.to_string(),
-                GenericParamId::new(definition.id(), u32::try_from(index).ok()?),
-            ))
-        })
-        .collect::<Vec<_>>();
-    let resolve_named = |path: &str| {
-        let segments = path.split("::").collect::<Vec<_>>();
-        let resolved = if segments.first() == Some(&"self") {
-            def_map.resolve_path_unique(definition.module_id(), segments.get(1..)?)
-        } else {
-            def_map.resolve_path_lexical_unique(definition.module_id(), &segments)
-        };
-        resolved
-            .filter(|definition| {
-                matches!(
-                    definition.kind(),
-                    DefKind::Struct | DefKind::Enum | DefKind::TypeAlias
-                )
-            })
-            .map(Definition::id)
-    };
-    TypeLoweringContext::new()
-        .with_generic_params(generics)
-        .with_named_resolver(&resolve_named)
-        .lower(type_ref)
-}
-
 fn path_display(body: &Body, path: &[NameRefId]) -> String {
     path.iter()
         .filter_map(|name_ref| body.name_ref(*name_ref)?.name())
         .collect::<Vec<_>>()
         .join("::")
+}
+
+fn builtin_constructor_owner(name: &str, expected: Option<&Ty>) -> Ty {
+    match name {
+        "Some" => match expected {
+            Some(Ty::Option(_)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Option(Box::new(Ty::Unknown)),
+        },
+        "Ok" | "Err" => match expected {
+            Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+        },
+        "Vec::new" => Ty::Vec(Box::new(Ty::Unknown)),
+        "HashMap::new" => Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+        _ => Ty::Unknown,
+    }
 }
 
 fn literal_ty(kind: LiteralKind) -> Ty {

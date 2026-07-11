@@ -14,7 +14,7 @@ use crate::{
     BaseDb,
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefMap, InferenceResult, ItemTree,
-        module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
+        MemberIndex, module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
@@ -105,6 +105,14 @@ impl Analysis {
 
     pub fn def_map_for_project(&self, project_id: ProjectId) -> Option<Arc<DefMap>> {
         self.db.project_def_map(project_id)
+    }
+
+    pub fn member_index(&self, root_file: FileId) -> Arc<MemberIndex> {
+        self.db.member_index(root_file)
+    }
+
+    pub fn member_index_for_project(&self, project_id: ProjectId) -> Option<Arc<MemberIndex>> {
+        self.db.project_member_index(project_id)
     }
 
     pub fn body(&self, def_id: DefId) -> Option<Arc<Body>> {

@@ -453,6 +453,21 @@ impl<'a> TypeLoweringContext<'a> {
     }
 
     fn lower_path(&self, path: String, args: Vec<Ty>) -> Ty {
+        if !path.contains("::")
+            && args.is_empty()
+            && let Some(id) = self.generic_params.get(&path)
+        {
+            return Ty::GenericParam(GenericParamTy::new(*id, path));
+        }
+
+        // A project definition is stronger evidence than a builtin spelling.
+        // This keeps workspace/library precedence intact for legal names such
+        // as a user-defined `Vec`, while unresolved spellings still fall back
+        // to the analysis-owned builtin model below.
+        if let Some(definition) = self.named_resolver.and_then(|resolve| resolve(&path)) {
+            return Ty::Named(NamedTy::new(definition, path, args));
+        }
+
         let builtin = match path.as_str() {
             "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 if args.is_empty() =>
@@ -503,16 +518,6 @@ impl<'a> TypeLoweringContext<'a> {
             return Ty::Unknown;
         }
 
-        if !path.contains("::")
-            && args.is_empty()
-            && let Some(id) = self.generic_params.get(&path)
-        {
-            return Ty::GenericParam(GenericParamTy::new(*id, path));
-        }
-
-        if let Some(definition) = self.named_resolver.and_then(|resolve| resolve(&path)) {
-            return Ty::Named(NamedTy::new(definition, path, args));
-        }
         Ty::Unknown
     }
 }
@@ -585,7 +590,13 @@ impl<'source, 'context> TypeParser<'source, 'context> {
         } else {
             Vec::new()
         };
-        if path == "Box" && args.len() == 1 {
+        if path == "Box"
+            && args.len() == 1
+            && self
+                .context
+                .named_resolver
+                .is_none_or(|resolve| resolve(&path).is_none())
+        {
             return args.into_iter().next();
         }
         Some(self.context.lower_path(path, args))
@@ -897,6 +908,10 @@ fn bind_generic(
         };
     }
     if let Some(bound) = substitution.get(param.id()).cloned() {
+        if matches!(&bound, Ty::GenericParam(bound_param) if bound_param.id() == param.id()) {
+            substitution.insert(param.id(), actual.clone());
+            return UnifyResult::Exact;
+        }
         return unify_inner(&bound, actual, substitution);
     }
     substitution.insert(param.id(), actual.clone());
@@ -974,6 +989,31 @@ mod tests {
         assert_eq!(named.path(), "model::Widget");
         assert_eq!(named.args(), &[Ty::I64]);
         assert_eq!(named.definition(), widget);
+
+        let user_vec = DefId::new(3);
+        let user_box = DefId::new(4);
+        let resolve = |path: &str| match path {
+            "Vec" => Some(user_vec),
+            "Box" => Some(user_box),
+            _ => None,
+        };
+        let known = TypeLoweringContext::new().with_named_resolver(&resolve);
+        let Ty::Named(named) = known.lower_syntax("Vec") else {
+            panic!("a proven project type must shadow builtin metadata");
+        };
+        assert_eq!(named.definition(), user_vec);
+        let Ty::Named(named) = known.lower_syntax("Box<i64>") else {
+            panic!("a proven project Box must not be lowered as transparent syntax");
+        };
+        assert_eq!(named.definition(), user_box);
+        assert_eq!(named.args(), &[Ty::I64]);
+
+        let string_param = GenericParamId::new(DefId::new(5), 0);
+        let generic_context = TypeLoweringContext::new().with_generic_param("String", string_param);
+        assert_eq!(
+            generic_context.lower_syntax("String"),
+            generic(string_param, "String")
+        );
     }
 
     #[test]
@@ -1017,6 +1057,14 @@ mod tests {
             )),
             Ty::Result(Box::new(Ty::I64), Box::new(Ty::Unknown))
         );
+
+        let mut cyclic = Substitution::new();
+        cyclic.insert(t, generic(t, "T"));
+        assert_eq!(
+            unify(&generic(t, "T"), &Ty::I64, &mut cyclic),
+            UnifyResult::Exact
+        );
+        assert_eq!(cyclic.get(t), Some(&Ty::I64));
     }
 
     #[test]

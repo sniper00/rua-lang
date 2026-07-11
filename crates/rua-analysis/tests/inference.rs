@@ -560,16 +560,16 @@ fn associated_shadow() -> i64 { /*associated_call*/Vec::new() }
     let associated_call = expr_at(&associated, "/*associated_call*/", |expr| {
         matches!(expr, Expr::Call { .. })
     });
-    assert_eq!(
+    assert!(matches!(
         associated
             .inference
             .call_info(associated_call)
             .map(|info| info.target()),
-        Some(CallTarget::Unresolved)
-    );
+        Some(CallTarget::Definition(_))
+    ));
     assert_eq!(
         associated.inference.type_of_expr(associated_call),
-        Some(&Ty::Unknown)
+        Some(&Ty::I64)
     );
     assert!(associated.inference.diagnostics().is_empty());
 }

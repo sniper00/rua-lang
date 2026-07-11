@@ -11,7 +11,7 @@ use rua_syntax::{
 use crate::{
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, IdentityContext,
-        IdentityInterner, InferenceResult, ItemSourceKind, ItemTree, ModuleId,
+        IdentityInterner, InferenceResult, ItemSourceKind, ItemTree, MemberIndex, ModuleId,
         body::{lower_fn_body, lower_trait_method_body},
         infer::infer_body,
     },
@@ -29,6 +29,7 @@ pub struct BaseDb {
     parse_cache: RefCell<HashMap<FileId, Arc<Parse<SourceFile>>>>,
     item_tree_cache: RefCell<HashMap<FileId, Arc<ItemTree>>>,
     def_map_cache: RefCell<HashMap<DefMapKey, Arc<DefMap>>>,
+    member_index_cache: RefCell<HashMap<DefMapKey, MemberIndexCacheEntry>>,
     body_cache: RefCell<HashMap<DefId, BodyCacheEntry>>,
     local_resolution_cache: RefCell<HashMap<DefId, LocalResolutionCacheEntry>>,
     inference_cache: RefCell<HashMap<DefId, InferenceCacheEntry>>,
@@ -53,7 +54,14 @@ struct InferenceCacheEntry {
     body: Arc<Body>,
     resolution: Arc<BodyResolution>,
     def_map: Arc<DefMap>,
+    member_index: Arc<MemberIndex>,
     result: Arc<InferenceResult>,
+}
+
+#[derive(Clone, Debug)]
+struct MemberIndexCacheEntry {
+    def_map: Arc<DefMap>,
+    index: Arc<MemberIndex>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +88,7 @@ impl BaseDb {
     pub fn apply_change(&mut self, change: Change) {
         if !change.project_changes().is_empty() || !change.source_root_changes().is_empty() {
             self.def_map_cache.get_mut().clear();
+            self.member_index_cache.get_mut().clear();
         }
         for source_root_change in change.source_root_changes() {
             let SourceRootChange::Remove { source_root_id } = source_root_change else {
@@ -148,6 +157,7 @@ impl BaseDb {
         self.parse_cache.get_mut().remove(&file_id);
         self.item_tree_cache.get_mut().remove(&file_id);
         self.def_map_cache.get_mut().clear();
+        self.member_index_cache.get_mut().clear();
     }
 
     // Rowan red nodes are thread-local; Arc provides shared cache identity for
@@ -254,6 +264,35 @@ impl BaseDb {
         Some(def_map)
     }
 
+    pub fn member_index(&self, root_file: FileId) -> Arc<MemberIndex> {
+        let key = DefMapKey::Implicit(root_file);
+        let def_map = self.def_map(root_file);
+        self.member_index_for_map(key, def_map)
+    }
+
+    pub fn project_member_index(&self, project_id: ProjectId) -> Option<Arc<MemberIndex>> {
+        let key = DefMapKey::Project(project_id);
+        let def_map = self.project_def_map(project_id)?;
+        Some(self.member_index_for_map(key, def_map))
+    }
+
+    fn member_index_for_map(&self, key: DefMapKey, def_map: Arc<DefMap>) -> Arc<MemberIndex> {
+        if let Some(cached) = self.member_index_cache.borrow().get(&key)
+            && Arc::ptr_eq(&cached.def_map, &def_map)
+        {
+            return cached.index.clone();
+        }
+        let index = Arc::new(MemberIndex::build_shared(def_map.clone()));
+        self.member_index_cache.borrow_mut().insert(
+            key,
+            MemberIndexCacheEntry {
+                def_map,
+                index: index.clone(),
+            },
+        );
+        index
+    }
+
     /// Returns the semantic body owned by `def_id` in the current input revision.
     pub fn body(&self, def_id: DefId) -> Option<Arc<Body>> {
         self.body_with_source_map(def_id).map(|(body, _)| body)
@@ -275,6 +314,10 @@ impl BaseDb {
     }
 
     pub fn infer(&self, def_id: DefId) -> Option<Arc<InferenceResult>> {
+        let Some((context, _)) = self.definition_context(def_id) else {
+            self.inference_cache.borrow_mut().remove(&def_id);
+            return None;
+        };
         let Some(def_map) = self.current_definition_map(def_id) else {
             self.inference_cache.borrow_mut().remove(&def_id);
             return None;
@@ -287,21 +330,28 @@ impl BaseDb {
             self.inference_cache.borrow_mut().remove(&def_id);
             return None;
         };
+        let key = match context {
+            IdentityContext::Implicit(root_file) => DefMapKey::Implicit(root_file),
+            IdentityContext::Project(project_id) => DefMapKey::Project(project_id),
+        };
+        let member_index = self.member_index_for_map(key, def_map.clone());
         if let Some(cached) = self.inference_cache.borrow().get(&def_id)
             && Arc::ptr_eq(&cached.body, &body)
             && Arc::ptr_eq(&cached.resolution, &resolution)
             && Arc::ptr_eq(&cached.def_map, &def_map)
+            && Arc::ptr_eq(&cached.member_index, &member_index)
         {
             return Some(cached.result.clone());
         }
 
-        let result = Arc::new(infer_body(&body, &resolution, &def_map));
+        let result = Arc::new(infer_body(&body, &resolution, &def_map, &member_index));
         self.inference_cache.borrow_mut().insert(
             def_id,
             InferenceCacheEntry {
                 body,
                 resolution,
                 def_map,
+                member_index,
                 result: result.clone(),
             },
         );
