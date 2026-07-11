@@ -1,6 +1,6 @@
 # Rua Closures and Fused Iterators
 
-Status: accepted for Phase 4A implementation.
+Status: implemented in Phase 4A.
 
 This RFC fixes the syntax, semantic boundary, and Lua performance contract for
 the Phase 4A closure and iterator work. It does not extend Rua with Rust
@@ -130,12 +130,11 @@ out of scope for the same reason.
 
 ## 7. Golden Contract
 
-The registered Phase 4A TODO fixtures are under
+The active Phase 4A fixtures are under
 tests/golden/phase4a/{compile-pass,compile-fail}. The normal golden test checks
-that every planned case remains registered; the compile-pass TODO runner is
-ignored until the corresponding implementation steps land.
+that every case remains registered and runs all pass/fail fixtures by default.
 
-As implementation proceeds, a TODO pass case moves to compile-pass with an
-exact .lua.golden, and a TODO failure moves to compile-fail with an exact
-.diag.golden. Iterator codegen goldens additionally assert the forbidden Lua
-shapes from section 5.
+Compile-pass cases have exact .lua.golden output and compile-fail cases have
+exact .diag.golden diagnostics. Iterator codegen goldens additionally assert
+the forbidden Lua shapes from section 5, a single fused loop, and one result
+Vec allocation for collect.

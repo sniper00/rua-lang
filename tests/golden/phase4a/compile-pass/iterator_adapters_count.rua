@@ -1,0 +1,10 @@
+fn main() -> i64 {
+    let values = vec![1, 2, 3, 4];
+    values
+        .into_iter()
+        .filter_map(|value| Some(value))
+        .enumerate()
+        .skip(1)
+        .take(2)
+        .count()
+}

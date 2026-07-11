@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/closure_return_mismatch.rua:2: closure expects return type `bool`, found `String`

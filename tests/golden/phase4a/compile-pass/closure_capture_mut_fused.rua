@@ -1,0 +1,10 @@
+fn main() -> i64 {
+    let mut total = 0;
+    (0..4)
+        .map(|value| {
+            total = total + value;
+            value
+        })
+        .count();
+    total
+}

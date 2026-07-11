@@ -11,3 +11,7 @@ completion items, symbols, locations, and workspace edits.
 The `.ruai` hover/goto/completion/references/rename snapshots live under
 `tests/golden/ruai/` and are reused as the declaration-file part of the IDE
 matrix.
+
+`closure_iterator.snap` is produced by `rua-analysis`; it records inferred
+closure parameter types, goto/completion/references/rename, and protocol-neutral
+semantic tokens for closure parameters, adapter methods, and range operators.

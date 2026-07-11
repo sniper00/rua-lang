@@ -249,10 +249,10 @@ impl Analysis {
     /// resolutions and bindings whose type could not be inferred are returned
     /// unchanged.
     fn enrich_local(&self, mut res: crate::nameres::Resolution) -> crate::nameres::Resolution {
-        if res.kind == crate::nameres::RefKind::Local {
-            if let Some(display) = self.bindings.display_at(0, res.target_range.0) {
-                res.detail = display.to_owned();
-            }
+        if res.kind == crate::nameres::RefKind::Local
+            && let Some(display) = self.bindings.display_at(0, res.target_range.0)
+        {
+            res.detail = display.to_owned();
         }
         res
     }

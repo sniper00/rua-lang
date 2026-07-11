@@ -20,6 +20,7 @@ parser/ranges/      token and text-range snapshots
 modules/            multi-file compiler fixtures
 ruai/               declaration and external-library fixtures
 ide/                completion, hover, navigation, and rename snapshots
+phase4a/            active closure and fused-iterator compiler goldens
 ```
 
 Use lower snake case for case names and keep one primary behavior per case.
@@ -50,6 +51,7 @@ Focused compiler checks are available as:
 cargo test -p ruac --test golden golden_compile_pass
 cargo test -p ruac --test golden golden_compile_fail
 cargo test -p ruac --test golden golden_ruai
+cargo test -p ruac --test golden phase4a_golden
 ```
 
 The shared parser corpus and CST byte-range snapshots are checked with:
@@ -70,6 +72,7 @@ The general IDE query snapshots are checked with:
 
 ```sh
 cargo test -p rua-syntax --test ide_goldens ide_snapshot_golden -- --exact
+cargo test -p rua-analysis --test closure_iterator_ide closure_iterator_ide_golden -- --exact
 ```
 
 Missing expected files and byte mismatches fail the test and print the explicit
@@ -97,6 +100,7 @@ General IDE snapshots also require an explicit guarded update:
 
 ```sh
 RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test ide_goldens update_ide_snapshots -- --ignored --exact
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-analysis --test closure_iterator_ide update_closure_iterator_ide_golden -- --ignored --exact
 ```
 
 All update tests are ignored and guarded by `RUA_UPDATE_GOLDENS=1`; either
@@ -116,6 +120,8 @@ mechanism alone is insufficient to write files.
   and read-only rename behavior.
 - General IDE snapshots cover local/member/path completion, local and
   cross-file hover/goto/references/rename, diagnostics, and document symbols.
+- The Phase 4A IDE snapshot covers inferred closure parameters, cursor queries,
+  semantic tokens for parameters/adapters/ranges, and fast diagnostic stability.
 - `COVERAGE.md` records direct golden evidence separately from unit-test
   coverage and keeps unsupported or partially covered behavior explicit.
 - A compile-pass case that fails, or a compile-fail case that succeeds, always

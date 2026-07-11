@@ -1,7 +1,11 @@
+use std::{fmt::Write as _, fs, path::PathBuf};
+
 use rua_analysis::{
     AnalysisHost, Change, Diagnostic, DiagnosticOrigin, FileId, SemanticTokenKind, TextRange,
     reconcile_diagnostics,
 };
+
+const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 
 fn analysis(source: &str) -> (rua_analysis::Analysis, FileId) {
     let file_id = FileId::new(0);
@@ -142,4 +146,122 @@ fn closure_iterator_ide_degrades_uninferred_parameters_to_unknown() {
     let parameters = analysis.closure_parameters(file_id);
     assert_eq!(parameters.len(), 1);
     assert_eq!(parameters[0].ty(), "Unknown");
+}
+
+fn closure_iterator_golden_paths() -> (PathBuf, PathBuf) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/ide");
+    (
+        root.join("closure_iterator.rua"),
+        root.join("closure_iterator.snap"),
+    )
+}
+
+fn closure_iterator_snapshot() -> String {
+    let (source_path, _) = closure_iterator_golden_paths();
+    let source = fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", source_path.display()));
+    let (analysis, file_id) = analysis(&source);
+    let syntax = rua_syntax::analysis::Analysis::new(&source);
+    let mut output = String::new();
+
+    for parameter in analysis.closure_parameters(file_id) {
+        writeln!(
+            output,
+            "parameter: {} {}..{} type={}",
+            parameter.name(),
+            parameter.range().start(),
+            parameter.range().end(),
+            parameter.ty()
+        )
+        .unwrap();
+    }
+    for token in analysis.semantic_tokens(file_id) {
+        let range = token.range();
+        writeln!(
+            output,
+            "token: {:?} {}..{} text={:?} declaration={}",
+            token.kind(),
+            range.start(),
+            range.end(),
+            &source[range.start() as usize..range.end() as usize],
+            token.is_declaration()
+        )
+        .unwrap();
+    }
+
+    let use_offset = nth_word(&source, "item", 1);
+    let definition = syntax
+        .definition_at(use_offset)
+        .expect("closure parameter definition");
+    let completion = syntax
+        .scope_locals(use_offset)
+        .into_iter()
+        .find(|local| local.name == "item")
+        .expect("closure parameter completion");
+    writeln!(output, "query: item at {use_offset}").unwrap();
+    writeln!(
+        output,
+        "completion: {} {:?}",
+        completion.name, completion.detail
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "definition: {}..{} {:?}",
+        definition.target_range.0, definition.target_range.1, definition.detail
+    )
+    .unwrap();
+    for (start, end) in syntax.references_at(use_offset) {
+        writeln!(
+            output,
+            "reference: {start}..{end} {:?}",
+            &source[start..end]
+        )
+        .unwrap();
+    }
+    for (start, end, replacement) in syntax.rename_edits(use_offset, "element").unwrap() {
+        writeln!(
+            output,
+            "rename: {start}..{end} {:?} -> {:?}",
+            &source[start..end],
+            replacement
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "fast diagnostics: {}",
+        analysis.diagnostics(file_id).len()
+    )
+    .unwrap();
+    output
+}
+
+fn assert_closure_iterator_snapshot(update: bool) {
+    let (_, snapshot_path) = closure_iterator_golden_paths();
+    let actual = closure_iterator_snapshot();
+    if update {
+        fs::write(&snapshot_path, actual)
+            .unwrap_or_else(|error| panic!("cannot write {}: {error}", snapshot_path.display()));
+        return;
+    }
+    let expected = fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    assert_eq!(expected, actual, "closure/iterator IDE snapshot changed");
+}
+
+#[test]
+fn closure_iterator_ide_golden() {
+    assert_closure_iterator_snapshot(false);
+}
+
+#[test]
+#[ignore = "updates repository IDE snapshot; run the documented explicit command"]
+fn update_closure_iterator_ide_golden() {
+    assert_eq!(
+        std::env::var(UPDATE_ENV).as_deref(),
+        Ok("1"),
+        "refusing to update without {UPDATE_ENV}=1"
+    );
+    assert_closure_iterator_snapshot(true);
 }

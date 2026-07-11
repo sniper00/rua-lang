@@ -1,6 +1,6 @@
 # Rua Golden 用例清单
 
-> 状态：施工清单。
+> 状态：Phase 0 基线与 Phase 4A 扩展已落地；实际覆盖状态见 `tests/golden/COVERAGE.md`。
 > 目的：补足现有 `tests/fixtures/examples/*.rua` 覆盖不足的问题，为 `ruac` oracle、双 parser conformance、IDE parity 提供系统化 fixture。
 
 ## 1. 目录约定
@@ -17,6 +17,7 @@ tests/golden/
   modules/
   ruai/
   ide/
+  phase4a/
   COVERAGE.md
 ```
 
@@ -76,22 +77,22 @@ tests/golden/
 | CP040 | `compile-pass/trait_where_clause.rua` | `where` clause |
 | CP041 | `compile-pass/trait_method_generic.rua` | method-level generic |
 | CP042 | `compile-pass/comments_whitespace_stability.rua` | comments/spacing should not change semantics |
-| CP043 | `compile-pass/closure_expr_inferred.rua` | `|x| x + 1` inferred closure |
-| CP044 | `compile-pass/closure_block_typed.rua` | typed block closure `|x: T| -> U { ... }` |
-| CP045 | `compile-pass/closure_capture_read.rua` | read-only capture through Lua upvalue |
-| CP046 | `compile-pass/closure_capture_mut_immediate.rua` | immediate mutable capture if supported |
+| CP043 | `phase4a/compile-pass/closure_expr_inferred.rua` | `|x| x + 1` inferred closure |
+| CP044 | `phase4a/compile-pass/closure_block_typed.rua` | typed block closure `|x: T| -> U { ... }` |
+| CP045 | `phase4a/compile-pass/closure_capture_read.rua` | read-only capture through Lua upvalue |
+| CP046 | `phase4a/compile-pass/closure_capture_mut_fused.rua` | mutable capture in an immediate fused consumer |
 | CP047 | `compile-pass/iterator_range_for_exclusive.rua` | `for x in a..b` numeric loop |
 | CP048 | `compile-pass/iterator_range_for_inclusive.rua` | `for x in a..=b` numeric loop |
-| CP049 | `compile-pass/iterator_vec_for.rua` | `for x in xs.iter()` over `Vec.n` |
-| CP050 | `compile-pass/iterator_map_collect_vec.rua` | `.map(|x| ..).collect::<Vec<_>>()` |
-| CP051 | `compile-pass/iterator_filter_collect_vec.rua` | `.filter(|x| ..).collect::<Vec<_>>()` |
-| CP052 | `compile-pass/iterator_map_filter_fused_for.rua` | map/filter fused into one `for` loop |
-| CP053 | `compile-pass/iterator_enumerate.rua` | `.enumerate()` pair/index lowering |
-| CP054 | `compile-pass/iterator_take_skip.rua` | `.take()` / `.skip()` loop bounds |
-| CP055 | `compile-pass/iterator_fold_sum.rua` | `.fold(init, |acc, x| ..)` accumulator |
-| CP056 | `compile-pass/iterator_any_all_find.rua` | `any` / `all` / `find` early break |
-| CP057 | `compile-pass/iterator_filter_map_option.rua` | `filter_map` with `Option` |
-| CP058 | `compile-pass/iterator_chain_no_materialize.rua` | no intermediate Vec/coroutine for simple chains |
+| CP049 | `phase4a/compile-pass/iterator_vec_for.rua` | `for x in xs.iter()` over `Vec.n` |
+| CP050 | `phase4a/compile-pass/iterator_map_filter_collect.rua` | map/filter/collect chain |
+| CP051 | `phase4a/compile-pass/iterator_map_filter_collect.rua` | filter + collect into `Vec<_>` |
+| CP052 | `phase4a/compile-pass/iterator_map_filter_collect.rua` | one fused loop with no intermediate Vec |
+| CP053 | `phase4a/compile-pass/iterator_adapters_count.rua` | `.enumerate()` pair/index lowering |
+| CP054 | `phase4a/compile-pass/iterator_adapters_count.rua` | `.take()` / `.skip()` loop bounds |
+| CP055 | `phase4a/compile-pass/iterator_fold.rua` | `.fold(init, |acc, x| ..)` accumulator |
+| CP056 | `phase4a/compile-pass/iterator_{any,all,find}.rua` | `any` / `all` / `find` early break |
+| CP057 | `phase4a/compile-pass/iterator_adapters_count.rua` | `filter_map` with `Option` |
+| CP058 | `phase4a/compile-pass/iterator_map_filter_collect.rua` | no intermediate Vec/coroutine for simple chains |
 
 ## 3. Multi-File Module Golden
 
@@ -152,17 +153,17 @@ tests/golden/
 | CF038 | `compile-fail/result_ok_err_wrong_arity.rua` | `Ok`/`Err` arity |
 | CF039 | `compile-fail/extern_wrong_abi.rua` | invalid extern ABI if checked |
 | CF040 | `compile-fail/std_builtin_wrong_usage.rua` | builtin misuse |
-| CF041 | `compile-fail/closure_param_cannot_infer.rua` | closure parameter type cannot be inferred |
-| CF042 | `compile-fail/closure_return_mismatch.rua` | closure return type mismatch |
-| CF043 | `compile-fail/closure_mut_capture_invalid.rua` | unsupported mutable capture |
-| CF044 | `compile-fail/closure_escape_unsupported.rua` | unsupported escaping closure |
-| CF045 | `compile-fail/iterator_non_iterable_source.rua` | `for x in value` where value is not iterable |
-| CF046 | `compile-fail/iterator_map_arg_not_closure.rua` | `.map()` argument is not closure/function |
-| CF047 | `compile-fail/iterator_filter_not_bool.rua` | filter predicate does not return bool |
-| CF048 | `compile-fail/iterator_collect_type_mismatch.rua` | collect target type mismatch |
+| CF041 | `phase4a/compile-fail/closure_param_cannot_infer.rua` | closure parameter type cannot be inferred |
+| CF042 | `phase4a/compile-fail/closure_return_mismatch.rua` | closure return type mismatch |
+| CF043 | `phase4a/compile-fail/closure_mut_capture_invalid.rua` | unsupported mutable capture |
+| CF044 | `phase4a/compile-fail/closure_escape_unsupported.rua` | unsupported escaping closure |
+| CF045 | `phase4a/compile-fail/iterator_non_iterable_source.rua` | `for x in value` where value is not iterable |
+| CF046 | `phase4a/compile-fail/iterator_map_arg_not_closure.rua` | `.map()` argument is not closure/function |
+| CF047 | `phase4a/compile-fail/iterator_filter_not_bool.rua` | filter predicate does not return bool |
+| CF048 | `phase4a/compile-fail/iterator_collect_mismatch.rua` | collect target type mismatch |
 | CF049 | `compile-fail/range_bound_type_mismatch.rua` | range bounds are not compatible integers |
 | CF050 | `compile-fail/for_pattern_mismatch.rua` | `for` pattern does not match item type |
-| CF051 | `compile-fail/iterator_escape_unsupported.rua` | iterator chain escapes when fallback unsupported |
+| CF051 | `phase4a/compile-fail/iterator_escape_unsupported.rua` | iterator chain escapes when fallback unsupported |
 
 ## 5. Parser / Range Golden
 
@@ -240,6 +241,7 @@ tests/golden/
 | IDE016 | `ide/diagnostics_fast.snap` | analysis diagnostics |
 | IDE017 | `ide/semantic_tokens.snap` | semantic token output |
 | IDE018 | `ide/inlay_hints.snap` | inlay hints |
+| IDE019 | `ide/closure_iterator.snap` | closure item types, cursor queries, and semantic tokens |
 
 ## 8. Coverage Rules
 

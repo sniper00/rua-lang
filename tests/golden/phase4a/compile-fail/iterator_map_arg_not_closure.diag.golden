@@ -1,0 +1,1 @@
+<golden>/phase4a/compile-fail/iterator_map_arg_not_closure.rua:2: iterator map argument must be a closure

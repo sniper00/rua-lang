@@ -14,9 +14,9 @@ name.ruai
 name/mod.ruai
 ```
 
-External library-root configuration, explicit out-of-tree mounts, and a
-separate library-over-std priority layer are not implemented yet. These
-fixtures deliberately do not simulate those layers inside the test harness.
-Accordingly, `library_mount_single_file` currently covers an adjacent
-`name.ruai` module, while `workspace_shadows_library` covers the implemented
-`.rua`-before-`.ruai` candidate order rather than source-root precedence.
+The `rua-analysis` VFS and LSP input layer now support external library roots,
+explicit out-of-tree mounts, read-only inputs, and workspace > library > std
+priority. Those behaviors have focused integration tests but not a shared
+disk-layout golden yet. Accordingly, `library_mount_single_file` still covers
+an adjacent `name.ruai` module, while `workspace_shadows_library` covers the
+compiler's `.rua`-before-`.ruai` candidate order.

@@ -16,10 +16,11 @@ Current inventory:
 
 - Compile pass: 43 `.rua` / `.lua.golden` pairs.
 - Compile fail: 42 `.rua` / `.diag.golden` pairs.
+- Phase 4A: 12 compile-pass and 9 compile-fail closure/iterator pairs.
 - Parser/range: 15 accept, 6 reject, and 15 byte-range cases.
 - `.ruai`: 5 compiler pass, 1 compiler fail, and 4 IDE snapshots.
-- General IDE: 14 snapshots across completion, navigation, references, rename,
-  diagnostics, and symbols.
+- General IDE: 15 snapshots across completion, navigation, references, rename,
+  diagnostics, symbols, and semantic tokens.
 
 | Feature | Compile pass | Compile fail | Parser/range | IDE snapshot | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -35,9 +36,9 @@ Current inventory:
 | `Vec<T>` | Yes | No | Yes | No | Basic codegen and index/type syntax covered; no shared element-mismatch diagnostic or Vec completion snapshot. |
 | `HashMap<K, V>` | Yes | No | No | No | Basic codegen only; key/value mismatch goldens and dedicated parser/IDE snapshots are missing. |
 | Std macros and runtime calls | Yes | No | Partial | No | `println!`, `format!`, and macro nodes appear in range fixtures; misuse diagnostics are missing. |
-| Numeric ranges and `for` | Yes | No | Yes | No | Both range forms now have compiler Lua coverage; invalid-bound diagnostics and IDE coverage are still missing. |
-| Closures | No | No | Yes | No | Both parsers accept expression/typed/block closures with range snapshots; typecheck/codegen are not implemented yet. |
-| Iterator adapters and fusion | No | No | Partial | No | Adapter-call closure syntax has parser/range coverage; iterator typing and fused codegen are not implemented yet. |
+| Numeric ranges and `for` | Yes | No | Yes | Partial | Both range forms have compiler Lua coverage and the range operator has a semantic-token snapshot; invalid-bound diagnostics and dedicated `for` IDE coverage are missing. |
+| Closures | Yes | Yes | Yes | Yes | Expression/typed/block closures, read/fused mutable capture, inference diagnostics, ranges, cursor queries, and semantic tokens are covered. |
+| Iterator adapters and fusion | Yes | Yes | Yes | Yes | All Phase 4A sources/adapters/consumers are type/codegen tested; exact Lua goldens enforce fused loops and the IDE snapshot covers item types and adapter tokens. |
 | Inline modules and `use` | Yes | Yes | Yes | Yes | Inline/nested modules, aliases/grouped imports, private imports, use ranges, module-path completion and symbols. |
 | File modules (`.rua`) | No | Yes | No | Yes | Missing-module rejection and IDE cross-file queries exist; compiler pass/codegen and dedicated parser/range cases are absent. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
@@ -46,7 +47,7 @@ Current inventory:
 | Traits, bounds, and `where` | Yes | Yes | Yes | Yes | Trait impl/default methods, generic method bounds, unknown/unsatisfied bounds, trait/impl ranges and member completion. |
 | Methods and receiver forms | Yes | Yes | Yes | Yes | Associated/self/mut-self methods, call errors, receiver parsing, method ranges and completion. |
 | Adjacent `.ruai` modules | Yes | Yes | Partial | Yes | Single-file/directory loading, declaration typecheck, codegen skip, hover/goto/completion/references/readonly rename. |
-| External `.ruai` library roots | No | No | No | No | `--lib`, configured out-of-tree mounts, workspace/library/std source-root precedence and watchers are not implemented. |
+| External `.ruai` library roots | No | No | No | No | VFS source-root precedence and configured LSP mounts are implemented and integration-tested, but no shared out-of-tree golden or watcher snapshot exists. |
 | `.ruai` declaration restrictions | Partial | No | Partial | Yes | Declaration modules are skipped by codegen, but bodies are currently accepted and no invalid-body diagnostic golden exists. |
 | Parse/name/type diagnostics | N/A | Yes | Yes | Yes | Exact compiler messages plus parser recovery and fast IDE diagnostics are covered. |
 | Diagnostic codes and precise ranges | N/A | Partial | Partial | Partial | Compiler goldens preserve path/line/message; stable codes and parser byte ranges/columns are not available end to end. |
@@ -54,23 +55,22 @@ Current inventory:
 | Hover and goto definition | N/A | N/A | N/A | Yes | Local type/function signature, cross-file targets, and `.ruai` signatures. |
 | References and rename | N/A | N/A | N/A | Yes | Local/cross-file edits plus `.ruai` declaration references and readonly rejection. |
 | Document symbols and docs | N/A | N/A | N/A | Yes | Struct/enum/trait/impl/module hierarchy, ranges, signatures and leading docs. |
-| Semantic tokens | N/A | N/A | N/A | No | Not implemented and no snapshot exists. |
+| Semantic tokens | N/A | N/A | N/A | Yes | Closure parameter definitions/uses, adapter methods, and range operators have an exact protocol-neutral snapshot plus LSP conversion tests. |
 | Inlay hints | N/A | N/A | N/A | No | Not implemented and no snapshot exists. |
 | Formatter/comment stability | Yes | N/A | Yes | N/A | Shared comment/whitespace compile golden plus parser trivia corpus; formatter also has crate-local goldens. |
 | Lua source maps and trace | No | No | N/A | No | Tracked separately in `docs/rua-sourcemap.md`; no source-map golden is present. |
 
 ## Known Gaps
 
-- Closures and iterator adapters have parser fixtures plus registered Phase 4A
-  TODOs, but remain absent from type checking and executable codegen goldens.
 - Range/`for` syntax and Lua lowering are covered; invalid-bound behavior is not
   protected by a repository golden.
 - `Vec` and `HashMap` mismatch behavior has unit tests but no shared
   compile-fail oracle.
 - File-based `.rua` module compilation lacks positive Lua goldens under
   `tests/golden/modules/`.
-- External `.ruai` roots, explicit mounts, std/prelude priority, and library
-  watchers have no production API; tests must not simulate them in a harness.
+- External `.ruai` roots, explicit mounts, and source-root priority have
+  production inputs and focused tests, but still lack a shared out-of-tree
+  golden and library watcher coverage.
 - Compiler diagnostics do not yet expose stable diagnostic codes, and parse or
   bare diagnostics lack end-to-end byte/column ranges.
 - Conservative name/call checking intentionally leaves unresolved external
@@ -79,8 +79,7 @@ Current inventory:
   are not enforced.
 - `.ruai` rename rejection currently reuses `RenameError::InvalidName` instead
   of a dedicated readonly/library error.
-- Semantic tokens, inlay hints, iterator performance-shape assertions, and
-  source-map snapshots are absent.
+- Inlay hints and source-map snapshots are absent.
 
 ## Merge Gate
 

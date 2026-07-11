@@ -1,0 +1,3 @@
+fn main() -> Option<i64> {
+    (0..4).find(|value| value == 2)
+}

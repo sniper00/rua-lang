@@ -35,17 +35,23 @@ const PHASE4A_ACTIVE_PASS_CASES: &[&str] = &[
     "closure_expr_inferred",
     "closure_block_typed",
     "closure_capture_read",
+    "closure_capture_mut_fused",
     "iterator_vec_for",
     "iterator_map_filter_collect",
     "iterator_fold",
     "iterator_block_closure",
+    "iterator_adapters_count",
+    "iterator_any",
+    "iterator_all",
+    "iterator_find",
 ];
-const PHASE4A_TODO_FAIL_CASES: &[&str] = &[];
 const PHASE4A_ACTIVE_FAIL_CASES: &[&str] = &[
     "closure_param_cannot_infer",
+    "closure_return_mismatch",
     "closure_mut_capture_invalid",
     "closure_escape_unsupported",
     "iterator_non_iterable_source",
+    "iterator_map_arg_not_closure",
     "iterator_filter_not_bool",
     "iterator_collect_mismatch",
     "iterator_escape_unsupported",
@@ -291,7 +297,7 @@ fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
                 fixture_label(&source)
             )
         })?;
-        if case.starts_with("iterator_") {
+        if case.starts_with("iterator_") || *case == "closure_capture_mut_fused" {
             if actual.matches("for ").count() != 1 {
                 return Err(format!(
                     "Phase 4A fused output {} must contain exactly one loop",
@@ -343,15 +349,11 @@ fn golden_layout_is_present() {
 }
 
 #[test]
-fn phase4a_todo_goldens_are_registered() {
+fn phase4a_goldens_are_registered() {
     let root = golden_root().join("phase4a");
     for case in PHASE4A_ACTIVE_PASS_CASES {
         let path = root.join("compile-pass").join(format!("{case}.rua"));
         assert!(path.is_file(), "missing active Phase 4A case {}", path.display());
-    }
-    for case in PHASE4A_TODO_FAIL_CASES {
-        let path = root.join("compile-fail").join(format!("{case}.rua"));
-        assert!(path.is_file(), "missing Phase 4A TODO {}", path.display());
     }
     for case in PHASE4A_ACTIVE_FAIL_CASES {
         let path = root.join("compile-fail").join(format!("{case}.rua"));

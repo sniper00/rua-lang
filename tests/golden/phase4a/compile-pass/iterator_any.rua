@@ -1,0 +1,3 @@
+fn main() -> bool {
+    (0..=4).any(|value| value == 3)
+}

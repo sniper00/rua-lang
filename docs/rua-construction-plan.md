@@ -1,6 +1,7 @@
 # Rua 拆仓与 IDE/LSP 施工计划
 
-> 状态：施工文档。
+> 状态：已完成（2026-07-11）。Phase -1 至 Phase 4A 的各 Step 均已实现、验证并提交。
+> `moon_rs` 的 workspace/doc 收尾分别记录在 `e126f2f` 和 `c5cca65`。
 > 架构依据：`docs/rua-ide-architecture.md`。
 > Golden 用例清单：`docs/rua-golden-cases.md`。
 > 固定目标仓库：`/Users/bruce/GitProjects/rua`。
