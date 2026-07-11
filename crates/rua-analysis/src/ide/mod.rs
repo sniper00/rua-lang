@@ -3,6 +3,7 @@
 //! Results exposed here remain independent of LSP protocol types.
 
 mod closure_iterator;
+mod completion;
 mod contract;
 mod symbol;
 
@@ -161,6 +162,11 @@ impl Analysis {
 
     pub fn semantic_tokens(&self, file_id: FileId) -> Vec<SemanticToken> {
         closure_iterator::semantic_tokens(&self.db, file_id)
+    }
+
+    /// Completion candidates at a cursor position.
+    pub fn completions(&self, position: ProjectPosition) -> Vec<CompletionItem> {
+        completion::completions(&self.db, position.position)
     }
 
     // ------------------------------------------------------------------

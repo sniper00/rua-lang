@@ -151,7 +151,6 @@ dependencies = [
  "lsp-types",
  "rua-analysis",
  "rua-syntax",
- "ruac",
  "serde_json",
 ]
 
