@@ -1,6 +1,6 @@
 # Rua Native Analysis 与 LSP 全量迁移施工计划
 
-> 状态：待施工。
+> 状态：施工中（Step 4B.0 已完成；下一步 Step 4B.1）。
 > 基线：`35f0d8b`（Phase -1 至 Phase 4A 已完成）。
 > 架构依据：`docs/rua-ide-architecture.md` Phase 4 / Phase 5。
 > 前序计划：`docs/rua-construction-plan.md`。

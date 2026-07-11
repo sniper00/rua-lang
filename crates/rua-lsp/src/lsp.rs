@@ -1418,7 +1418,12 @@ mod tests {
         member_to_item, percent_decode, range_from_bytes, semantic_tokens_for,
         reconciled_diagnostics_for, to_lsp_symbol_kind, uri_to_path, whole_document_range, Server,
     };
-    use lsp_types::{CompletionItemKind, Documentation, InsertTextFormat, Position};
+    use lsp_server::{Message, Request};
+    use lsp_types::request::{PrepareRenameRequest, Request as _};
+    use lsp_types::{
+        CompletionItemKind, Documentation, InsertTextFormat, Position, PrepareRenameResponse,
+        TextDocumentIdentifier, TextDocumentPositionParams,
+    };
     use std::path::PathBuf;
     use ruac::diag::Diag;
     use rua_syntax::analysis::{CompletionMember, MemberKind};
@@ -1908,6 +1913,55 @@ mod tests {
             .rename_at_uri(&uri, position, "element")
             .expect("closure rename");
         assert_eq!(edit.changes.unwrap().values().next().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn migration_baseline_prepare_rename_returns_range_or_null() {
+        let src = concat!(
+            "struct Point { value: i64 }\n",
+            "fn main() {\n",
+            "  let point = Point { value: 1 };\n",
+            "  let local = point.value;\n",
+            "  local;\n",
+            "}\n",
+        );
+        let uri: lsp_types::Uri = "file:///tmp/rua-prepare-rename.rua".parse().unwrap();
+        let (server_connection, client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        let key = Server::doc_key(&uri);
+        server.workspace.add_file(&key, src);
+        let line_index = LineIndex::new(src);
+
+        let mut prepare = |id, offset| {
+            let (line, column) = line_index.line_col(offset, src);
+            let params = TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(line as u32, column as u32),
+            };
+            server.handle_prepare_rename(Request::new(
+                id,
+                PrepareRenameRequest::METHOD.to_string(),
+                params,
+            ));
+            let Message::Response(response) = client_connection.receiver.recv().unwrap() else {
+                panic!("prepare rename must send a response");
+            };
+            serde_json::from_value::<Option<PrepareRenameResponse>>(
+                response.result.expect("successful prepare response"),
+            )
+            .expect("valid prepare response")
+        };
+
+        let local_use = src.rfind("local;").unwrap();
+        let Some(PrepareRenameResponse::Range(range)) = prepare(1.into(), local_use) else {
+            panic!("local prepare rename must return a range");
+        };
+        assert_eq!(range.start.line, 4);
+        assert_eq!(range.start.character, 2);
+        assert_eq!(range.end.character, 7);
+
+        let member_use = src.rfind("point.value").unwrap() + "point.".len();
+        assert_eq!(prepare(2.into(), member_use), None);
     }
 
     #[test]

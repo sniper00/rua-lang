@@ -15,3 +15,7 @@ matrix.
 `closure_iterator.snap` is produced by `rua-analysis`; it records inferred
 closure parameter types, goto/completion/references/rename, and protocol-neutral
 semantic tokens for closure parameters, adapter methods, and range operators.
+
+[`MIGRATION_BASELINE.md`](MIGRATION_BASELINE.md) records the frozen legacy/native
+query matrix used while the native analysis facade replaces the legacy IDE
+pipeline.
