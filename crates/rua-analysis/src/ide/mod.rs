@@ -426,7 +426,31 @@ fn item_hover_text(definition: &Definition, db: &BaseDb, root_file: FileId) -> S
         DefKind::Trait => format!("trait {}", definition.name()),
         DefKind::Module => format!("mod {}", definition.name()),
         DefKind::Impl => format!("impl {}", definition.name()),
-        DefKind::Field | DefKind::Variant | DefKind::TypeAlias => definition.name().to_string(),
+        DefKind::Field => {
+            if let Some(parent_id) = definition.owner() {
+                let member_index = db.member_index(root_file);
+                if let Some(template_ty) = member_index.type_template(parent_id) {
+                    let candidates = member_index.field_candidates(template_ty);
+                    if let Some(c) = candidates.iter().find(|c| c.name() == definition.name()) {
+                        return format!("{}: {}", definition.name(), c.ty());
+                    }
+                }
+            }
+            definition.name().to_string()
+        }
+        DefKind::Variant => {
+            if let Some(parent_id) = definition.owner() {
+                let member_index = db.member_index(root_file);
+                if let Some(template_ty) = member_index.type_template(parent_id) {
+                    let candidates = member_index.associated_candidates(template_ty);
+                    if let Some(c) = candidates.iter().find(|c| c.name() == definition.name()) {
+                        return format!("{}: {}", definition.name(), c.ty());
+                    }
+                }
+            }
+            definition.name().to_string()
+        }
+        DefKind::TypeAlias => definition.name().to_string(),
     }
 }
 
