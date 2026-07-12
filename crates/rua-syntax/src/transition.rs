@@ -296,6 +296,7 @@ fn syntax_kind(kind: ruac::token::RuaTokenKind) -> SyntaxKind {
         Token::KwMatch => SyntaxKind::KwMatch,
         Token::KwSelf => SyntaxKind::KwSelf,
         Token::KwExtern => SyntaxKind::KwExtern,
+        Token::KwDyn => SyntaxKind::KwDyn,
         Token::Ident => SyntaxKind::Ident,
         Token::Int => SyntaxKind::Int,
         Token::Float => SyntaxKind::Float,
