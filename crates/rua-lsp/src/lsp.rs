@@ -1080,9 +1080,20 @@ impl Server {
                             diag_range.start.line,
                             diag_range.start.character,
                         );
-                        // Find the `let` keyword for this binding by scanning backwards.
+                        // Find the `let` keyword by scanning backwards for the
+                        // word `let` at a word boundary (not inside an identifier
+                        // like `outlet_name` or a string literal).
                         let d_start = line_index.offset(sl as usize, sc as usize, &source);
-                        let before = source[..d_start].rfind("let ").unwrap_or(d_start);
+                        let before = source[..d_start]
+                            .rmatch_indices("let ")
+                            .find(|&(pos, _)| {
+                                pos == 0
+                                    || !source.as_bytes()[pos - 1]
+                                        .is_ascii_alphanumeric()
+                                    && source.as_bytes()[pos - 1] != b'_'
+                            })
+                            .map(|(pos, _)| pos)
+                            .unwrap_or(d_start);
                         let insert_pos = before + 4; // after "let "
                         let (il, ic) = line_index.line_col(insert_pos, &source);
                         let edit = TextEdit {

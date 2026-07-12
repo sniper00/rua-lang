@@ -1277,8 +1277,8 @@ impl<'a> InferenceContext<'a> {
                     Ty::Iterator(Box::new(item.clone()))
                 }
             }
-            // enumerate: pair items with index.
-            "enumerate" => {
+            // enumerate: pair items with index. Takes no arguments.
+            "enumerate" if args.is_empty() => {
                 Ty::Iterator(Box::new(Ty::Tuple(vec![Ty::I64, item.clone()])))
             }
             _ => return None,

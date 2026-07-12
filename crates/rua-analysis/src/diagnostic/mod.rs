@@ -302,13 +302,14 @@ pub fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
 /// Suppress cascading noise: type errors on the same line as a parse error are
 /// downgraded or removed to avoid recovery artifacts.
 pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>) {
-    let parse_error_lines: Vec<u32> = diagnostics
+    // Collect parse-error byte offsets (approximate line positions).
+    let parse_error_offsets: Vec<u32> = diagnostics
         .iter()
         .filter(|d| d.source == DiagnosticSource::Parse)
         .map(|d| d.range.range.start())
         .collect();
 
-    if parse_error_lines.is_empty() {
+    if parse_error_offsets.is_empty() {
         return;
     }
 
@@ -316,12 +317,19 @@ pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>) {
         if d.source == DiagnosticSource::Parse {
             return true;
         }
-        // Keep type/name diagnostics that are not on parse-error lines.
+        // Suppress type/name diagnostics near parse errors.  Use a
+        // generous byte window (500 bytes ≈ several lines) to avoid
+        // both false positives (suppressing errors on nearby lines)
+        // and false negatives (showing cascaded errors on the same
+        // long line).  A line-aware version would need source text.
         let start = d.range.range.start();
-        !parse_error_lines.iter().any(|line| {
-            // Approximate: same offset region (within 100 bytes).
-            let diff = if start > *line { start - line } else { line - start };
-            diff < 100
+        !parse_error_offsets.iter().any(|offset| {
+            let diff = if start > *offset {
+                start - offset
+            } else {
+                offset - start
+            };
+            diff < 500
         })
     });
 }
@@ -680,16 +688,18 @@ fn expr_range(
     source_map.expr_range(expr).map(|fr| fr.range)
 }
 
-fn mismatch_context_label(context: TypeMismatchContext) -> &'static str {
+fn mismatch_context_label(context: TypeMismatchContext) -> String {
     match context {
-        TypeMismatchContext::Annotation => " in let annotation",
-        TypeMismatchContext::Return => " in return position",
-        TypeMismatchContext::Assignment => " in assignment",
-        TypeMismatchContext::Argument { .. } => " in argument",
-        TypeMismatchContext::ClosureReturn => " in closure return",
-        TypeMismatchContext::Branch => " in branch",
-        TypeMismatchContext::RangeBound => " in range bound",
-        TypeMismatchContext::Index => " in index",
+        TypeMismatchContext::Annotation => " in let annotation".to_string(),
+        TypeMismatchContext::Return => " in return position".to_string(),
+        TypeMismatchContext::Assignment => " in assignment".to_string(),
+        TypeMismatchContext::Argument { index } => {
+            format!(" in argument {}", index + 1)
+        }
+        TypeMismatchContext::ClosureReturn => " in closure return".to_string(),
+        TypeMismatchContext::Branch => " in branch".to_string(),
+        TypeMismatchContext::RangeBound => " in range bound".to_string(),
+        TypeMismatchContext::Index => " in index".to_string(),
     }
 }
 
