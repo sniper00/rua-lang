@@ -561,6 +561,12 @@ impl<'source, 'context> TypeParser<'source, 'context> {
             if matches!(self.peek(), Some(TypeToken::Ident("mut"))) {
                 self.cursor += 1;
             }
+            // Skip the `dyn` keyword — trait objects are represented as
+            // the trait's Named type internally (Rua has no borrow checker,
+            // so `dyn Trait` ≈ `Trait` for method resolution).
+            if matches!(self.peek(), Some(TypeToken::Ident("dyn"))) {
+                self.cursor += 1;
+            }
             return self.ty();
         }
         if self.eat(TypeToken::Bang) {

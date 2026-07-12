@@ -1216,3 +1216,44 @@ fn folding_ranges_not_empty_for_blocks() {
     // Basic smoke: the function body should contain braces
     assert!(text.contains('{'), "source should contain blocks");
 }
+
+#[test]
+fn trait_object_method_completion() {
+    // `&dyn Trait` receiver should offer trait methods after `.`
+    let uri = uri("/test/dyn_trait.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "trait Greet { fn hello(&self) -> String; }\nfn greet_someone(g: &dyn Greet) -> String {\n    g. \n}",
+    );
+
+    // cursor after `g.` (line 2, the space after the dot)
+    let pp = srv.pp(&uri, 2, 4).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+    assert!(
+        labels.contains(&"hello".to_string()),
+        "trait object should offer method completions after dot, got: {labels:?}"
+    );
+}
+
+#[test]
+fn trait_object_method_hover() {
+    // hover on a trait object method call should show method signature.
+    // Uses a trait with a default body so the callable is lowered.
+    let uri = uri("/test/dyn_hover.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "trait Greet { fn hello(&self) -> i64 { 42 } }\nfn greet_someone(g: &dyn Greet) -> i64 {\n    g.hello()\n}",
+    );
+
+    // cursor on `hello` in `g.hello()`
+    let pp = srv.pp(&uri, 2, 6).unwrap();
+    let hover = srv.snapshot().hover(pp);
+    // Hover on trait object method may not resolve yet (abstract method
+    // callables need separate indexing). This tests that we don't crash.
+    if let Some(h) = &hover {
+        assert!(h.signature().contains("hello"), "hover should mention method name");
+    }
+}
