@@ -1397,14 +1397,15 @@ impl Server {
 
             // "Wrap in block" — wrap selected code in { }
             if !sel_text.contains('\n') {
-                let (sl, _sc) = line_index.line_col(sel_start, &source);
+                let (sl, sc) = line_index.line_col(sel_start, &source);
                 let edit = TextEdit {
                     range: Range {
-                        start: Position::new(sl as u32, 0),
+                        start: Position::new(sl as u32, sc as u32),
                         end: {
-                        let (el, ec) = line_index.line_col(sel_end.min(source.len()), &source);
-                        Position::new(el as u32, ec as u32)
-                    },
+                            let (el, ec) =
+                                line_index.line_col(sel_end.min(source.len()), &source);
+                            Position::new(el as u32, ec as u32)
+                        },
                     },
                     new_text: format!("{{\n    {sel_text}\n}}"),
                 };
@@ -1887,9 +1888,7 @@ impl Server {
                     vec![lsp_types::CallHierarchyItem { detail: None,
                         name: item.name,
                         kind: lsp_types::SymbolKind::FUNCTION,
-                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| {
-                            format!("file:///unknown/{}", item.file_id.index()).parse().unwrap()
-                        }),
+                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| fallback_uri(item.file_id)),
                         range: Range {
                             start: Position::new(sl as u32, sc as u32),
                             end: Position::new(el as u32, ec as u32),
@@ -2082,9 +2081,7 @@ impl Server {
                     vec![lsp_types::TypeHierarchyItem { detail: None,
                         name: item.name,
                         kind: lsp_types::SymbolKind::STRUCT,
-                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| {
-                            format!("file:///unknown/{}", item.file_id.index()).parse().unwrap()
-                        }),
+                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| fallback_uri(item.file_id)),
                         range: Range {
                             start: Position::new(sl as u32, sc as u32),
                             end: Position::new(el as u32, ec as u32),
@@ -2264,6 +2261,17 @@ impl Server {
                 .map(|(_, (uri, id))| (*id, uri.clone()))
                 .collect();
             let analysis = self.host.analysis();
+            // Empty pattern would cause find("") = Some(0) on every
+            // iteration, wasting CPU. Guard early.
+            if pattern.is_empty() || replacement.is_empty() {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    "SSR: pattern and replacement must be non-empty".to_string(),
+                );
+                let _ = self.connection.sender.send(Message::Response(resp));
+                return;
+            }
             for (file_id, uri) in &file_ids {
                 let source =
                     analysis.parse(*file_id).syntax_node().text().to_string();
@@ -3153,7 +3161,9 @@ impl Server {
         let id = FileId::new(self.next_file_id);
         self.next_file_id += 1;
         let uri = path_to_uri(path).unwrap_or_else(|| {
-            format!("file://{}", path.display()).parse().unwrap()
+            format!("file:///unknown/{}", self.next_file_id)
+                .parse()
+                .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
         });
         self.file_ids
             .insert(path.to_path_buf(), (uri, id));
@@ -3973,6 +3983,14 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     };
     let decoded = percent_decode(path_str);
     Some(PathBuf::from(decoded))
+}
+
+/// Safe fallback URI when a real file path isn't available.
+/// Uses a synthetic `file:///unknown/N` URI that won't crash.
+fn fallback_uri(file_id: rua_analysis::FileId) -> Uri {
+    format!("file:///unknown/{}", file_id.index())
+        .parse()
+        .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
 }
 
 fn path_to_uri(path: &Path) -> Option<Uri> {
