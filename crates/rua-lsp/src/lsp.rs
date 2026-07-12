@@ -3682,7 +3682,9 @@ fn completion_to_lsp(
     CompletionItem {
         label: item.label().to_string(),
         kind,
-        detail: item.detail().map(|d| d.to_string()),
+        // detail is provided via label_details below; the top-level
+        // detail field duplicates it and causes visual concatenation.
+        detail: None,
         documentation: item.documentation().map(|d| {
             Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,

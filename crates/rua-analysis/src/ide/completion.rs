@@ -241,7 +241,7 @@ fn scope_completions(
                 let ty = candidate.ty().to_string();
                 items.push(
                     CompletionItem::new(n.clone(), CompletionKind::Field)
-                        .with_detail(format!("{n}: {ty}"))
+                        .with_detail(ty)
                         .with_relevance(93),
                 );
             }
