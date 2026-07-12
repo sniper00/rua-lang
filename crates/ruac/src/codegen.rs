@@ -189,7 +189,79 @@ struct Codegen<'a> {
     builtin_rules: &'a crate::builtins::CodegenRules,
 }
 
+// ---------------------------------------------------------------------------
+// EmmyLua helpers — convert rua types to LuaLS annotations
+// ---------------------------------------------------------------------------
+
+fn type_to_emmylua(ty: &Type) -> String {
+    match ty {
+        Type::Path { name, args } => {
+            let base = match name.as_str() {
+                "i64" | "i8" | "i16" | "i32" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "integer",
+                "f64" | "f32" => "number",
+                "bool" => "boolean",
+                "String" | "str" => "string",
+                "Vec" => {
+                    if let Some(a) = args.first() {
+                        return format!("{}[]", type_to_emmylua(a));
+                    }
+                    "table"
+                }
+                "Option" => {
+                    if let Some(a) = args.first() {
+                        return format!("{}|nil", type_to_emmylua(a));
+                    }
+                    "any|nil"
+                }
+                "Result" => {
+                    let ok = args.first().map(|a| type_to_emmylua(a)).unwrap_or_else(|| "any".into());
+                    let err = args.get(1).map(|a| type_to_emmylua(a)).unwrap_or_else(|| "any".into());
+                    return format!("{{ ok: {ok} }}|{{ err: {err} }}");
+                }
+                "HashMap" => "table",
+                _ => name.as_str(),
+            };
+            base.to_string()
+        }
+        Type::Ref { inner, .. } => type_to_emmylua(inner),
+        Type::Unit => "nil".into(),
+    }
+}
+
+fn emit_param_annotations(out: &mut String, params: &[Param]) {
+    for p in params {
+        out.push_str(&format!(
+            "---@param {} {}\n",
+            p.name,
+            type_to_emmylua(&p.ty)
+        ));
+    }
+}
+
+fn emit_return_annotation(out: &mut String, ret: &Option<Type>) {
+    if let Some(r) = ret {
+        out.push_str(&format!("---@return {}\n", type_to_emmylua(r)));
+    }
+}
+
 impl Codegen<'_> {
+    fn emit_struct_annotation(&mut self, s: &StructDecl) {
+        self.out.push_str(&format!("---@class {}\n", s.name));
+        if !s.generics.is_empty() {
+            let gens: Vec<&str> = s.generics.iter().map(|g| g.name.as_str()).collect();
+            self.out.push_str(&format!("---@generic {}\n", gens.join(", ")));
+        }
+    }
+
+    fn emit_fn_annotation(&mut self, f: &FnDecl) {
+        if !f.generics.is_empty() {
+            let gens: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
+            self.out.push_str(&format!("---@generic {}\n", gens.join(", ")));
+        }
+        emit_param_annotations(&mut self.out, &f.params);
+        emit_return_annotation(&mut self.out, &f.ret);
+    }
+
     fn line(&mut self, s: &str) {
         for _ in 0..self.indent {
             self.out.push_str("    ");
@@ -257,9 +329,27 @@ impl Codegen<'_> {
 
         // Class tables (with `__index`) for structs and enums so their values
         // can carry methods.
-        for name in struct_names.iter().chain(enum_names.iter()) {
-            self.line(&format!("{name} = {{}}"));
-            self.line(&format!("{name}.__index = {name}"));
+        for item in &prog.items {
+            match item {
+                Item::Struct(s) => {
+                    self.emit_struct_annotation(s);
+                    self.line(&format!("{0} = {{}}", s.name));
+                    self.line(&format!("{0}.__index = {0}", s.name));
+                    for field in &s.fields {
+                        self.line(&format!(
+                            "---@field {} {}",
+                            field.name,
+                            type_to_emmylua(&field.ty)
+                        ));
+                    }
+                }
+                Item::Enum(e) => {
+                    self.line(&format!("---@class {0}", e.name));
+                    self.line(&format!("{0} = {{}}", e.name));
+                    self.line(&format!("{0}.__index = {0}", e.name));
+                }
+                _ => {}
+            }
         }
 
         // Trait table across all scopes (root + modules), keyed by simple name,
@@ -395,6 +485,7 @@ impl Codegen<'_> {
 
     fn gen_free_fn(&mut self, f: &FnDecl) {
         self.blank();
+        self.emit_fn_annotation(f);
         let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         self.line(&format!("function {}({})", f.name, params.join(", ")));
         self.indent += 1;
@@ -405,6 +496,18 @@ impl Codegen<'_> {
 
     fn gen_method(&mut self, type_name: &str, m: &FnDecl) {
         self.blank();
+        // Emit param/return annotations (skip `self` param if present).
+        let skip_self = if m.has_self { 1 } else { 0 };
+        for p in m.params.iter().skip(skip_self) {
+            self.line(&format!(
+                "---@param {} {}",
+                p.name,
+                type_to_emmylua(&p.ty)
+            ));
+        }
+        if let Some(ret) = &m.ret {
+            self.line(&format!("---@return {}", type_to_emmylua(ret)));
+        }
         let params: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
         // `:` gives an implicit `self`; `.` for associated functions.
         let sep = if m.has_self { ":" } else { "." };
@@ -423,6 +526,18 @@ impl Codegen<'_> {
 
     fn gen_trait_default(&mut self, type_name: &str, tm: &TraitMethod) {
         self.blank();
+        // Emit param/return annotations
+        let skip_self = if tm.has_self { 1 } else { 0 };
+        for p in tm.params.iter().skip(skip_self) {
+            self.line(&format!(
+                "---@param {} {}",
+                p.name,
+                type_to_emmylua(&p.ty)
+            ));
+        }
+        if let Some(ret) = &tm.ret {
+            self.line(&format!("---@return {}", type_to_emmylua(ret)));
+        }
         let params: Vec<&str> = tm.params.iter().map(|p| p.name.as_str()).collect();
         let sep = if tm.has_self { ":" } else { "." };
         self.line(&format!(
@@ -445,7 +560,11 @@ impl Codegen<'_> {
 
     fn gen_stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, init, .. } => {
+            Stmt::Let { name, init, ty, .. } => {
+                // EmmyLua type annotation for explicitly typed bindings
+                if let Some(ty_ann) = ty {
+                    self.line(&format!("---@type {}", type_to_emmylua(ty_ann)));
+                }
                 if let ExprKind::Closure { params, body, .. } = &init.kind {
                     self.gen_closure_local(name, params, body);
                 } else if self
