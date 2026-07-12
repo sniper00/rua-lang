@@ -142,8 +142,6 @@ pub enum DiagnosticOrigin {
 pub enum DiagnosticSeverity {
     Error,
     Warning,
-    Information,
-    Hint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -173,9 +171,7 @@ impl DiagnosticRelated {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DiagnosticSource {
     Parse,
-    Name,
     Type,
-    Structural,
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +759,7 @@ fn convert_inference_diagnostic(
             )
         }
         InferenceDiagnostic::ExpectedBool { expr, actual } => {
-            let range = expr_range(file_id, *expr, source_map)?;
+            let range = expr_range(*expr, source_map)?;
             (
                 DiagnosticCode::TypeExpectedBool,
                 format!("expected `bool`, found `{actual}`"),
@@ -775,7 +771,7 @@ fn convert_inference_diagnostic(
             expected,
             actual,
         } => {
-            let range = expr_range(file_id, *call, source_map)?;
+            let range = expr_range(*call, source_map)?;
             (
                 DiagnosticCode::TypeArgumentCount,
                 format!("expected {expected} arguments, found {actual}"),
@@ -783,7 +779,7 @@ fn convert_inference_diagnostic(
             )
         }
         InferenceDiagnostic::NotCallable { callee, actual } => {
-            let range = expr_range(file_id, *callee, source_map)?;
+            let range = expr_range(*callee, source_map)?;
             (
                 DiagnosticCode::TypeNotCallable,
                 format!("`{actual}` is not callable"),
@@ -791,7 +787,7 @@ fn convert_inference_diagnostic(
             )
         }
         InferenceDiagnostic::NotIterable { expr, actual } => {
-            let range = expr_range(file_id, *expr, source_map)?;
+            let range = expr_range(*expr, source_map)?;
             (
                 DiagnosticCode::TypeNotIterable,
                 format!("`{actual}` is not iterable"),
@@ -799,7 +795,7 @@ fn convert_inference_diagnostic(
             )
         }
         InferenceDiagnostic::InvalidUnary { expr, operand, op } => {
-            let range = expr_range(file_id, *expr, source_map)?;
+            let range = expr_range(*expr, source_map)?;
             (
                 DiagnosticCode::TypeInvalidUnary,
                 format!("cannot apply unary `{op:?}` to `{operand}`"),
@@ -807,7 +803,7 @@ fn convert_inference_diagnostic(
             )
         }
         InferenceDiagnostic::InvalidBinary { expr, lhs, rhs, op } => {
-            let range = expr_range(file_id, *expr, source_map)?;
+            let range = expr_range(*expr, source_map)?;
             (
                 DiagnosticCode::TypeInvalidBinary,
                 format!("cannot apply binary `{op:?}` to `{lhs}` and `{rhs}`"),
@@ -819,7 +815,7 @@ fn convert_inference_diagnostic(
             actual,
             trait_id: _,
         } => {
-            let range = expr_range(file_id, *call, source_map)?;
+            let range = expr_range(*call, source_map)?;
             (
                 DiagnosticCode::TypeUnsatisfiedTraitBound,
                 format!("`{actual}` does not satisfy required trait bound"),
@@ -835,12 +831,12 @@ fn convert_inference_diagnostic(
 }
 
 fn inference_source_range(
-    file_id: FileId,
+    _file_id: FileId,
     source: crate::hir::InferenceSource,
     source_map: &crate::hir::BodySourceMap,
 ) -> Option<TextRange> {
     match source {
-        crate::hir::InferenceSource::Expr(expr) => expr_range(file_id, expr, source_map),
+        crate::hir::InferenceSource::Expr(expr) => expr_range(expr, source_map),
         crate::hir::InferenceSource::Binding(binding) => source_map
             .binding_range(binding)
             .map(|fr| fr.range),
@@ -851,7 +847,6 @@ fn inference_source_range(
 }
 
 fn expr_range(
-    _file_id: FileId,
     expr: crate::hir::ExprId,
     source_map: &crate::hir::BodySourceMap,
 ) -> Option<TextRange> {

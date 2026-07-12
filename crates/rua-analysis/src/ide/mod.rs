@@ -438,10 +438,12 @@ impl Analysis {
         let def_map = self.db.def_map(file_id);
         let member_index = self.db.member_index(file_id);
 
-        // Resolve field or method to its definition.
+        // Resolve field or method to its definition. Short-circuit:
+        // only resolve the method if the field lookup returned nothing.
         let field = member_index.resolve_field(&receiver_ty, &field_name);
-        let method = member_index.resolve_method(&receiver_ty, &field_name);
-        let resolution = field.or(method)?;
+        let resolution = field.or_else(|| {
+            member_index.resolve_method(&receiver_ty, &field_name)
+        })?;
 
         let def_id = match resolution.target() {
             crate::hir::MemberTarget::Definition(id) => id,
@@ -505,9 +507,9 @@ impl Analysis {
             let (body, _source_map, inference) = completion::find_containing_body_data(
                 &self.db, &def_map, position.position, offset,
             )?;
-            for (_bid, binding) in body.bindings() {
+            for (bid, binding) in body.bindings() {
                 if binding.name() == Some(&receiver_name) {
-                    return inference.type_of_binding(_bid).cloned();
+                    return inference.type_of_binding(bid).cloned();
                 }
             }
             None

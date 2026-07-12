@@ -43,7 +43,7 @@ pub(crate) fn completions(
     let after_dot = token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
         || token.as_ref().and_then(previous_significant).is_some_and(|t| t.kind() == SyntaxKind::Dot);
     let mut items = if after_dot {
-        member_completions(db, position, token.as_ref(), offset)
+        member_completions(db, position, offset)
     } else if let Some(ref tok) = token
         && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon)
     {
@@ -506,7 +506,6 @@ fn scope_completions(
 fn member_completions(
     db: &Rc<BaseDb>,
     position: FilePosition,
-    _token: Option<&SyntaxToken>,
     offset: u32,
 ) -> Vec<CompletionItem> {
     let def_map = db.def_map(position.file_id);

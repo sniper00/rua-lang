@@ -2957,7 +2957,7 @@ impl Server {
 
     fn close_document(&mut self, uri: Uri) {
         let key = Self::doc_key(&uri);
-        if let Some((_, file_id)) = self.file_ids.get(&key).map(|(u, f)| (u.clone(), *f)) {
+        if let Some(file_id) = self.file_ids.get(&key).map(|(_, f)| *f) {
             self.open_buffers.remove(&file_id);
             // Remove from host so it doesn't keep stale open-buffer state
             let mut change = Change::new();
@@ -3148,7 +3148,7 @@ impl Server {
         let id = FileId::new(self.next_file_id);
         self.next_file_id += 1;
         let uri = path_to_uri(path).unwrap_or_else(|| {
-            format!("file:///unknown/{}", self.next_file_id)
+            format!("file:///unknown/{}", id.index())
                 .parse()
                 .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
         });
@@ -3751,8 +3751,6 @@ fn core_diag_to_lsp(
         Some(c) => match c.severity() {
             rua_analysis::DiagnosticSeverity::Error => Some(DiagnosticSeverity::ERROR),
             rua_analysis::DiagnosticSeverity::Warning => Some(DiagnosticSeverity::WARNING),
-            rua_analysis::DiagnosticSeverity::Information => Some(DiagnosticSeverity::INFORMATION),
-            rua_analysis::DiagnosticSeverity::Hint => Some(DiagnosticSeverity::HINT),
         },
         None => Some(DiagnosticSeverity::ERROR),
     };
