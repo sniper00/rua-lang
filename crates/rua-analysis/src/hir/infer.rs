@@ -164,6 +164,18 @@ fn diverge_or(diverges: bool, ty: Ty) -> Ty {
     if diverges { Ty::Never } else { ty }
 }
 
+/// Bundled arguments for [`InferenceContext::infer_callable_call`].
+struct CallContext<'a> {
+    call: ExprId,
+    target: CallTarget,
+    callable: &'a CallableTy,
+    args: &'a [ExprId],
+    expected: Option<&'a Ty>,
+    substitution: Substitution,
+    requirements: &'a [CallableRequirement],
+    variadic: bool,
+}
+
 struct InferenceContext<'a> {
     body: &'a Body,
     resolution: &'a BodyResolution,
@@ -1117,16 +1129,16 @@ impl<'a> InferenceContext<'a> {
             substitution.insert(*generic, self.lower_type(self.owner, type_arg));
         }
         self.set_member(method, resolution);
-        self.infer_callable_call(
+        self.infer_callable_call(&mut CallContext {
             call,
             target,
-            &callable,
+            callable: &callable,
             args,
             expected,
             substitution,
-            &requirements,
-            false,
-        )
+            requirements: &requirements,
+            variadic: false,
+        })
     }
 
     fn infer_unresolved_member_call(&mut self, call: ExprId, args: &[ExprId]) -> Ty {
@@ -1385,48 +1397,38 @@ impl<'a> InferenceContext<'a> {
             }
             CallTarget::Closure(_) | CallTarget::Builtin | CallTarget::Unresolved => Vec::new(),
         };
-        self.infer_callable_call(
+        self.infer_callable_call(&mut CallContext {
             call,
             target,
-            &callable,
+            callable: &callable,
             args,
             expected,
-            Substitution::new(),
-            &requirements,
+            substitution: Substitution::new(),
+            requirements: &requirements,
             variadic,
-        )
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn infer_callable_call(
-        &mut self,
-        call: ExprId,
-        target: CallTarget,
-        callable: &CallableTy,
-        args: &[ExprId],
-        expected: Option<&Ty>,
-        mut substitution: Substitution,
-        requirements: &[CallableRequirement],
-        variadic: bool,
-    ) -> Ty {
-        if (!variadic && args.len() != callable.params().len())
-            || (variadic && args.len() < callable.params().len())
+    fn infer_callable_call(&mut self, ctx: &mut CallContext<'_>) -> Ty {
+        if (!ctx.variadic && ctx.args.len() != ctx.callable.params().len())
+            || (ctx.variadic && ctx.args.len() < ctx.callable.params().len())
         {
             self.diagnostics.push(InferenceDiagnostic::ArgumentCount {
-                call,
-                expected: callable.params().len(),
-                actual: args.len(),
+                call: ctx.call,
+                expected: ctx.callable.params().len(),
+                actual: ctx.args.len(),
             });
+            return Ty::Unknown;
         }
 
         let mut diverges = false;
-        for (index, argument) in args.iter().enumerate() {
-            let parameter = callable.params().get(index);
-            let instantiated = parameter.map(|parameter| substitution.apply(parameter));
+        for (index, argument) in ctx.args.iter().enumerate() {
+            let parameter = ctx.callable.params().get(index);
+            let instantiated = parameter.map(|p| ctx.substitution.apply(p));
             let actual = self.infer_expr(*argument, instantiated.as_ref());
             diverges |= actual.is_never();
             if let Some(parameter) = parameter {
-                let result = unify(parameter, &actual, &mut substitution);
+                let result = unify(parameter, &actual, &mut ctx.substitution);
                 self.report_mismatch(
                     InferenceSource::Expr(*argument),
                     instantiated.as_ref().unwrap_or(parameter),
@@ -1436,27 +1438,28 @@ impl<'a> InferenceContext<'a> {
                     },
                 );
                 if !result.is_match() {
-                    invalidate_generics(parameter, &mut substitution);
+                    invalidate_generics(parameter, &mut ctx.substitution);
                 } else {
-                    refine_generic_bindings(parameter, &actual, &mut substitution);
+                    refine_generic_bindings(parameter, &actual, &mut ctx.substitution);
                 }
             }
         }
-        if let Some(expected) = expected {
-            let _ = unify(callable.return_ty(), expected, &mut substitution);
+        if let Some(expected) = ctx.expected {
+            let _ = unify(ctx.callable.return_ty(), expected, &mut ctx.substitution);
         }
-        self.report_unsatisfied_bounds(call, &substitution, requirements);
-        let parameters = callable
+        self.report_unsatisfied_bounds(ctx.call, &ctx.substitution, ctx.requirements);
+        let parameters = ctx
+            .callable
             .params()
             .iter()
-            .map(|parameter| substitution.instantiate(parameter))
+            .map(|parameter| ctx.substitution.instantiate(parameter))
             .collect::<Vec<_>>();
-        let return_type = substitution.instantiate(callable.return_ty());
-        self.calls[call.index() as usize] = Some(CallInfo {
-            target,
+        let return_type = ctx.substitution.instantiate(ctx.callable.return_ty());
+        self.calls[ctx.call.index() as usize] = Some(CallInfo {
+            target: ctx.target,
             parameters,
             return_type: return_type.clone(),
-            substitution,
+            substitution: ctx.substitution.clone(),
         });
         diverge_or(diverges, return_type)
     }
