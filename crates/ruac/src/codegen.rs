@@ -516,16 +516,18 @@ impl Codegen<'_> {
         let mut traits: HashMap<&str, &TraitDecl> = HashMap::new();
         collect_traits(&prog.items, &mut traits);
 
-        for item in &prog.items {
-            if let Item::Fn(f) = item {
-                self.gen_free_fn(f);
-            }
-        }
+        // Emit modules before top-level functions so their `local mod = {}`
+        // table is visible to functions defined later in the file.
         for item in &prog.items {
             if let Item::Mod(m) = item
                 && !m.is_decl {
                     self.gen_mod(m, &traits);
                 }
+        }
+        for item in &prog.items {
+            if let Item::Fn(f) = item {
+                self.gen_free_fn(f);
+            }
         }
         self.gen_impls(&prog.items, &traits);
 
@@ -560,71 +562,58 @@ impl Codegen<'_> {
         }
     }
 
-    /// Emit an inline module as a Lua table populated inside a `do` block, so
-    /// sibling items see each other as block locals while cross-module access
-    /// goes through the table (`mod::item` -> `mod.item`). Supports `fn`,
-    /// `struct`/`enum`/`impl`/`trait`, and nested `mod` (co-located impls).
+    /// Emit an inline module as a Lua table with methods assigned directly as
+    /// table fields (`function mod.fn()`), so no local stubs or do-block are
+    /// needed.  Cross-module calls go through the table (`mod::item` →
+    /// `mod.item`).
     fn gen_mod(&mut self, m: &ModDecl, traits: &HashMap<&str, &TraitDecl>) {
         self.blank();
-        self.line(&format!("{} = {{}}", m.name));
-        self.line("do");
-        self.indent += 1;
-
-        // All named items become block locals (types, fns, nested mods) so the
-        // module body can refer to them without qualification.
-        let locals: Vec<&str> = m
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Fn(f) => Some(f.name.as_str()),
-                Item::Struct(s) => Some(s.name.as_str()),
-                Item::Enum(e) => Some(e.name.as_str()),
-                Item::Mod(md) if !md.is_decl => Some(md.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        if !locals.is_empty() {
-            self.line(&format!("local {}", locals.join(", ")));
-        }
+        self.line(&format!("---@class {}", m.name));
+        self.line(&format!("local {} = {{}}", m.name));
 
         // Class tables for module-local structs/enums.
         for item in &m.items {
             match item {
                 Item::Struct(s) => {
-                    self.line(&format!("{0} = {{}}; {0}.__index = {0}", s.name));
+                    self.line(&format!(
+                        "local {0} = {{}}; {0}.__index = {0}",
+                        s.name
+                    ));
                 }
                 Item::Enum(e) => {
-                    self.line(&format!("{0} = {{}}; {0}.__index = {0}", e.name));
+                    self.line(&format!(
+                        "local {0} = {{}}; {0}.__index = {0}",
+                        e.name
+                    ));
                 }
                 _ => {}
             }
         }
 
+        // Emit functions as `function mod.name(...)` — direct table assignment.
         for item in &m.items {
             match item {
-                Item::Fn(f) => self.gen_free_fn(f),
+                Item::Fn(f) => {
+                    self.blank();
+                    self.emit_fn_annotation(f);
+                    let params: Vec<&str> =
+                        f.params.iter().map(|p| p.name.as_str()).collect();
+                    self.line(&format!(
+                        "function {}.{}({})",
+                        m.name,
+                        f.name,
+                        params.join(", ")
+                    ));
+                    self.indent += 1;
+                    self.gen_block_to(&f.body, &Dest::Return);
+                    self.indent -= 1;
+                    self.line("end");
+                }
                 Item::Mod(md) if !md.is_decl => self.gen_mod(md, traits),
                 _ => {}
             }
         }
         self.gen_impls(&m.items, traits);
-
-        // Publish members onto the module table.
-        for item in &m.items {
-            let name = match item {
-                Item::Fn(f) => Some(f.name.as_str()),
-                Item::Struct(s) => Some(s.name.as_str()),
-                Item::Enum(e) => Some(e.name.as_str()),
-                Item::Mod(md) if !md.is_decl => Some(md.name.as_str()),
-                _ => None,
-            };
-            if let Some(n) = name {
-                self.line(&format!("{}.{} = {}", m.name, n, n));
-            }
-        }
-
-        self.indent -= 1;
-        self.line("end");
     }
 
     /// Emit all `impl` blocks in `items` (methods, operator aliases, inherited

@@ -42,6 +42,41 @@ Counter.__index = Counter
 local log = log or function(...) end
 local format = format or function(...) end
 
+---@class math
+local math = {}
+
+---@param a integer
+---@param b integer
+---@return integer
+function math.add(a, b)
+    return a + b
+end
+
+---@param a integer
+---@param b integer
+---@return integer
+function math.multiply(a, b)
+    return a * b
+end
+
+---@class trig
+local trig = {}
+
+---@param _x number
+---@return number
+function trig.sin(_x)
+    return 0.0
+end
+
+---@class utils
+local utils = {}
+
+---@param name string
+---@return string
+function utils.greet(name)
+    return rt.format("Hi, {}!", name)
+end
+
 ---@generic T
 ---@param value T
 ---@return T
@@ -525,52 +560,6 @@ local function main()
     local none_propagate = chain_option(nil, 5)
     demo_arithmetic()
     demo_comments()
-end
-
-math = {}
-do
-    local add, multiply, trig
-
----@param a integer
----@param b integer
----@return integer
-    local function add(a, b)
-        return a + b
-    end
-
----@param a integer
----@param b integer
----@return integer
-    local function multiply(a, b)
-        return a * b
-    end
-
-    trig = {}
-    do
-        local sin
-
----@param _x number
----@return number
-        local function sin(_x)
-            return 0.0
-        end
-        trig.sin = sin
-    end
-    math.add = add
-    math.multiply = multiply
-    math.trig = trig
-end
-
-utils = {}
-do
-    local greet
-
----@param name string
----@return string
-    local function greet(name)
-        return rt.format("Hi, {}!", name)
-    end
-    utils.greet = greet
 end
 
 ---@param x integer
