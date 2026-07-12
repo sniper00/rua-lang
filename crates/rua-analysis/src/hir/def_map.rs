@@ -374,6 +374,8 @@ pub struct DefMap {
     root: ModuleId,
     modules: Vec<ModuleData>,
     module_slots: HashMap<ModuleId, usize>,
+    /// Fast lookup from file to the primary module defined in that file.
+    file_to_module: HashMap<FileId, ModuleId>,
     definitions: Vec<Definition>,
     definition_slots: HashMap<DefId, usize>,
     members: BTreeMap<DefId, Vec<DefId>>,
@@ -428,6 +430,7 @@ impl DefMap {
                 children: BTreeMap::new(),
             }],
             module_slots: HashMap::from([(root, 0)]),
+            file_to_module: HashMap::new(),
             definitions: Vec::new(),
             definition_slots: HashMap::new(),
             members: BTreeMap::new(),
@@ -446,7 +449,17 @@ impl DefMap {
         };
         builder.lower_file(root, root_file);
         builder.resolve_imports();
-        builder.map
+        let mut map = builder.map;
+        // Build file→module index for O(1) module_for_file lookups.
+        // A file may contain both the primary module and inline sub-modules;
+        // keep the first (root) entry to match the original semantics that
+        // excluded modules whose definitions target them from the same file.
+        for module in &map.modules {
+            if let Some(file_id) = module.file_id() {
+                map.file_to_module.entry(file_id).or_insert(module.id());
+            }
+        }
+        map
     }
 
     pub const fn project_id(&self) -> Option<ProjectId> {
@@ -504,16 +517,10 @@ impl DefMap {
         self.members(owner).find(|member| member.name() == name)
     }
 
+    /// Return the primary module defined in `file_id`, or `None` if this file
+    /// has not been lowered.  O(1) lookup via a pre-built index.
     pub fn module_for_file(&self, file_id: FileId) -> Option<ModuleId> {
-        self.modules()
-            .find(|module| {
-                module.file_id() == Some(file_id)
-                    && !self.definitions().any(|definition| {
-                        definition.target_module() == Some(module.id())
-                            && definition.file_id() == file_id
-                    })
-            })
-            .map(ModuleData::id)
+        self.file_to_module.get(&file_id).copied()
     }
 
     pub fn resolve_name(&self, module_id: ModuleId, name: &str) -> Option<&Definition> {

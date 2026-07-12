@@ -286,11 +286,10 @@ fn add_infinite_loop_lint(file_id: FileId, text: &str, diagnostics: &mut Vec<Dia
             if !scan_block_from(text, block_start, "break") {
                 let offset = line_offset(text, line_idx) + lp;
                 diagnostics.push(
-                    Diagnostic::new(
+                    fast_diag(
                         file_id,
                         TextRange::new(offset as u32, (offset + 4) as u32),
-                        "`loop` without `break` may run forever".to_string(),
-                        DiagnosticOrigin::FastAnalysis,
+                        "`loop` without `break` may run forever",
                     )
                     .with_code(DiagnosticCode::LintInfiniteLoop),
                 );
@@ -318,13 +317,12 @@ fn add_infinite_loop_lint(file_id: FileId, text: &str, diagnostics: &mut Vec<Dia
                         if !scan_block_from(text, block_start, scrutinee) {
                             let offset = line_offset(text, line_idx) + wl;
                             diagnostics.push(
-                                Diagnostic::new(
+                                fast_diag(
                                     file_id,
                                     TextRange::new(offset as u32, (offset + 9) as u32),
                                     format!(
                                         "`while let` loop: `{scrutinee}` is never updated in the body, loop may run forever"
                                     ),
-                                    DiagnosticOrigin::FastAnalysis,
                                 )
                                 .with_code(DiagnosticCode::LintInfiniteLoop),
                             );
@@ -449,6 +447,16 @@ pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>, text: &str) {
 // Per-layer diagnostic collection
 // ---------------------------------------------------------------------------
 
+/// Shorthand for creating a diagnostic originating from the fast-analysis
+/// pipeline (lints, parse errors, type errors).
+fn fast_diag(
+    file_id: FileId,
+    range: impl Into<TextRange>,
+    message: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(file_id, range.into(), message, DiagnosticOrigin::FastAnalysis)
+}
+
 pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> {
     let Some(text) = db.file_text(file_id) else {
         return Vec::new();
@@ -459,11 +467,10 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
         .iter()
         .map(|error| {
             let offset = error.offset.min(text.len()) as u32;
-            Diagnostic::new(
+            fast_diag(
                 file_id,
                 TextRange::new(offset, offset),
                 format!("parse error: {}", error.message),
-                DiagnosticOrigin::FastAnalysis,
             )
             .with_code(parse_error_code(&error.message))
             .with_source(DiagnosticSource::Parse)
@@ -520,11 +527,10 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                 {
                     let name = binding.name().unwrap_or("?");
                     diagnostics.push(
-                        Diagnostic::new(
+                        fast_diag(
                             file_id,
                             fr.range,
                             format!("unused variable `{name}`"),
-                            DiagnosticOrigin::FastAnalysis,
                         )
                         .with_code(DiagnosticCode::LintUnusedVariable),
                     );
@@ -626,14 +632,13 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                     && let Some(fr) = source_map.binding_range(binding_id)
                 {
                     diagnostics.push(
-                        Diagnostic::new(
+                        fast_diag(
                             file_id,
                             fr.range,
                             format!(
                                 "redundant `mut` — `{}` is never assigned",
                                 binding.name().unwrap_or("?")
                             ),
-                            DiagnosticOrigin::FastAnalysis,
                         )
                         .with_code(DiagnosticCode::LintRedundantMut),
                     );
@@ -671,11 +676,10 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
         });
         if !is_referenced {
             diagnostics.push(
-                Diagnostic::new(
+                fast_diag(
                     definition.file_id(),
                     definition.name_range(),
                     format!("unused function `{name}`"),
-                    DiagnosticOrigin::FastAnalysis,
                 )
                 .with_code(DiagnosticCode::LintUnusedFunction),
             );
@@ -710,14 +714,13 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                             + rest.len()
                             + (line.len() - trimmed.len());
                         diagnostics.push(
-                            Diagnostic::new(
+                            fast_diag(
                                 file_id,
                                 TextRange::new(
                                     byte_offset as u32,
                                     end_offset.min(text.len()) as u32,
                                 ),
                                 format!("unreachable code after `{keyword}`"),
-                                DiagnosticOrigin::FastAnalysis,
                             )
                             .with_code(DiagnosticCode::LintUnreachableCode),
                         );
@@ -824,7 +827,7 @@ fn convert_inference_diagnostic(
         }
     };
     Some(
-        Diagnostic::new(file_id, range, message, DiagnosticOrigin::FastAnalysis)
+        fast_diag(file_id, range, message)
             .with_code(code)
             .with_source(DiagnosticSource::Type),
     )

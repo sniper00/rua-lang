@@ -1561,33 +1561,8 @@ impl<'a> InferenceContext<'a> {
                 let item = prefer_expected_if_unknown(actual, expected_item);
                 (vec![item.clone()], Ty::Option(Box::new(item)))
             }
-            ("Ok", [argument]) => {
-                let expected_parts = match expected {
-                    Some(Ty::Result(ok, error)) => Some(((**ok).clone(), (**error).clone())),
-                    _ => None,
-                };
-                let expected_ok = expected_parts.as_ref().map(|(ok, _)| ok);
-                let actual = self.infer_expr(*argument, expected_ok);
-                self.report_argument_mismatch(*argument, expected_ok, &actual);
-                let (expected_ok, error) = expected_parts.unwrap_or((Ty::Unknown, Ty::Unknown));
-                let ok = prefer_expected_if_unknown(actual, Some(expected_ok));
-                (vec![ok.clone()], Ty::Result(Box::new(ok), Box::new(error)))
-            }
-            ("Err", [argument]) => {
-                let expected_parts = match expected {
-                    Some(Ty::Result(ok, error)) => Some(((**ok).clone(), (**error).clone())),
-                    _ => None,
-                };
-                let expected_error = expected_parts.as_ref().map(|(_, error)| error);
-                let actual = self.infer_expr(*argument, expected_error);
-                self.report_argument_mismatch(*argument, expected_error, &actual);
-                let (ok, expected_error) = expected_parts.unwrap_or((Ty::Unknown, Ty::Unknown));
-                let error = prefer_expected_if_unknown(actual, Some(expected_error));
-                (
-                    vec![error.clone()],
-                    Ty::Result(Box::new(ok), Box::new(error)),
-                )
-            }
+            ("Ok", [argument]) => self.infer_result_constructor(true, *argument, expected),
+            ("Err", [argument]) => self.infer_result_constructor(false, *argument, expected),
             ("Vec::new", []) => (Vec::new(), Ty::Vec(Box::new(Ty::Unknown))),
             ("HashMap::new", []) => (
                 Vec::new(),
@@ -1608,6 +1583,33 @@ impl<'a> InferenceContext<'a> {
             return_type,
             substitution: Substitution::new(),
         })
+    }
+
+    /// Shared implementation for `Ok(expr)` and `Err(expr)` built-in
+    /// constructors.  The two arms differ only in which slot of the expected
+    /// `Result` type they fill.
+    fn infer_result_constructor(
+        &mut self,
+        is_ok: bool,
+        argument: ExprId,
+        expected: Option<&Ty>,
+    ) -> (Vec<Ty>, Ty) {
+        let expected_parts = match expected {
+            Some(Ty::Result(ok, error)) => Some(((**ok).clone(), (**error).clone())),
+            _ => None,
+        };
+        let expected_slot = expected_parts
+            .as_ref()
+            .map(|(ok, err)| if is_ok { ok } else { err });
+        let actual = self.infer_expr(argument, expected_slot);
+        self.report_argument_mismatch(argument, expected_slot, &actual);
+        let (ok_def, err_def) = expected_parts.unwrap_or((Ty::Unknown, Ty::Unknown));
+        let slot = prefer_expected_if_unknown(actual, Some(if is_ok { ok_def.clone() } else { err_def.clone() }));
+        if is_ok {
+            (vec![slot.clone()], Ty::Result(Box::new(slot), Box::new(err_def)))
+        } else {
+            (vec![slot.clone()], Ty::Result(Box::new(ok_def), Box::new(slot)))
+        }
     }
 
     fn record_builtin_associated(&mut self, path: &[NameRefId], name: &str, owner_ty: &Ty) {
