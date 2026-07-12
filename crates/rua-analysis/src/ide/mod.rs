@@ -165,6 +165,70 @@ impl Analysis {
         closure_iterator::semantic_tokens(&self.db, file_id)
     }
 
+    /// Resolve the callable type, parameter names, and arguments for a
+    /// call or method-call expression.  Returns `None` when the callee
+    /// type cannot be resolved.
+    fn resolve_call_target(
+        &self,
+        body: &crate::hir::Body,
+        inference: &std::sync::Arc<crate::hir::InferenceResult>,
+        def_map: &crate::hir::DefMap,
+        member_index: &crate::hir::MemberIndex,
+        expr: &crate::hir::Expr,
+    ) -> Option<(
+        crate::hir::CallableTy,
+        Vec<Option<String>>,
+        Vec<crate::hir::ExprId>,
+    )> {
+        match expr {
+            crate::hir::Expr::Call { callee, args } => {
+                let callee_ty = inference.type_of_expr(*callee)?.clone();
+                let (callable, names) = match &callee_ty {
+                    Ty::Function(c) | Ty::Closure(c) => {
+                        let names = resolve_callee_param_names(body, def_map, *callee);
+                        (c.clone(), names)
+                    }
+                    _ => return None,
+                };
+                Some((callable, names, args.clone()))
+            }
+            crate::hir::Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
+                let receiver_ty = inference.type_of_expr(*receiver)?;
+                let method_name = body.name_ref(*method)?.name()?.to_string();
+                let resolution =
+                    member_index.resolve_method(receiver_ty, &method_name)?;
+                let callable = resolution.callable()?.clone();
+                let names = match resolution.target() {
+                    crate::hir::MemberTarget::Definition(def_id) => def_map
+                        .definition(def_id)
+                        .and_then(|def| {
+                            if let crate::hir::ItemSignature::Callable(sig) =
+                                def.signature()
+                            {
+                                Some(
+                                    sig.params()
+                                        .iter()
+                                        .map(|p| p.name().map(|n| n.to_string()))
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default(),
+                    _ => vec![],
+                };
+                Some((callable, names, args.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Signature help at a cursor position (inside a call expression).
     pub fn signature_help(&self, position: ProjectPosition) -> Option<SignatureHelpInfo> {
         let text = self.db.file_text(position.position.file_id)?;
@@ -196,83 +260,9 @@ impl Analysis {
         let expr_id = best_expr_id?;
         let expr = body.expr(expr_id)?;
 
-        // Resolve the callable type.  For direct calls we query the callee
-        // expression type (type_of_expr on the *call* returns the result).
-        // For method calls we go through member_index.
-        let (callable, param_names): (crate::hir::CallableTy, Vec<Option<String>>) = match expr {
-            crate::hir::Expr::Call { callee, .. } => {
-                let callee_ty = inference.type_of_expr(*callee)?.clone();
-                match &callee_ty {
-                    Ty::Function(c) | Ty::Closure(c) => {
-                        // Try to get param names from the callee path's definition.
-                        let names = if let Some(crate::hir::Expr::Path(path)) =
-                            body.expr(*callee)
-                            && let [nr] = &path[..]
-                            && let Some(nr_name) = body.name_ref(*nr)?.name()
-                        {
-                            def_map
-                                .resolve_name(def_map.root(), nr_name)
-                                .and_then(|def| {
-                                    if let crate::hir::ItemSignature::Callable(sig) =
-                                        def.signature()
-                                    {
-                                        Some(
-                                            sig.params()
-                                                .iter()
-                                                .map(|p| p.name().map(|n| n.to_string()))
-                                                .collect(),
-                                        )
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or_default()
-                        } else {
-                            vec![]
-                        };
-                        (c.clone(), names)
-                    }
-                    _ => return None,
-                }
-            }
-            crate::hir::Expr::MethodCall {
-                receiver, method, ..
-            } => {
-                let receiver_ty = inference.type_of_expr(*receiver)?;
-                let method_name = body.name_ref(*method)?.name()?.to_string();
-                let resolution =
-                    member_index.resolve_method(receiver_ty, &method_name)?;
-                let callable = resolution.callable()?.clone();
-                let names = match resolution.target() {
-                    crate::hir::MemberTarget::Definition(def_id) => def_map
-                        .definition(def_id)
-                        .and_then(|def| {
-                            if let crate::hir::ItemSignature::Callable(sig) =
-                                def.signature()
-                            {
-                                Some(
-                                    sig.params()
-                                        .iter()
-                                        .map(|p| p.name().map(|n| n.to_string()))
-                                        .collect(),
-                                )
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default(),
-                    _ => vec![],
-                };
-                (callable, names)
-            }
-            _ => return None,
-        };
-
-        let args: Vec<crate::hir::ExprId> = match expr {
-            crate::hir::Expr::Call { args, .. } => args.clone(),
-            crate::hir::Expr::MethodCall { args, .. } => args.clone(),
-            _ => return None,
-        };
+        let (callable, param_names, args) = self.resolve_call_target(
+            &body, &inference, &def_map, &member_index, expr,
+        )?;
 
         // Build parameter display: use original names when available.
         let param_types: Vec<String> = callable
@@ -370,20 +360,8 @@ impl Analysis {
     /// Hover for `receiver.field` or `receiver.method()`.
     fn member_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
         let file_id = position.position.file_id;
-        let (receiver_ty, field_name) = self.resolve_dot_access(position)?;
+        let (receiver_ty, field_name, token_range) = self.resolve_dot_access(position)?;
         let member_index = self.db.member_index(file_id);
-
-        // Compute the token range for the hover highlight.
-        let text = self.db.file_text(file_id)?;
-        let parse = self.db.parse(file_id);
-        let root = parse.syntax_node();
-        let offset = position.position.offset.min(text.len() as u32);
-        let token_range = completion::token_at_offset(root, offset)
-            .map(|t| {
-                let tr = t.text_range();
-                FileRange::new(file_id, TextRange::new(tr.start().into(), tr.end().into()))
-            })
-            .unwrap_or(FileRange::new(file_id, TextRange::new(offset, offset)));
 
         // Try field resolution
         if let Some(resolution) = member_index.resolve_field(&receiver_ty, &field_name) {
@@ -455,7 +433,7 @@ impl Analysis {
         &self,
         position: ProjectPosition,
     ) -> Option<NavigationTarget> {
-        let (receiver_ty, field_name) = self.resolve_dot_access(position)?;
+        let (receiver_ty, field_name, _token_range) = self.resolve_dot_access(position)?;
         let file_id = position.position.file_id;
         let def_map = self.db.def_map(file_id);
         let member_index = self.db.member_index(file_id);
@@ -478,16 +456,23 @@ impl Analysis {
 
     /// Shared preamble for member hover and goto-def: find the token
     /// after `.`, extract the field/method name, and infer the receiver
-    /// type.  Returns `(receiver_ty, field_name)` on success.
+    /// type.  Returns `(receiver_ty, field_name, token_range)` on success.
     fn resolve_dot_access(
         &self,
         position: ProjectPosition,
-    ) -> Option<(Ty, String)> {
-        let text = self.db.file_text(position.position.file_id)?;
-        let parse = self.db.parse(position.position.file_id);
+    ) -> Option<(Ty, String, FileRange)> {
+        let file_id = position.position.file_id;
+        let text = self.db.file_text(file_id)?;
+        let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
         let offset = position.position.offset.min(text.len() as u32);
         let token = completion::token_at_offset(root, offset)?;
+
+        // Compute the token range for hover highlighting.
+        let token_range = {
+            let tr = token.text_range();
+            FileRange::new(file_id, TextRange::new(tr.start().into(), tr.end().into()))
+        };
 
         // Must be preceded by `.`
         if completion::previous_significant(&token)
@@ -528,7 +513,7 @@ impl Analysis {
             None
         })?;
 
-        Some((receiver_ty, field_name))
+        Some((receiver_ty, field_name, token_range))
     }
 
     /// Go to implementation(s) of a trait method.
@@ -568,7 +553,7 @@ impl Analysis {
                 crate::hir::ItemSignature::Impl(s) => s
                     .trait_ref()
                     .as_ref()
-                    .is_some_and(|tr| tr.syntax().is_some_and(|s| trait_name_matches(s, trait_name))),
+                    .is_some_and(|tr| tr.name_matches(trait_name)),
                 _ => false,
             };
             if !trait_match {
@@ -919,9 +904,7 @@ impl Analysis {
             let sig = def.signature();
             if let crate::hir::ItemSignature::Impl(s) = sig {
                 // Check if the impl is for our type (by matching target type name)
-                if s.target_type()
-                    .syntax()
-                    .is_some_and(|s| trait_name_matches(s, &item.name))
+                if s.target_type().name_matches(&item.name)
                 {
                     // Add the trait being implemented
                     if let Some(trait_ref) = s.trait_ref()
@@ -1020,6 +1003,42 @@ fn is_valid_identifier(name: &str) -> bool {
     bytes
         .iter()
         .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// Resolve parameter names for a direct call by looking up the callee
+/// path's definition in the def_map and extracting its signature params.
+fn resolve_callee_param_names(
+    body: &crate::hir::Body,
+    def_map: &crate::hir::DefMap,
+    callee: crate::hir::ExprId,
+) -> Vec<Option<String>> {
+    let Some(crate::hir::Expr::Path(path)) = body.expr(callee) else {
+        return vec![];
+    };
+    let [nr] = &path[..] else {
+        return vec![];
+    };
+    let Some(ref_info) = body.name_ref(*nr) else {
+        return vec![];
+    };
+    let Some(nr_name) = ref_info.name() else {
+        return vec![];
+    };
+    def_map
+        .resolve_name(def_map.root(), nr_name)
+        .and_then(|def| {
+            if let crate::hir::ItemSignature::Callable(sig) = def.signature() {
+                Some(
+                    sig.params()
+                        .iter()
+                        .map(|p| p.name().map(|n| n.to_string()))
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1171,13 +1190,3 @@ mod tests {
     }
 }
 
-/// Match a trait name against its syntax representation.  The syntax may
-/// be a plain name (`MyTrait`) or include generic arguments
-/// (`MyTrait<i64>`).  We accept exact equality or a prefix match where
-/// the name is followed by `<`.  This prevents `Foo` from matching
-/// `FooBar` (unlike `contains`).
-fn trait_name_matches(syntax: &str, name: &str) -> bool {
-    syntax == name
-        || (syntax.starts_with(name)
-            && syntax.as_bytes().get(name.len()).is_some_and(|c| *c == b'<'))
-}

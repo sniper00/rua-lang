@@ -4,7 +4,7 @@
 //! item paths and members as [`LocalResolveResult::NonLocal`] for the semantic
 //! facade to resolve with a project-specific definition map.
 
-use std::{collections::HashSet, ops::Index};
+use std::ops::Index;
 
 use super::{
     BindingId, Block, Body, BodyId, Condition, Expr, ExprId, MatchArm, NameRefId, Pat, PatId,
@@ -212,11 +212,10 @@ impl LocalUse {
 }
 
 /// Whether a closure captures a variable by reading or writing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CaptureKind {
-    Read,
-    Write,
-}
+/// Semantically identical to [`LocalUseKind`]; a separate alias clarifies
+/// that this is the aggregated (strongest) kind across all uses within a
+/// single closure, not a per-use kind.
+pub type CaptureKind = LocalUseKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalCapture {
@@ -700,7 +699,6 @@ struct LocalResolver<'a> {
     results: Vec<LocalResolveResult>,
     uses: Vec<LocalUse>,
     captures: Vec<LocalCapture>,
-    seen_captures: HashSet<(ExprId, BindingId)>,
 }
 
 impl<'a> LocalResolver<'a> {
@@ -711,7 +709,6 @@ impl<'a> LocalResolver<'a> {
             results: vec![LocalResolveResult::NonLocal; body.name_refs().len()],
             uses: Vec::new(),
             captures: Vec::new(),
-            seen_captures: HashSet::new(),
         }
     }
 
@@ -742,18 +739,15 @@ impl<'a> LocalResolver<'a> {
                 );
                 captured_by.reverse();
                 for closure in &captured_by {
-                    let capture_kind = match candidate.kind {
-                        LocalUseKind::Write => CaptureKind::Write,
-                        LocalUseKind::Read => CaptureKind::Read,
-                    };
+                    let capture_kind = candidate.kind; // CaptureKind = LocalUseKind
                     if let Some(existing) = self
                         .captures
                         .iter_mut()
                         .find(|c| c.closure == *closure && c.binding == target)
                     {
                         // Upgrade to Write if this or any use is a write.
-                        if capture_kind == CaptureKind::Write {
-                            existing.kind = CaptureKind::Write;
+                        if capture_kind == LocalUseKind::Write {
+                            existing.kind = LocalUseKind::Write;
                         }
                     } else {
                         self.captures.push(LocalCapture {
@@ -762,8 +756,6 @@ impl<'a> LocalResolver<'a> {
                             first_use: candidate.name_ref,
                             kind: capture_kind,
                         });
-                        self.seen_captures
-                            .insert((*closure, target.binding()));
                     }
                 }
                 self.uses.push(LocalUse {

@@ -65,6 +65,10 @@ struct Server {
     file_ids: HashMap<PathBuf, (Uri, FileId)>,
     /// FileId → (URI, open buffer text).
     open_buffers: HashMap<FileId, (Uri, String)>,
+    /// FileId → URI reverse lookup, maintained alongside `file_ids`
+    /// and `open_buffers` so rename and code-edit handlers don't
+    /// need to rebuild it from scratch.
+    file_to_uri: HashMap<FileId, Uri>,
     /// Next FileId to allocate.
     next_file_id: u32,
     /// Next SourceRootId to allocate.
@@ -85,6 +89,7 @@ impl Server {
             host: AnalysisHost::new(),
             file_ids: HashMap::new(),
             open_buffers: HashMap::new(),
+            file_to_uri: HashMap::new(),
             next_file_id: 0,
             next_root_id: 1, // 0 is workspace root
             library_roots: Vec::new(),
@@ -106,15 +111,7 @@ impl Server {
     }
 
     fn uri_for_file(&self, file_id: FileId) -> Option<Uri> {
-        self.open_buffers
-            .get(&file_id)
-            .map(|(uri, _)| uri.clone())
-            .or_else(|| {
-                self.file_ids
-                    .iter()
-                    .find(|(_, (_, id))| *id == file_id)
-                    .map(|(_, (uri, _))| uri.clone())
-            })
+        self.file_to_uri.get(&file_id).cloned()
     }
 
     fn ensure_file_id(&mut self, uri: &Uri) -> FileId {
@@ -125,6 +122,7 @@ impl Server {
         let id = FileId::new(self.next_file_id);
         self.next_file_id += 1;
         self.file_ids.insert(key, (uri.clone(), id));
+        self.file_to_uri.insert(id, uri.clone());
         id
     }
 
@@ -389,6 +387,33 @@ impl Server {
         let source = analysis.parse(file_id).syntax_node().text().to_string();
         let line_index = LineIndex::new(&source);
         let def_map = analysis.def_map(file_id);
+        // Precompute: for each name, count how many function bodies
+        // reference it (used by Function/Method CodeLens below).
+        let mut ref_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let total_impl_count = def_map
+            .definitions()
+            .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
+            .count();
+        for d in def_map.definitions() {
+            if matches!(
+                d.kind(),
+                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+            ) {
+                if let Some(body) = analysis.body(d.id()) {
+                    let mut seen = std::collections::HashSet::new();
+                    for (_, nr) in body.name_refs() {
+                        if let Some(n) = nr.name() {
+                            seen.insert(n.to_string());
+                        }
+                    }
+                    for n in seen {
+                        *ref_counts.entry(n).or_default() += 1;
+                    }
+                }
+            }
+        }
+
         let mut lenses = Vec::new();
 
         for definition in def_map.definitions() {
@@ -398,48 +423,31 @@ impl Server {
             let kind = definition.kind();
             let title = match kind {
                 rua_analysis::DefKind::Function | rua_analysis::DefKind::Method => {
-                    let name = definition.name();
-                    // Count how many bodies reference this function by name.
-                    let ref_count = def_map
-                        .definitions()
-                        .filter(|d| {
-                            matches!(
-                                d.kind(),
-                                rua_analysis::DefKind::Function
-                                    | rua_analysis::DefKind::Method
-                            )
-                        })
-                        .filter_map(|d| analysis.body(d.id()))
-                        .filter(|body| {
-                            body.name_refs()
-                                .any(|(_, nr)| nr.name() == Some(name))
-                        })
-                        .count();
+                    let ref_count = ref_counts
+                        .get(definition.name())
+                        .copied()
+                        .unwrap_or(0);
                     format!("{ref_count} reference(s)")
                 }
                 rua_analysis::DefKind::Struct => {
-                    let impls: Vec<_> = def_map
+                    let impl_count = def_map
                         .definitions()
                         .filter(|d| {
                             d.kind() == rua_analysis::DefKind::Impl
                                 && d.name() == definition.name()
                         })
-                        .collect();
-                    if impls.is_empty() {
+                        .count();
+                    if impl_count == 0 {
                         "struct".to_string()
                     } else {
-                        format!("{} impl(s)", impls.len())
+                        format!("{impl_count} impl(s)")
                     }
                 }
                 rua_analysis::DefKind::Trait => {
-                    let impls: Vec<_> = def_map
-                        .definitions()
-                        .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
-                        .collect();
-                    if impls.is_empty() {
+                    if total_impl_count == 0 {
                         "trait".to_string()
                     } else {
-                        format!("{} impl(s)", impls.len())
+                        format!("{total_impl_count} impl(s)")
                     }
                 }
                 _ => continue,
@@ -1088,9 +1096,9 @@ impl Server {
                             .rmatch_indices("let ")
                             .find(|&(pos, _)| {
                                 pos == 0
-                                    || !source.as_bytes()[pos - 1]
-                                        .is_ascii_alphanumeric()
-                                    && source.as_bytes()[pos - 1] != b'_'
+                                    || !rua_syntax::text::is_ident_byte(
+                                        source.as_bytes()[pos - 1],
+                                    )
                             })
                             .map(|(pos, _)| pos)
                             .unwrap_or(d_start);
@@ -1948,11 +1956,7 @@ impl Server {
                                 kind: lsp_types::SymbolKind::FUNCTION,
                                 uri: self
                                     .uri_for_file(item.file_id)
-                                    .unwrap_or_else(|| {
-                                        format!("file:///unknown/{}", item.file_id.index())
-                                            .parse()
-                                            .unwrap()
-                                    }),
+                                    .unwrap_or_else(|| fallback_uri(item.file_id)),
                                 range: Range {
                                     start: Position::new(sl as u32, sc as u32),
                                     end: Position::new(el as u32, ec as u32),
@@ -2019,11 +2023,7 @@ impl Server {
                                 kind: lsp_types::SymbolKind::FUNCTION,
                                 uri: self
                                     .uri_for_file(item.file_id)
-                                    .unwrap_or_else(|| {
-                                        format!("file:///unknown/{}", item.file_id.index())
-                                            .parse()
-                                            .unwrap()
-                                    }),
+                                    .unwrap_or_else(|| fallback_uri(item.file_id)),
                                 range: Range {
                                     start: Position::new(sl as u32, sc as u32),
                                     end: Position::new(el as u32, ec as u32),
@@ -2701,24 +2701,11 @@ impl Server {
             .project_position(uri, pos)
             .and_then(|pp| {
                 let analysis = self.host.analysis();
-                // Build a FileId→Uri map for the workspace edit (must
-                // happen before the analysis borrow below so we don't
-                // hold two borrows on self).
-                let file_uris: HashMap<rua_analysis::FileId, Uri> = self
-                    .open_buffers
-                    .iter()
-                    .map(|(id, (uri, _))| (*id, uri.clone()))
-                    .chain(
-                        self.file_ids
-                            .iter()
-                            .map(|(_, (uri, id))| (*id, uri.clone())),
-                    )
-                    .collect();
                 match analysis.rename(pp, &params.new_name) {
                     Ok(change) => source_change_to_workspace_edit(
                         &analysis,
                         &change,
-                        |fid| file_uris.get(&fid).cloned(),
+                        |fid| self.file_to_uri.get(&fid).cloned(),
                     ),
                     Err(_) => None,
                 }
@@ -4000,24 +3987,24 @@ fn fallback_uri(file_id: rua_analysis::FileId) -> Uri {
 /// back to after any initial comments, or position 0.
 fn find_import_insertion_point(source: &str) -> usize {
     let mut last_import_end = 0usize;
+    let mut pos = 0usize;
     for line in source.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
-            // This line is an import/module declaration. Record where it
-            // ends (start of next line) as a candidate insertion point.
-            let line_start = line.as_ptr() as usize - source.as_ptr() as usize;
-            last_import_end = line_start + line.len() + 1; // +1 for \n
+            last_import_end = pos + line.len() + 1; // +1 for \n
         }
+        pos += line.len() + 1;
     }
     if last_import_end > 0 {
         return last_import_end.min(source.len());
     }
     // No imports found — insert after any initial comment block.
+    pos = 0;
     for line in source.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
-            let line_start = line.as_ptr() as usize - source.as_ptr() as usize;
-            last_import_end = line_start + line.len() + 1;
+            last_import_end = pos + line.len() + 1;
+            pos += line.len() + 1;
         } else {
             break;
         }

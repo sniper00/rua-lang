@@ -173,6 +173,20 @@ struct InferenceContext<'a> {
     closure_returns: Vec<Ty>,
 }
 
+/// Check whether `lhs op rhs` is clearly incompatible for arithmetic —
+/// BOOL, UNIT, or non-Add String operands don't make sense with + - * / %.
+fn is_incompatible_arithmetic(lhs: &Ty, rhs: &Ty, op: BinaryOp) -> bool {
+    let bad = |t: &Ty| *t == Ty::BOOL || *t == Ty::UNIT;
+    let bad_string = |t: &Ty, other: &Ty| {
+        *t == Ty::STRING
+            && op != BinaryOp::Add
+            && !other.is_unknown()
+            && !other.is_never()
+            && *other != Ty::STRING
+    };
+    bad(lhs) || bad(rhs) || bad_string(lhs, rhs) || bad_string(rhs, lhs)
+}
+
 impl<'a> InferenceContext<'a> {
     fn new(
         body: &'a Body,
@@ -757,23 +771,7 @@ impl<'a> InferenceContext<'a> {
                 if lhs_ty.is_numeric() && rhs_ty.is_numeric() {
                     return lhs_ty.join(&rhs_ty);
                 }
-                // Emit InvalidBinary when one side is clearly incompatible
-                // (BOOL/UNIT/String with arithmetic, etc.)
-                let incompatible = lhs_ty == Ty::BOOL
-                    || lhs_ty == Ty::UNIT
-                    || rhs_ty == Ty::BOOL
-                    || rhs_ty == Ty::UNIT
-                    || (lhs_ty == Ty::STRING && op != BinaryOp::Add)
-                    || (rhs_ty == Ty::STRING && op != BinaryOp::Add)
-                    || (lhs_ty == Ty::STRING
-                        && !rhs_ty.is_unknown()
-                        && !rhs_ty.is_never()
-                        && rhs_ty != Ty::STRING)
-                    || (rhs_ty == Ty::STRING
-                        && !lhs_ty.is_unknown()
-                        && !lhs_ty.is_never()
-                        && lhs_ty != Ty::STRING);
-                if incompatible {
+                if is_incompatible_arithmetic(&lhs_ty, &rhs_ty, op) {
                     self.diagnostics
                         .push(InferenceDiagnostic::InvalidBinary {
                             expr: expr_id,
@@ -789,20 +787,13 @@ impl<'a> InferenceContext<'a> {
                 self.expect_bool(rhs, &rhs_ty);
                 Ty::BOOL
             }
-            BinaryOp::Equal
-            | BinaryOp::NotEqual
-            | BinaryOp::Less
+            BinaryOp::Equal | BinaryOp::NotEqual => Ty::BOOL,
+            BinaryOp::Less
             | BinaryOp::LessOrEqual
             | BinaryOp::Greater
             | BinaryOp::GreaterOrEqual => {
                 // Ordering operators require numeric operands.
-                if matches!(
-                    op,
-                    BinaryOp::Less
-                        | BinaryOp::LessOrEqual
-                        | BinaryOp::Greater
-                        | BinaryOp::GreaterOrEqual
-                ) && !lhs_ty.is_unknown()
+                if !lhs_ty.is_unknown()
                     && !rhs_ty.is_unknown()
                     && !lhs_ty.is_never()
                     && !rhs_ty.is_never()

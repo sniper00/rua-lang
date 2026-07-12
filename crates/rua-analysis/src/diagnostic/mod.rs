@@ -300,16 +300,32 @@ pub fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
 }
 
 /// Suppress cascading noise: type errors on the same line as a parse error are
-/// downgraded or removed to avoid recovery artifacts.
-pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>) {
-    // Collect parse-error byte offsets (approximate line positions).
-    let parse_error_offsets: Vec<u32> = diagnostics
+/// removed to avoid recovery artifacts.  Uses source text for precise line
+/// matching instead of a byte-distance heuristic.
+pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>, text: &str) {
+    // Build line-start offsets for line-of-byte-offset lookups.
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, &b) in text.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+
+    let line_of = |offset: u32| -> usize {
+        let o = offset as usize;
+        match line_starts.binary_search(&o) {
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
+        }
+    };
+
+    let parse_error_lines: Vec<usize> = diagnostics
         .iter()
         .filter(|d| d.source == DiagnosticSource::Parse)
-        .map(|d| d.range.range.start())
+        .map(|d| line_of(d.range.range.start()))
         .collect();
 
-    if parse_error_offsets.is_empty() {
+    if parse_error_lines.is_empty() {
         return;
     }
 
@@ -317,20 +333,7 @@ pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>) {
         if d.source == DiagnosticSource::Parse {
             return true;
         }
-        // Suppress type/name diagnostics near parse errors.  Use a
-        // generous byte window (500 bytes ≈ several lines) to avoid
-        // both false positives (suppressing errors on nearby lines)
-        // and false negatives (showing cascaded errors on the same
-        // long line).  A line-aware version would need source text.
-        let start = d.range.range.start();
-        !parse_error_offsets.iter().any(|offset| {
-            let diff = if start > *offset {
-                start - offset
-            } else {
-                offset - start
-            };
-            diff < 500
-        })
+        !parse_error_lines.iter().any(|&line| line == line_of(d.range.range.start()))
     });
 }
 
@@ -529,7 +532,7 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
             for keyword in &["return", "break", "continue"] {
                 // Find the keyword as a standalone word (not inside an
                 // identifier like `return_value` or a string literal).
-                let pos = match word_boundary_find(trimmed, keyword) {
+                let pos = match rua_syntax::text::word_boundary_find(trimmed, keyword) {
                     Some(p) => p,
                     None => continue,
                 };
@@ -568,7 +571,7 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
     }
 
     normalize_diagnostics(&mut diagnostics);
-    suppress_cascade(&mut diagnostics);
+    suppress_cascade(&mut diagnostics, &text);
     diagnostics
 }
 
@@ -688,52 +691,21 @@ fn expr_range(
     source_map.expr_range(expr).map(|fr| fr.range)
 }
 
-fn mismatch_context_label(context: TypeMismatchContext) -> String {
+fn mismatch_context_label(context: TypeMismatchContext) -> std::borrow::Cow<'static, str> {
     match context {
-        TypeMismatchContext::Annotation => " in let annotation".to_string(),
-        TypeMismatchContext::Return => " in return position".to_string(),
-        TypeMismatchContext::Assignment => " in assignment".to_string(),
+        TypeMismatchContext::Annotation => " in let annotation".into(),
+        TypeMismatchContext::Return => " in return position".into(),
+        TypeMismatchContext::Assignment => " in assignment".into(),
         TypeMismatchContext::Argument { index } => {
-            format!(" in argument {}", index + 1)
+            std::borrow::Cow::Owned(format!(" in argument {}", index + 1))
         }
-        TypeMismatchContext::ClosureReturn => " in closure return".to_string(),
-        TypeMismatchContext::Branch => " in branch".to_string(),
-        TypeMismatchContext::RangeBound => " in range bound".to_string(),
-        TypeMismatchContext::Index => " in index".to_string(),
+        TypeMismatchContext::ClosureReturn => " in closure return".into(),
+        TypeMismatchContext::Branch => " in branch".into(),
+        TypeMismatchContext::RangeBound => " in range bound".into(),
+        TypeMismatchContext::Index => " in index".into(),
     }
 }
 
-/// Find `keyword` in `text` at a word boundary — the character before
-/// the match (if any) and the character after the match must not be
-/// alphanumeric or `_`.  This prevents matching inside identifiers
-/// (e.g. `return_value`) or string literals.
-fn word_boundary_find(text: &str, keyword: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let kw_bytes = keyword.as_bytes();
-    let mut search_from = 0;
-    loop {
-        let pos = text[search_from..].find(keyword)?;
-        let abs_pos = search_from + pos;
-        // Check left boundary.
-        if abs_pos > 0 {
-            let before = bytes[abs_pos - 1];
-            if before.is_ascii_alphanumeric() || before == b'_' {
-                search_from = abs_pos + 1;
-                continue;
-            }
-        }
-        // Check right boundary.
-        let after_idx = abs_pos + kw_bytes.len();
-        if after_idx < bytes.len() {
-            let after = bytes[after_idx];
-            if after.is_ascii_alphanumeric() || after == b'_' {
-                search_from = abs_pos + 1;
-                continue;
-            }
-        }
-        return Some(abs_pos);
-    }
-}
 
 fn parse_error_code(message: &str) -> DiagnosticCode {
     if message.contains("unterminated") && message.contains("comment") {

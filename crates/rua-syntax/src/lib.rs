@@ -15,6 +15,7 @@
 pub mod ast;
 pub mod format;
 pub mod symbols;
+pub mod text;
 mod kind;
 mod lexer;
 mod line_index;

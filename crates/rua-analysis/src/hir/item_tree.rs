@@ -132,6 +132,17 @@ impl TypeRef {
         self.syntax.as_ref().map(SignatureSyntax::display)
     }
 
+    /// Check whether this type reference's syntax matches a bare trait
+    /// name.  The syntax may be a plain name (`MyTrait`) or include
+    /// generic arguments (`MyTrait<i64>`).  Accepts exact equality or
+    /// a prefix match where the name is followed by `<`.  This prevents
+    /// `Foo` from matching `FooBar` (unlike `contains`).
+    pub fn name_matches(&self, name: &str) -> bool {
+        self.syntax().is_some_and(|s| {
+            s == name || (s.starts_with(name) && s.as_bytes().get(name.len()).is_some_and(|c| *c == b'<'))
+        })
+    }
+
     pub const fn is_missing(&self) -> bool {
         self.syntax.is_none()
     }

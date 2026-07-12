@@ -1287,25 +1287,15 @@ pub(crate) fn definition_signature(
         DefKind::Enum => Some(format!("enum {}", definition.name())),
         DefKind::Trait => Some(format!("trait {}", definition.name())),
         DefKind::Module => Some(format!("mod {}", definition.name())),
-        DefKind::Field => {
+        DefKind::Field | DefKind::Variant => {
             let member_index = db.member_index(def_map.root_file());
             if let Some(parent_id) = definition.owner() {
                 if let Some(template_ty) = member_index.type_template(parent_id) {
-                    let candidates = member_index.field_candidates(template_ty);
-                    if let Some(c) =
-                        candidates.iter().find(|c| c.name() == definition.name())
-                    {
-                        return Some(format!("{}: {}", definition.name(), c.ty()));
-                    }
-                }
-            }
-            Some(definition.name().to_string())
-        }
-        DefKind::Variant => {
-            let member_index = db.member_index(def_map.root_file());
-            if let Some(parent_id) = definition.owner() {
-                if let Some(template_ty) = member_index.type_template(parent_id) {
-                    let candidates = member_index.associated_candidates(template_ty);
+                    let candidates = match definition.kind() {
+                        DefKind::Field => member_index.field_candidates(template_ty),
+                        DefKind::Variant => member_index.associated_candidates(template_ty),
+                        _ => unreachable!(),
+                    };
                     if let Some(c) =
                         candidates.iter().find(|c| c.name() == definition.name())
                     {
@@ -1391,6 +1381,28 @@ fn struct_literal_type(
     None
 }
 
+/// Given an expression that is an enum scrutinee, return `(scrutinee_ty, type_template)`
+/// if the scrutinee is a named enum type. Used by if-let, while-let, and match
+/// pattern-scrutinee completions to enumerate variants.
+fn enum_type_template(
+    db: &BaseDb,
+    def_map: &DefMap,
+    file_id: FileId,
+    inference: &std::sync::Arc<crate::hir::InferenceResult>,
+    scrutinee: crate::hir::ExprId,
+) -> Option<(Ty, Ty)> {
+    let scrutinee_ty = inference.type_of_expr(scrutinee)?.clone();
+    if let Ty::Named(named) = &scrutinee_ty {
+        let def = def_map.definition(named.definition())?;
+        if def.kind() == DefKind::Enum {
+            let member_index = db.member_index(file_id);
+            let template = member_index.type_template(def.id())?.clone();
+            return Some((scrutinee_ty, template));
+        }
+    }
+    None
+}
+
 /// If the cursor is inside an if-let or while-let pattern with an enum
 /// scrutinee, return the scrutinee type and its enum template.
 fn pattern_scrutinee_enum(
@@ -1416,14 +1428,10 @@ fn pattern_scrutinee_enum(
         if !range.range.contains(offset) {
             continue;
         }
-        let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
-        if let Ty::Named(named) = &scrutinee_ty {
-            let def = def_map.definition(named.definition())?;
-            if def.kind() == DefKind::Enum {
-                let member_index = db.member_index(position.file_id);
-                let template = member_index.type_template(def.id())?.clone();
-                return Some((scrutinee_ty, template));
-            }
+        if let Some(result) = enum_type_template(
+            db, def_map, position.file_id, &inference, *scrutinee,
+        ) {
+            return Some(result);
         }
     }
 
@@ -1453,15 +1461,10 @@ fn pattern_scrutinee_enum(
             // body start so we cover `while let |` and `while let Some(|`.
             let left = body_range.range.start().saturating_sub(100);
             if offset >= left && offset <= body_range.range.start() {
-                let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
-                if let Ty::Named(named) = &scrutinee_ty {
-                    let def = def_map.definition(named.definition())?;
-                    if def.kind() == DefKind::Enum {
-                        let member_index = db.member_index(position.file_id);
-                        let template =
-                            member_index.type_template(def.id())?.clone();
-                        return Some((scrutinee_ty, template));
-                    }
+                if let Some(result) = enum_type_template(
+                    db, def_map, position.file_id, &inference, *scrutinee,
+                ) {
+                    return Some(result);
                 }
             }
         }
@@ -1488,15 +1491,10 @@ fn match_scrutinee_enum(
         if !range.range.contains(offset) {
             continue;
         }
-        let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
-        // Check if the scrutinee is a named enum type.
-        if let Ty::Named(named) = &scrutinee_ty {
-            let enum_def = def_map.definition(named.definition())?;
-            if enum_def.kind() == DefKind::Enum {
-                let member_index = db.member_index(position.file_id);
-                let template = member_index.type_template(enum_def.id())?.clone();
-                return Some((scrutinee_ty, template));
-            }
+        if let Some(result) =
+            enum_type_template(db, def_map, position.file_id, &inference, *scrutinee)
+        {
+            return Some(result);
         }
     }
     None
