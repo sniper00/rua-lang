@@ -214,9 +214,10 @@ fn type_to_emmylua(ty: &Type) -> String {
                     "any|nil"
                 }
                 "Result" => {
+                    // Multi-return: Ok(v) returns bare v; Err(e) returns nil, e.
                     let ok = args.first().map(type_to_emmylua).unwrap_or_else(|| "any".into());
                     let err = args.get(1).map(type_to_emmylua).unwrap_or_else(|| "any".into());
-                    return format!("{{ ok: {ok} }}|{{ err: {err} }}");
+                    return format!("{ok}|nil, {err}|nil");
                 }
                 "HashMap" => "table",
                 _ => name.as_str(),

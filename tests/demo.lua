@@ -17,7 +17,7 @@ local Container = {}
 Container.__index = Container
 ---@class Wrapper
 ---@generic T
----@field inner { ok: T }|{ err: string }|nil
+---@field inner T|nil, string|nil|nil
 local Wrapper = {}
 Wrapper.__index = Wrapper
 ---@class Color
@@ -431,7 +431,7 @@ function demo_trait_object(person)
 end
 
 ---@param path string
----@return { ok: string }|{ err: string }
+---@return string|nil, string|nil
 function load_config(path)
     if path == "" then
         return nil, "empty path"
@@ -441,13 +441,13 @@ function load_config(path)
 end
 
 ---@param raw string
----@return { ok: integer }|{ err: string }
+---@return integer|nil, string|nil
 function parse_int(raw)
     return 42
 end
 
 ---@param path string
----@return { ok: integer }|{ err: string }
+---@return integer|nil, string|nil
 function load_and_parse(path)
     local __t49, __t50 = load_config(path)
     if __t50 ~= nil then return nil, __t50 end
@@ -487,7 +487,7 @@ end
 
 ---@return integer
 function demo_arithmetic()
-    local int_sum = 1 + 2
+    local int_sum = 1 + 2 + 3
     local float_sum = 1.5 + 2.5
     local mixed = 1 + 2.5
     local greeting = (("hello" .. " ") .. "world")
