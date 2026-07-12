@@ -3711,10 +3711,12 @@ fn completion_to_lsp(
         tags,
         data,
         additional_text_edits: item.import_path().map(|path| {
+            let insert_line = find_import_insertion_point(source);
+            let (il, _) = line_index.line_col(insert_line, source);
             vec![TextEdit {
                 range: Range {
-                    start: Position::new(0, 0),
-                    end: Position::new(0, 0),
+                    start: Position::new(il as u32, 0),
+                    end: Position::new(il as u32, 0),
                 },
                 new_text: format!("{path}\n"),
             }]
@@ -3991,6 +3993,36 @@ fn fallback_uri(file_id: rua_analysis::FileId) -> Uri {
     format!("file:///unknown/{}", file_id.index())
         .parse()
         .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
+}
+
+/// Find the byte offset at which a new `use` import statement should be
+/// inserted. Looks for the last existing import/module declaration; falls
+/// back to after any initial comments, or position 0.
+fn find_import_insertion_point(source: &str) -> usize {
+    let mut last_import_end = 0usize;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
+            // This line is an import/module declaration. Record where it
+            // ends (start of next line) as a candidate insertion point.
+            let line_start = line.as_ptr() as usize - source.as_ptr() as usize;
+            last_import_end = line_start + line.len() + 1; // +1 for \n
+        }
+    }
+    if last_import_end > 0 {
+        return last_import_end.min(source.len());
+    }
+    // No imports found — insert after any initial comment block.
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            let line_start = line.as_ptr() as usize - source.as_ptr() as usize;
+            last_import_end = line_start + line.len() + 1;
+        } else {
+            break;
+        }
+    }
+    last_import_end.min(source.len())
 }
 
 fn path_to_uri(path: &Path) -> Option<Uri> {

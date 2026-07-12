@@ -736,14 +736,16 @@ fn word_boundary_find(text: &str, keyword: &str) -> Option<usize> {
 }
 
 fn parse_error_code(message: &str) -> DiagnosticCode {
-    if message.contains("unterminated") {
+    if message.contains("unterminated") && message.contains("comment") {
+        DiagnosticCode::ParseUnterminatedComment
+    } else if message.contains("unterminated") {
         DiagnosticCode::ParseUnterminatedString
+    } else if message.contains("missing") || message.contains("unclosed") {
+        DiagnosticCode::ParseMissingDelimiter
     } else if message.contains("expected") {
         DiagnosticCode::ParseExpectedItem
-    } else if message.contains("unexpected") {
-        DiagnosticCode::ParseUnexpectedToken
     } else {
-        DiagnosticCode::ParseExpectedItem
+        DiagnosticCode::ParseUnexpectedToken
     }
 }
 
