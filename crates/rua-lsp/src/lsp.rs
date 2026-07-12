@@ -3638,13 +3638,13 @@ fn completion_to_lsp(
 
     // label_details: structured display.  VS Code renders
     // label_details.detail directly after the label with no automatic
-    // separator, so we only populate it for type-like kinds (prepended
-    // with ": ").  Methods, functions, and keywords rely on the
-    // top-level `detail` field instead, which VS Code renders with
-    // proper spacing.
+    // separator.  We always include the detail with a prefix that
+    // provides visual separation: ": " for type-like kinds, " " for
+    // signatures and keywords.  (When label_details is Some, VS Code
+    // ignores the top-level detail field, so we MUST include it here.)
     let label_details = {
         let raw_detail = item.detail().map(|d| d.to_string());
-        let detail = raw_detail.and_then(|d| match item.kind() {
+        let detail = raw_detail.map(|d| match item.kind() {
             CompletionKind::Field
             | CompletionKind::Variable
             | CompletionKind::Parameter
@@ -3654,15 +3654,12 @@ fn completion_to_lsp(
             | CompletionKind::Trait
             | CompletionKind::BuiltinType
             | CompletionKind::TypeAlias
-            | CompletionKind::Module => Some(format!(": {d}")),
-            // Methods, functions, keywords, postfix templates — the
-            // top-level detail already provides the signature/description
-            // with correct spacing; duplicating it here concatenates.
+            | CompletionKind::Module => format!(": {d}"),
             CompletionKind::Method
             | CompletionKind::Function
             | CompletionKind::Keyword
             | CompletionKind::Impl
-            | CompletionKind::Macro => None,
+            | CompletionKind::Macro => format!(" {d}"),
         });
         let description = match item.kind() {
             CompletionKind::Keyword => Some("keyword".to_string()),
@@ -3706,7 +3703,9 @@ fn completion_to_lsp(
     CompletionItem {
         label: item.label().to_string(),
         kind,
-        detail: item.detail().map(|d| d.to_string()),
+        // detail is provided through label_details.detail with proper
+        // separators; avoid duplication with the top-level field.
+        detail: None,
         documentation: item.documentation().map(|d| {
             Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,
