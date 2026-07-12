@@ -11,5 +11,5 @@ function use_value()
     local __t1 = load()
     if __t1 ~= nil and __t1.err ~= nil then return __t1 end
     local value = __t1.ok
-    return { ok = (value + 1) }
+    return { ok = value + 1 }
 end

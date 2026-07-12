@@ -15,5 +15,5 @@ end
 ---@param values integer[]
 ---@return integer
 function read(item, values)
-    return (id(item.value) + values[0])
+    return id(item.value) + values[0]
 end

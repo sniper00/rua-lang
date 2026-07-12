@@ -13,7 +13,7 @@ function main()
             local __t6
             do
                 local value = __t3
-                __t6 = (value * 2)
+                __t6 = value * 2
             end
             __t3 = __t6
         end
@@ -21,7 +21,7 @@ function main()
             local __t7
             do
                 local value = __t3
-                __t7 = (value > 4)
+                __t7 = value > 4
             end
             if not __t7 then __t5 = false end
         end

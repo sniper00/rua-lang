@@ -5,7 +5,7 @@ local maximum
 ---@param b integer
 ---@return integer
 function maximum(a, b)
-    if (a > b) then
+    if a > b then
         return a
     else
         return b

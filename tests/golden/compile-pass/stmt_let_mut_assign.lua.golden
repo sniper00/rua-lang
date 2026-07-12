@@ -4,6 +4,6 @@ local increment
 ---@return integer
 function increment()
     local value = 1
-    value = (value + 1)
+    value = value + 1
     return value
 end

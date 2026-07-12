@@ -5,7 +5,7 @@ local absolute
 ---@return integer
 function absolute(value)
     local result
-    if (value < 0) then
+    if value < 0 then
         result = -value
     else
         result = value

@@ -4,19 +4,19 @@ local is_even, is_odd
 ---@param n integer
 ---@return boolean
 function is_even(n)
-    if (n == 0) then
+    if n == 0 then
         return true
     else
-        return is_odd((n - 1))
+        return is_odd(n - 1)
     end
 end
 
 ---@param n integer
 ---@return boolean
 function is_odd(n)
-    if (n == 0) then
+    if n == 0 then
         return false
     else
-        return is_even((n - 1))
+        return is_even(n - 1)
     end
 end

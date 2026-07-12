@@ -13,7 +13,7 @@ do
 ---@param b integer
 ---@return integer
     function add(a, b)
-        return (a + b)
+        return a + b
     end
     math.add = add
 end

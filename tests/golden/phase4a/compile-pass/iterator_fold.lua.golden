@@ -13,7 +13,7 @@ function main()
             local __t6
             do
                 local value = __t3
-                __t6 = (value * 2)
+                __t6 = value * 2
             end
             __t3 = __t6
         end
@@ -22,7 +22,7 @@ function main()
             do
                 local total = __t2
                 local value = __t3
-                __t7 = (total + value)
+                __t7 = total + value
             end
             __t2 = __t7
         end

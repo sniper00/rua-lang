@@ -14,7 +14,7 @@ function main()
             local __t7
             do
                 local value = __t4
-                total = (total + value)
+                total = total + value
                 __t7 = value
             end
             ::__t8_done::

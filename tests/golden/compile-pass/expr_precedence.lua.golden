@@ -3,5 +3,5 @@ local precedence
 
 ---@return boolean
 function precedence()
-    return ((((1 + (2 * 3)) == 7) and true) or false)
+    return 1 + 2 * 3 == 7 and true or false
 end

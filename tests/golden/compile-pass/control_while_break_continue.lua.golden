@@ -4,12 +4,12 @@ local count
 ---@return integer
 function count()
     local value = 0
-    while (value < 10) do
-        value = (value + 1)
-        if (value == 3) then
+    while value < 10 do
+        value = value + 1
+        if value == 3 then
             goto continue
         end
-        if (value == 5) then
+        if value == 5 then
             break
         end
         ::continue::

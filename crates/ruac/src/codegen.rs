@@ -1181,19 +1181,23 @@ impl Codegen<'_> {
         let m = self.fresh_tmp();
         let s = self.gen_inline(scrut);
         self.line(&format!("local {} = {}", m, s));
-        let done = format!("{}_done", m);
-        self.line(&format!("local {} = false", done));
 
-        for arm in arms {
+        let mut last_is_wildcard = false;
+        for (i, arm) in arms.iter().enumerate() {
             let (tests, binds) = self.arm_tests(arm, &m);
-            self.line(&format!("if not {} then", done));
+            let prefix = if i == 0 { "if " } else { "elseif " };
+            let has_test = !tests.is_empty();
+
+            if i == arms.len() - 1 && !has_test {
+                last_is_wildcard = true;
+                self.line("else");
+            } else if has_test {
+                self.line(&format!("{}{} then", prefix, tests.join(" and ")));
+            } else {
+                self.line(&format!("{}true then", prefix));
+            }
             self.indent += 1;
 
-            let has_struct_test = !tests.is_empty();
-            if has_struct_test {
-                self.line(&format!("if {} then", tests.join(" and ")));
-                self.indent += 1;
-            }
             for (name, subj) in &binds {
                 self.line(&format!("local {} = {}", name, subj));
             }
@@ -1204,26 +1208,20 @@ impl Codegen<'_> {
             }
 
             self.gen_expr_to(&arm.body, dest);
-            if !matches!(dest, Dest::Return) {
-                self.line(&format!("{} = true", done));
-            }
 
             if guard.is_some() {
                 self.indent -= 1;
                 self.line("end");
             }
-            if has_struct_test {
-                self.indent -= 1;
-                self.line("end");
-            }
             self.indent -= 1;
-            self.line("end");
         }
 
-        self.line(&format!("if not {} then", done));
-        self.indent += 1;
-        self.line("error(\"non-exhaustive match\")");
-        self.indent -= 1;
+        if !last_is_wildcard {
+            self.line("else");
+            self.indent += 1;
+            self.line("error(\"non-exhaustive match\")");
+            self.indent -= 1;
+        }
         self.line("end");
     }
 
@@ -1382,7 +1380,7 @@ impl Codegen<'_> {
                 if *op == BinOp::Add && self.info.is_str_concat(e.span.start, e.span.len) {
                     return format!("({} .. {})", l, r);
                 }
-                format!("({} {} {})", l, binop_lua(*op), r)
+                format!("{} {} {}", l, binop_lua(*op), r)
             }
             ExprKind::Call { callee, args } => self.gen_call(callee, args),
             ExprKind::MethodCall { recv, method, args, .. } => {

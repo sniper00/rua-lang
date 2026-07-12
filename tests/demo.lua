@@ -40,6 +40,8 @@ Person.__index = Person
 ---@field value integer
 local Counter = {}
 Counter.__index = Counter
+local log = log or function(...) end
+local format = format or function(...) end
 
 ---@generic T
 ---@param value T
@@ -67,99 +69,86 @@ function demo_let()
     ---@type integer
     local typed = 100
     local mutable = 0
-    mutable = (mutable + 1)
+    mutable = mutable + 1
     local inferred_bool = true
     local inferred_float = 3.14159
     local text = "hello"
     local x = 1
-    local x = (x + 1)
-    local x = (x * 2)
+    local x = x + 1
+    local x = x * 2
 end
 
 ---@param n integer
 ---@return integer
 function demo_control_flow(n)
     local sign
-    if (n > 0) then
+    if n > 0 then
         sign = "positive"
     else
-        if (n < 0) then
+        if n < 0 then
             sign = "negative"
         else
             sign = "zero"
         end
     end
     local abs
-    if (n >= 0) then
+    if n >= 0 then
         abs = n
     else
         abs = -n
     end
     local count = 0
-    while (count < 10) do
-        count = (count + 1)
+    while count < 10 do
+        count = count + 1
         ::continue::
     end
     local sum = 0
     for i = 0, (10) - 1 do
-        sum = (sum + i)
+        sum = sum + i
         ::continue::
     end
     for j = 1, 5 do
-        sum = (sum + j)
+        sum = sum + j
         ::continue::
     end
     local result = 0
-    while (count < 100) do
-        count = (count + 1)
+    while count < 100 do
+        count = count + 1
         result = count
         ::continue::
     end
-    if (n == 0) then
+    if n == 0 then
         do
             return 0
         end
     end
     local even_sum = 0
     for i = 0, (20) - 1 do
-        if (rt.irem(i, 2) ~= 0) then
+        if rt.irem(i, 2) ~= 0 then
             goto continue
         end
-        even_sum = (even_sum + i)
+        even_sum = even_sum + i
         ::continue::
     end
-    return (((abs + sum) + result) + even_sum)
+    return abs + sum + result + even_sum
 end
 
 ---@param c Color
 ---@return string
 function describe_color(c)
     local __t1 = c
-    local __t1_done = false
-    if not __t1_done then
-        if __t1.tag == "Red" then
-            return "red"
-        end
-    end
-    if not __t1_done then
-        if __t1.tag == "Green" then
-            return "green"
-        end
-    end
-    if not __t1_done then
-        if __t1.tag == "Blue" then
-            return "blue"
-        end
-    end
-    if not __t1_done then
-        if __t1.tag == "Rgb" then
-            local r = __t1[1]
-            local g = __t1[2]
-            local b = __t1[3]
-            return "custom"
-        end
-    end
-    if not __t1_done then
+    if __t1.tag == "Red" then
+        return "red"
+    elseif __t1.tag == "Green" then
+        return "green"
+    elseif __t1.tag == "Blue" then
+        return "blue"
+    elseif __t1.tag == "Rgb" then
+        local r = __t1[1]
+        local g = __t1[2]
+        local b = __t1[3]
+        return "custom"
+    else
         error("non-exhaustive match")
     end
 end
@@ -168,34 +157,21 @@ end
 ---@return integer
 function classify_message(msg)
     local __t2 = msg
-    local __t2_done = false
-    if not __t2_done then
-        if __t2.tag == "Quit" then
-            return 0
-        end
-    end
-    if not __t2_done then
-        if __t2.tag == "Move" then
-            local x = __t2.x
-            local y = __t2.y
-            return (x + y)
-        end
-    end
-    if not __t2_done then
-        if __t2.tag == "Write" then
-            local text = __t2[1]
-            return rt.str["len"](text)
-        end
-    end
-    if not __t2_done then
-        if __t2.tag == "ChangeColor" then
-            local r = __t2[1]
-            local g = __t2[2]
-            local b = __t2[3]
-            return ((r + g) + b)
-        end
-    end
-    if not __t2_done then
+    if __t2.tag == "Quit" then
+        return 0
+    elseif __t2.tag == "Move" then
+        local x = __t2.x
+        local y = __t2.y
+        return x + y
+    elseif __t2.tag == "Write" then
+        local text = __t2[1]
+        return rt.str["len"](text)
+    elseif __t2.tag == "ChangeColor" then
+        local r = __t2[1]
+        local g = __t2[2]
+        local b = __t2[3]
+        return r + g + b
+    else
         error("non-exhaustive match")
     end
 end
@@ -204,19 +180,12 @@ end
 ---@return integer
 function match_with_wildcard(x)
     local __t3 = x
-    local __t3_done = false
-    if not __t3_done then
-        if __t3 ~= nil then
-            local v = __t3
-            return v
-        end
-    end
-    if not __t3_done then
-        if __t3.tag == "None" then
-            return 0
-        end
-    end
-    if not __t3_done then
+    if __t3 ~= nil then
+        local v = __t3
+        return v
+    elseif __t3.tag == "None" then
+        return 0
+    else
         error("non-exhaustive match")
     end
 end
@@ -228,7 +197,7 @@ function demo_patterns(maybe)
     if __t4 ~= nil then
         local p = __t4
         do
-            return (p.x + p.y)
+            return p.x + p.y
         end
     end
     local opt = 1
@@ -236,10 +205,10 @@ function demo_patterns(maybe)
         local __t5 = opt
         if __t5 ~= nil then
             local v = __t5
-            if (v > 10) then
+            if v > 10 then
                 opt = nil
             else
-                opt = (v + 1)
+                opt = v + 1
             end
         else
             break
@@ -255,26 +224,26 @@ end
 ---@return integer
 function demo_closures()
     local function increment(value)
-        return (value + 1)
+        return value + 1
     end
     local function forty_two()
         return 42
     end
     local function add(a, b)
-        return (a + b)
+        return a + b
     end
     local base = 10
     local function offset(x)
-        return (x + base)
+        return x + base
     end
-    return ((increment(forty_two()) + add(1, 2)) + offset(5))
+    return increment(forty_two()) + add(1, 2) + offset(5)
 end
 
 ---@return integer
 function demo_expressions()
-    local arithmetic = ((1 + (2 * 3)) - rt.idiv(4, 2))
-    local comparison = ((5 > 3) and (4 < 10))
-    local logical = (not false or true)
+    local arithmetic = 1 + 2 * 3 - rt.idiv(4, 2)
+    local comparison = 5 > 3 and 4 < 10
+    local logical = not false or true
     local p = Point.new(3, 4, "demo")
     local px = p.x
     local py = p.y
@@ -286,14 +255,14 @@ function demo_expressions()
     local block_value
     local a = 10
     local b = 20
-    block_value = (a + b)
+    block_value = a + b
     local conditional
-    if (px > 0) then
+    if px > 0 then
         conditional = px
     else
         conditional = 0
     end
-    return ((((arithmetic + px) + py) + block_value) + conditional)
+    return arithmetic + px + py + block_value + conditional
 end
 
 ---@return integer
@@ -310,7 +279,7 @@ function demo_iterators()
             local __t11
             do
                 local x = __t8
-                __t11 = (x * 2)
+                __t11 = x * 2
             end
             __t8 = __t11
         end
@@ -318,7 +287,7 @@ function demo_iterators()
             local __t12
             do
                 local x = __t8
-                __t12 = (x > 5)
+                __t12 = x > 5
             end
             if not __t12 then __t10 = false end
         end
@@ -339,7 +308,7 @@ function demo_iterators()
             do
                 local acc = __t14
                 local x = __t15
-                __t18 = (acc + x)
+                __t18 = acc + x
             end
             __t14 = __t18
         end
@@ -356,7 +325,7 @@ function demo_iterators()
             local __t25
             do
                 local x = __t22
-                __t25 = (x > 3)
+                __t25 = x > 3
             end
             if __t25 then __t21 = __t22; break end
         end
@@ -365,58 +334,61 @@ function demo_iterators()
     local function __t26(v)
         return v
     end
-    local found = __t19:map(__t26)
+    local __t27 = __t19
+    if __t27 ~= nil then
+    end
+    local found = __t27
     local has_big
-    local __t27 = values
-    local __t28 = false
-    for __t30 = 0, __t27.n - 1 do
-        local __t29 = __t27[__t30]
-        local __t31 = true
-        if __t31 then
-            local __t32
+    local __t28 = values
+    local __t29 = false
+    for __t31 = 0, __t28.n - 1 do
+        local __t30 = __t28[__t31]
+        local __t32 = true
+        if __t32 then
+            local __t33
             do
-                local x = __t29
-                __t32 = (x > 10)
+                local x = __t30
+                __t33 = x > 10
             end
-            if __t32 then __t28 = true; break end
+            if __t33 then __t29 = true; break end
         end
     end
-    has_big = __t28
+    has_big = __t29
     local all_small
-    local __t33 = values
-    local __t34 = true
-    for __t36 = 0, __t33.n - 1 do
-        local __t35 = __t33[__t36]
-        local __t37 = true
-        if __t37 then
-            local __t38
+    local __t34 = values
+    local __t35 = true
+    for __t37 = 0, __t34.n - 1 do
+        local __t36 = __t34[__t37]
+        local __t38 = true
+        if __t38 then
+            local __t39
             do
-                local x = __t35
-                __t38 = (x < 100)
+                local x = __t36
+                __t39 = x < 100
             end
-            if not __t38 then __t34 = false; break end
+            if not __t39 then __t35 = false; break end
         end
     end
-    all_small = __t34
+    all_small = __t35
     local count
-    local __t39 = values
-    local __t40 = 0
-    for __t42 = 0, __t39.n - 1 do
-        local __t41 = __t39[__t42]
-        local __t43 = true
-        if __t43 then
-            local __t44
+    local __t40 = values
+    local __t41 = 0
+    for __t43 = 0, __t40.n - 1 do
+        local __t42 = __t40[__t43]
+        local __t44 = true
+        if __t44 then
+            local __t45
             do
-                local x = __t41
-                __t44 = (rt.irem(x, 2) == 0)
+                local x = __t42
+                __t45 = rt.irem(x, 2) == 0
             end
-            if not __t44 then __t43 = false end
+            if not __t45 then __t44 = false end
         end
-        if __t43 then
-            __t40 = __t40 + 1
+        if __t44 then
+            __t41 = __t41 + 1
         end
     end
-    count = __t40
+    count = __t41
     return total
 end
 
@@ -501,14 +473,14 @@ do
 ---@param b integer
 ---@return integer
     function add(a, b)
-        return (a + b)
+        return a + b
     end
 
 ---@param a integer
 ---@param b integer
 ---@return integer
     function multiply(a, b)
-        return (a * b)
+        return a * b
     end
 
     trig = {}
@@ -549,13 +521,13 @@ end
 
 ---@return integer
 function Point:distance_sq()
-    return ((self.x * self.x) + (self.y * self.y))
+    return self.x * self.x + self.y * self.y
 end
 
 ---@param dy integer
 function Point:translate(dx, dy)
-    self.x = (self.x + dx)
-    self.y = (self.y + dy)
+    self.x = self.x + dx
+    self.y = self.y + dy
 end
 
 ---@return string
@@ -584,7 +556,7 @@ function Counter:read()
 end
 
 function Counter:increment()
-    self.value = (self.value + 1)
+    self.value = self.value + 1
 end
 
 function Counter:reset()

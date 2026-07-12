@@ -14,8 +14,8 @@ function main()
             local __t7
             do
                 local value = __t4
-                if (value > 1) then
-                    __t7 = (value * 2)
+                if value > 1 then
+                    __t7 = value * 2
                     goto __t8_done
                 end
                 __t7 = value

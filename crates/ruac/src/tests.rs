@@ -480,7 +480,7 @@ fn let_and_arithmetic() {
     "#,
     );
     assert!(lua.contains("function f(a, b)"));
-    assert!(lua.contains("local x = (a + (b * 2))"));
+    assert!(lua.contains("local x = a + b * 2"));
     assert!(lua.contains("return x"));
 }
 
@@ -488,7 +488,7 @@ fn let_and_arithmetic() {
 fn precedence() {
     // `1 + 2 * 3 == 7 && true` -> ((1 + (2*3)) == 7) and true
     let lua = compile("fn f() -> bool { 1 + 2 * 3 == 7 && true }");
-    assert!(lua.contains("(((1 + (2 * 3)) == 7) and true)"), "got: {lua}");
+    assert!(lua.contains("1 + 2 * 3 == 7 and true"), "got: {lua}");
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn if_expression_hoists_temp() {
     "#,
     );
     assert!(lua.contains("local y"));
-    assert!(lua.contains("if (x < 0) then"));
+    assert!(lua.contains("if x < 0 then"));
     assert!(lua.contains("y = -x") || lua.contains("y = (-x)"));
     assert!(lua.contains("y = x"));
 }
@@ -510,7 +510,7 @@ fn if_expression_hoists_temp() {
 #[test]
 fn if_as_return_tail() {
     let lua = compile("fn m(a: i64, b: i64) -> i64 { if a > b { a } else { b } }");
-    assert!(lua.contains("if (a > b) then"));
+    assert!(lua.contains("if a > b then"));
     assert!(lua.contains("return a"));
     assert!(lua.contains("return b"));
 }
@@ -529,7 +529,7 @@ fn while_loop_break_continue() {
         }
     "#,
     );
-    assert!(lua.contains("while (i < 10) do"));
+    assert!(lua.contains("while i < 10 do"));
     assert!(lua.contains("break"));
     assert!(lua.contains("goto continue"));
     assert!(lua.contains("::continue::"));
@@ -589,7 +589,7 @@ fn impl_methods_use_colon() {
     );
     assert!(lua.contains("function Point.new(x, y)"), "got: {lua}");
     assert!(lua.contains("function Point:sum()"), "got: {lua}");
-    assert!(lua.contains("return (self.x + self.y)"));
+    assert!(lua.contains("return self.x + self.y"));
 }
 
 #[test]
@@ -807,7 +807,7 @@ fn match_guard() {
     "#,
     );
     assert!(lua.contains("local x ="), "binds x for guard; got: {lua}");
-    assert!(lua.contains("if (x > 0) then"), "guard uses binding; got: {lua}");
+    assert!(lua.contains("if x > 0 then"), "guard uses binding; got: {lua}");
 }
 
 // --- P4: for / range / index / macros / Vec -------------------------------
@@ -890,9 +890,8 @@ fn extern_block_emits_no_code() {
         fn main() { print("hi"); }
     "#,
     );
-    // Externs are ambient Lua globals: no declaration, no local, just used.
-    assert!(!lua.contains("function print"), "got: {lua}");
-    assert!(!lua.contains("local print"), "got: {lua}");
+    // Externs get local stubs so generated code runs standalone.
+    assert!(lua.contains("local print = print or function(...) end"), "got: {lua}");
     assert!(lua.contains("print(\"hi\")"), "got: {lua}");
 }
 
@@ -1027,7 +1026,7 @@ fn typeck_field_access_unknown() {
 fn typeck_numeric_mixing_is_allowed() {
     // i64 + f64 is intentionally lenient (Lua unifies numbers) -> no error.
     let lua = compile("fn f() -> f64 { let a = 1; let b = 2.0; a + b }");
-    assert!(lua.contains("(a + b)"), "got: {lua}");
+    assert!(lua.contains("a + b"), "got: {lua}");
 }
 
 #[test]
@@ -1179,7 +1178,7 @@ fn codegen_integer_division() {
 #[test]
 fn codegen_float_division_stays_slash() {
     let lua = compile("fn f() -> f64 { 7.0 / 2.0 }");
-    assert!(lua.contains("(7.0 / 2.0)"), "got: {lua}");
+    assert!(lua.contains("7.0 / 2.0"), "got: {lua}");
     assert!(!lua.contains("//"), "should not use integer division; got: {lua}");
 }
 
@@ -1187,7 +1186,7 @@ fn codegen_float_division_stays_slash() {
 fn codegen_mixed_division_stays_slash() {
     // i64 / f64 is not integer division.
     let lua = compile("fn f(a: i64, b: f64) -> f64 { a / b }");
-    assert!(lua.contains("(a / b)"), "got: {lua}");
+    assert!(lua.contains("a / b"), "got: {lua}");
     assert!(!lua.contains("//"), "got: {lua}");
 }
 
@@ -1195,7 +1194,7 @@ fn codegen_mixed_division_stays_slash() {
 fn codegen_unknown_division_stays_slash() {
     // Generic/unknown operand types default to float division (safe).
     let lua = compile("fn f(a: T, b: T) { let x = a / b; }");
-    assert!(lua.contains("(a / b)"), "got: {lua}");
+    assert!(lua.contains("a / b"), "got: {lua}");
     assert!(!lua.contains("//"), "got: {lua}");
 }
 
@@ -1219,7 +1218,7 @@ fn codegen_int_remainder_via_params() {
 fn codegen_mixed_remainder_stays_percent() {
     // A non-integer remainder keeps the plain Lua `%`.
     let lua = compile("fn f(a: f64, b: f64) -> f64 { a % b }");
-    assert!(lua.contains("(a % b)"), "got: {lua}");
+    assert!(lua.contains("a % b"), "got: {lua}");
     assert!(!lua.contains("rt.irem"), "got: {lua}");
 }
 
@@ -1914,7 +1913,7 @@ fn if_let_binding_is_scoped_no_false_positive() {
         }
     "#,
     );
-    assert!(lua.contains("(x + 1)"), "got: {lua}");
+    assert!(lua.contains("x + 1"), "got: {lua}");
 }
 
 // --- P5c-4 generics + bounds ------------------------------------------------

@@ -13,7 +13,7 @@ function main()
             local __t7
             do
                 local value = __t4
-                __t7 = (value == 2)
+                __t7 = value == 2
             end
             if __t7 then __t3 = __t4; break end
         end

@@ -4,5 +4,5 @@ local stable
 ---@param value integer
 ---@return integer
 function stable(value)
-    return (value + 1)
+    return value + 1
 end

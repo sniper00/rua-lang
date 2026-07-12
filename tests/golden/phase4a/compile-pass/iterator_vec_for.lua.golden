@@ -12,7 +12,7 @@ function main()
         local __t4 = true
         if __t4 then
             local value = __t2
-            total = (total + value)
+            total = total + value
         end
         ::continue::
     end

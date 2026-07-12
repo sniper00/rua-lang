@@ -14,5 +14,5 @@ end
 
 ---@return integer
 function Point:sum()
-    return (self.x + self.y)
+    return self.x + self.y
 end

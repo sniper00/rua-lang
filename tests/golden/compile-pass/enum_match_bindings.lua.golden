@@ -8,21 +8,14 @@ Shape.__index = Shape
 ---@return integer
 function area(shape)
     local __t1 = shape
-    local __t1_done = false
-    if not __t1_done then
-        if __t1.tag == "Circle" then
-            local radius = __t1[1]
-            return (radius * radius)
-        end
-    end
-    if not __t1_done then
-        if __t1.tag == "Rectangle" then
-            local width = __t1.width
-            local height = __t1.height
-            return (width * height)
-        end
-    end
-    if not __t1_done then
+    if __t1.tag == "Circle" then
+        local radius = __t1[1]
+        return radius * radius
+    elseif __t1.tag == "Rectangle" then
+        local width = __t1.width
+        local height = __t1.height
+        return width * height
+    else
         error("non-exhaustive match")
     end
 end

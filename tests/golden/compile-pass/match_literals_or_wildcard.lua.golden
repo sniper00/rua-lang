@@ -5,21 +5,11 @@ local classify
 ---@return integer
 function classify(value)
     local __t1 = value
-    local __t1_done = false
-    if not __t1_done then
-        if __t1 == 0 then
-            return 10
-        end
-    end
-    if not __t1_done then
-        if (__t1 == 1) or (__t1 == 2) then
-            return 20
-        end
-    end
-    if not __t1_done then
+    if __t1 == 0 then
+        return 10
+    elseif (__t1 == 1) or (__t1 == 2) then
+        return 20
+    else
         return 30
-    end
-    if not __t1_done then
-        error("non-exhaustive match")
     end
 end

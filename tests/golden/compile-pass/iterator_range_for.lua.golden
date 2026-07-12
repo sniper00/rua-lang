@@ -5,11 +5,11 @@ local main
 function main()
     local total = 0
     for value = 1, (4) - 1 do
-        total = (total + value)
+        total = total + value
         ::continue::
     end
     for value = 1, 3 do
-        total = (total + value)
+        total = total + value
         ::continue::
     end
     return total

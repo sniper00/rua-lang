@@ -5,6 +5,6 @@ local block_tail
 function block_tail()
     local value
     local base = 2
-    value = (base + 3)
+    value = base + 3
     return value
 end

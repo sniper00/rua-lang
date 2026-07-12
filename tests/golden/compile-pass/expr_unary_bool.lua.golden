@@ -4,5 +4,5 @@ local unary_bool
 ---@param n integer
 ---@return boolean
 function unary_bool(n)
-    return ((-n < 0) and not false)
+    return -n < 0 and not false
 end
