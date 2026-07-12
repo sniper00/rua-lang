@@ -312,31 +312,132 @@ impl Codegen<'_> {
 
     // --- program ----------------------------------------------------------
 
-    fn gen_program(&mut self, prog: &Program) {
-        let _struct_names: Vec<&str> = prog
-            .items
-            .iter()
-            .filter_map(|i| match i {
+    /// Determine which function names need a `local` forward-declaration at
+    /// the top of this scope.  A forward-decl is only needed when a function or
+    /// module item calls a name that is defined later in the same scope (or
+    /// when two functions are mutually recursive).
+    fn names_needing_forward_decl(items: &[Item], mod_names: &[&str]) -> HashSet<String> {
+        // Index: simple name -> position in the items array.
+        let mut positions: HashMap<String, usize> = HashMap::new();
+        for (i, item) in items.iter().enumerate() {
+            let name = match item {
+                Item::Fn(f) => Some(f.name.as_str()),
                 Item::Struct(s) => Some(s.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        let _enum_names: Vec<&str> = prog
-            .items
-            .iter()
-            .filter_map(|i| match i {
                 Item::Enum(e) => Some(e.name.as_str()),
                 _ => None,
-            })
-            .collect();
-        let fn_names: Vec<&str> = prog
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Fn(f) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
+            };
+            if let Some(n) = name {
+                positions.insert(n.to_string(), i);
+            }
+        }
+        for n in mod_names {
+            positions.entry(n.to_string()).or_insert(usize::MAX);
+        }
+
+        fn callee_names_inner(expr: &Expr, out: &mut HashSet<String>) {
+            match &expr.kind {
+                ExprKind::Call { callee, args } => {
+                    if let ExprKind::Path(segs) = &callee.kind
+                        && segs.len() == 1
+                    {
+                        out.insert(segs[0].clone());
+                    }
+                    callee_names_inner(callee, out);
+                    for a in args { callee_names_inner(a, out); }
+                }
+                ExprKind::MethodCall { recv, args, .. } => {
+                    callee_names_inner(recv, out);
+                    for a in args { callee_names_inner(a, out); }
+                }
+                ExprKind::Closure { body, .. } => match body {
+                    ClosureBody::Expr(e) => callee_names_inner(e, out),
+                    ClosureBody::Block(b) => callee_names_block(b, out),
+                },
+                ExprKind::If { cond, then_block, else_block } => {
+                    callee_names_inner(cond, out);
+                    callee_names_block(then_block, out);
+                    if let Some(eb) = else_block {
+                        match eb.as_ref() {
+                            ElseBranch::Block(b) => callee_names_block(b, out),
+                            ElseBranch::If(e) => callee_names_inner(e, out),
+                        }
+                    }
+                }
+                ExprKind::Match { scrut, arms } => {
+                    callee_names_inner(scrut, out);
+                    for arm in arms { callee_names_inner(&arm.body, out); }
+                }
+                ExprKind::Block(b) => callee_names_block(b, out),
+                ExprKind::Assign { target, value } => {
+                    callee_names_inner(target, out);
+                    callee_names_inner(value, out);
+                }
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    callee_names_inner(lhs, out);
+                    callee_names_inner(rhs, out);
+                }
+                ExprKind::Unary { expr, .. } => callee_names_inner(expr, out),
+                ExprKind::Try { expr } => callee_names_inner(expr, out),
+                ExprKind::Field { base, .. } => callee_names_inner(base, out),
+                ExprKind::Index { base, index } => {
+                    callee_names_inner(base, out);
+                    callee_names_inner(index, out);
+                }
+                ExprKind::Range { start, end, .. } => {
+                    callee_names_inner(start, out);
+                    callee_names_inner(end, out);
+                }
+                ExprKind::StructLit { fields, .. } => {
+                    for (_, v) in fields { callee_names_inner(v, out); }
+                }
+                ExprKind::IfLet { expr, then_block, else_block, .. } => {
+                    callee_names_inner(expr, out);
+                    callee_names_block(then_block, out);
+                    if let Some(eb) = else_block {
+                        match eb.as_ref() {
+                            ElseBranch::Block(b) => callee_names_block(b, out),
+                            ElseBranch::If(e) => callee_names_inner(e, out),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn callee_names_block(b: &crate::ast::Block, out: &mut HashSet<String>) {
+            for s in &b.stmts {
+                match s {
+                    crate::ast::Stmt::Let { init, .. } => callee_names_inner(init, out),
+                    crate::ast::Stmt::Expr(e) => callee_names_inner(e, out),
+                    crate::ast::Stmt::Return(Some(e)) => callee_names_inner(e, out),
+                    _ => {}
+                }
+            }
+            if let Some(ref tail) = b.tail {
+                callee_names_inner(tail, out);
+            }
+        }
+
+        // For each function body, collect all callee names, and mark any that
+        // are defined LATER in the item list as needing a forward decl.
+        let mut needed: HashSet<String> = HashSet::new();
+        for (i, item) in items.iter().enumerate() {
+            if let Item::Fn(f) = item {
+                let mut called: HashSet<String> = HashSet::new();
+                callee_names_block(&f.body, &mut called);
+                for name in &called {
+                    if let Some(&pos) = positions.get(name) {
+                        if pos > i || pos == usize::MAX {
+                            needed.insert(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        needed
+    }
+
+    fn gen_program(&mut self, prog: &Program) {
         // Declaration-only (`.ruai`) modules emit nothing and are not locals:
         // references to them resolve to host-provided globals (e.g. `moon`).
         let mod_names: Vec<&str> = prog
@@ -347,11 +448,26 @@ impl Codegen<'_> {
                 _ => None,
             })
             .collect();
-        // Hoist function and module names so they're file-scoped (not global).
-        // Structs/enums get their own `local` at the class definition site.
+
+        // Only emit forward declarations for functions/modules that are
+        // actually referenced before their definition in the source.
+        let needed = Self::names_needing_forward_decl(&prog.items, &mod_names);
+        let fn_names: Vec<&str> = prog
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Fn(f) if needed.contains(f.name.as_str()) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mod_names_needed: Vec<&str> = mod_names
+            .iter()
+            .filter(|n| needed.contains(**n))
+            .copied()
+            .collect();
         let mut all: Vec<&str> = Vec::new();
         all.extend(&fn_names);
-        all.extend(&mod_names);
+        all.extend(&mod_names_needed);
         if !all.is_empty() {
             self.line(&format!("local {}", all.join(", ")));
         }
