@@ -191,8 +191,7 @@ fn maybe_double(x: Option<i64>) -> Option<i64> {
 ```lua
 ---@return integer|nil
 local function maybe_double(x)
-    local __t1, __t2 = x
-    if __t2 ~= nil then return nil, __t2 end
+    local __t1 = x
     if __t1 == nil then return nil end
     local v = __t1
     return v * 2
@@ -364,14 +363,12 @@ fn chain(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 ```lua
 ---@return integer|nil
 local function chain(a, b)
-    local __t1, __t2 = a
-    if __t2 ~= nil then return nil, __t2 end
+    local __t1 = a
     if __t1 == nil then return nil end
     local va = __t1
-    local __t3, __t4 = b
-    if __t4 ~= nil then return nil, __t4 end
-    if __t3 == nil then return nil end
-    local vb = __t3
+    local __t2 = b
+    if __t2 == nil then return nil end
+    local vb = __t2
     return va + vb
 end
 ```
