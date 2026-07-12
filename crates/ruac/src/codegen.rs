@@ -316,11 +316,9 @@ impl Codegen<'_> {
                 _ => None,
             })
             .collect();
-        // `use` imports are desugared away before codegen (paths are already
-        // fully qualified), so no runtime alias locals are needed.
+        // Hoist function and module names so they're file-scoped (not global).
+        // Structs/enums get their own `local` at the class definition site.
         let mut all: Vec<&str> = Vec::new();
-        all.extend(&struct_names);
-        all.extend(&enum_names);
         all.extend(&fn_names);
         all.extend(&mod_names);
         if !all.is_empty() {
@@ -328,11 +326,10 @@ impl Codegen<'_> {
         }
 
         // Class tables (with `__index`) for structs and enums so their values
-        // can carry methods.
+        // can carry methods. Each is self-contained: @class annotation + local table.
         for item in &prog.items {
             match item {
                 Item::Struct(s) => {
-                    // EmmyLua: @class + @field BEFORE the class table
                     self.emit_struct_annotation(s);
                     for field in &s.fields {
                         self.line(&format!(
@@ -341,12 +338,12 @@ impl Codegen<'_> {
                             type_to_emmylua(&field.ty)
                         ));
                     }
-                    self.line(&format!("{0} = {{}}", s.name));
+                    self.line(&format!("local {0} = {{}}", s.name));
                     self.line(&format!("{0}.__index = {0}", s.name));
                 }
                 Item::Enum(e) => {
                     self.line(&format!("---@class {0}", e.name));
-                    self.line(&format!("{0} = {{}}", e.name));
+                    self.line(&format!("local {0} = {{}}", e.name));
                     self.line(&format!("{0}.__index = {0}", e.name));
                 }
                 _ => {}
