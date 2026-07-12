@@ -398,28 +398,49 @@ impl Server {
             let kind = definition.kind();
             let title = match kind {
                 rua_analysis::DefKind::Function | rua_analysis::DefKind::Method => {
-                    let refs = def_map
+                    let name = definition.name();
+                    // Count how many bodies reference this function by name.
+                    let ref_count = def_map
                         .definitions()
                         .filter(|d| {
-                            d.kind() == rua_analysis::DefKind::Function
-                                || d.kind() == rua_analysis::DefKind::Method
+                            matches!(
+                                d.kind(),
+                                rua_analysis::DefKind::Function
+                                    | rua_analysis::DefKind::Method
+                            )
+                        })
+                        .filter_map(|d| analysis.body(d.id()))
+                        .filter(|body| {
+                            body.name_refs()
+                                .any(|(_, nr)| nr.name() == Some(name))
                         })
                         .count();
-                    format!("{} reference(s)", refs.saturating_sub(1))
+                    format!("{ref_count} reference(s)")
                 }
                 rua_analysis::DefKind::Struct => {
-                    let impls = def_map
+                    let impls: Vec<_> = def_map
                         .definitions()
-                        .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
-                        .count();
-                    format!("{} impl(s)", impls)
+                        .filter(|d| {
+                            d.kind() == rua_analysis::DefKind::Impl
+                                && d.name() == definition.name()
+                        })
+                        .collect();
+                    if impls.is_empty() {
+                        "struct".to_string()
+                    } else {
+                        format!("{} impl(s)", impls.len())
+                    }
                 }
                 rua_analysis::DefKind::Trait => {
-                    let impls = def_map
+                    let impls: Vec<_> = def_map
                         .definitions()
                         .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
-                        .count();
-                    format!("{} impl(s)", impls)
+                        .collect();
+                    if impls.is_empty() {
+                        "trait".to_string()
+                    } else {
+                        format!("{} impl(s)", impls.len())
+                    }
                 }
                 _ => continue,
             };
@@ -2661,8 +2682,25 @@ impl Server {
             .project_position(uri, pos)
             .and_then(|pp| {
                 let analysis = self.host.analysis();
+                // Build a FileId→Uri map for the workspace edit (must
+                // happen before the analysis borrow below so we don't
+                // hold two borrows on self).
+                let file_uris: HashMap<rua_analysis::FileId, Uri> = self
+                    .open_buffers
+                    .iter()
+                    .map(|(id, (uri, _))| (*id, uri.clone()))
+                    .chain(
+                        self.file_ids
+                            .iter()
+                            .map(|(_, (uri, id))| (*id, uri.clone())),
+                    )
+                    .collect();
                 match analysis.rename(pp, &params.new_name) {
-                    Ok(change) => source_change_to_workspace_edit(&analysis, &change),
+                    Ok(change) => source_change_to_workspace_edit(
+                        &analysis,
+                        &change,
+                        |fid| file_uris.get(&fid).cloned(),
+                    ),
                     Err(_) => None,
                 }
             });
@@ -3701,11 +3739,11 @@ fn core_diag_to_lsp(
 fn source_change_to_workspace_edit(
     analysis: &rua_analysis::Analysis,
     change: &SourceChange,
+    uri_for: impl Fn(rua_analysis::FileId) -> Option<Uri>,
 ) -> Option<WorkspaceEdit> {
     let mut edits = HashMap::new();
     for file_edit in change.file_edits() {
-        let analysis_snap = analysis; // use the same snapshot
-        let source = analysis_snap
+        let source = analysis
             .parse(file_edit.file_id())
             .syntax_node()
             .text()
@@ -3726,11 +3764,10 @@ fn source_change_to_workspace_edit(
                 }
             })
             .collect();
-        // We need URI for file_edit — use a simple file:// URI
-        let uri = format!("file:///unknown/{}", file_edit.file_id().index());
-        if let Ok(uri) = uri.parse::<Uri>() {
-            edits.insert(uri, text_edits);
-        }
+        let Some(uri) = uri_for(file_edit.file_id()) else {
+            continue;
+        };
+        edits.insert(uri, text_edits);
     }
     if edits.is_empty() {
         return None;

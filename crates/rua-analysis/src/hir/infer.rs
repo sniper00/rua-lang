@@ -781,7 +781,30 @@ impl<'a> InferenceContext<'a> {
             | BinaryOp::Less
             | BinaryOp::LessOrEqual
             | BinaryOp::Greater
-            | BinaryOp::GreaterOrEqual => Ty::BOOL,
+            | BinaryOp::GreaterOrEqual => {
+                // Ordering operators require numeric operands.
+                if matches!(
+                    op,
+                    BinaryOp::Less
+                        | BinaryOp::LessOrEqual
+                        | BinaryOp::Greater
+                        | BinaryOp::GreaterOrEqual
+                ) && !lhs_ty.is_unknown()
+                    && !rhs_ty.is_unknown()
+                    && !lhs_ty.is_never()
+                    && !rhs_ty.is_never()
+                    && !(lhs_ty.is_numeric() && rhs_ty.is_numeric())
+                {
+                    self.diagnostics
+                        .push(InferenceDiagnostic::InvalidBinary {
+                            expr: expr_id,
+                            lhs: lhs_ty.clone(),
+                            rhs: rhs_ty.clone(),
+                            op,
+                        });
+                }
+                Ty::BOOL
+            }
             BinaryOp::Missing => Ty::Unknown,
         }
     }
