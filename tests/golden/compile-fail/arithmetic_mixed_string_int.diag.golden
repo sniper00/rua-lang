@@ -1,0 +1,1 @@
+<golden>/compile-fail/arithmetic_mixed_string_int.rua:2: cannot mix string and non-string operands in arithmetic

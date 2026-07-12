@@ -1444,7 +1444,7 @@ impl Codegen<'_> {
                                     self.line("end");
                                     return val;
                                 }
-                        let applied = self.gen_inlined_closure(&args[0], std::slice::from_ref(val));
+                        let applied = self.gen_inlined_closure(&args[0], std::slice::from_ref(&val));
                         self.line(&format!("{} = {}", val, applied));
                     }
                     self.indent -= 1;

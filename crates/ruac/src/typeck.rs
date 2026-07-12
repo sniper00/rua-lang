@@ -2933,6 +2933,34 @@ impl Tc {
                 } else if l.is_numeric() && r.is_numeric() {
                     Ty::I64
                 } else {
+                    // Catch mixed-type operands (e.g. int + string, float + string).
+                    // Bool/Unit are already reported above; Named may be overloaded.
+                    let is_compat = |t: &Ty| {
+                        matches!(t, Ty::Unknown | Ty::Named(_)) || t.is_numeric() || *t == Ty::Str
+                    };
+                    let lhs_str = matches!(l, Ty::Str);
+                    let rhs_str = matches!(r, Ty::Str);
+                    if lhs_str != rhs_str {
+                        self.err(
+                            sp,
+                            "cannot mix string and non-string operands in arithmetic".to_string(),
+                        );
+                    } else if !is_compat(l) || !is_compat(r) {
+                        // Already reported above for Bool/Unit, but catch
+                        // other mismatches like passing a struct to arithmetic.
+                        if !matches!(l, Ty::Bool | Ty::Unit)
+                            && !matches!(r, Ty::Bool | Ty::Unit)
+                        {
+                            self.err(
+                                sp,
+                                format!(
+                                    "cannot apply arithmetic operator to `{}` and `{}`",
+                                    l.name(),
+                                    r.name(),
+                                ),
+                            );
+                        }
+                    }
                     Ty::Unknown
                 }
             }

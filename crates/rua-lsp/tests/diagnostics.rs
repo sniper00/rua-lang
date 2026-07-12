@@ -202,7 +202,81 @@ fn type_invalid_binary_bool_plus_int() {
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
     assert!(analysis.parse(file_id).errors().is_empty());
-    let _ = analysis.diagnostics(file_id);
+    let diags = analysis.diagnostics(file_id);
+    assert!(
+        !diags.is_empty(),
+        "bool + int should produce a diagnostic"
+    );
+}
+
+#[test]
+fn type_invalid_binary_int_plus_string() {
+    let uri = uri("/test/diag_int_str.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let x = 1 + \"hello\"; x; }");
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    let diags = analysis.diagnostics(file_id);
+    assert!(
+        !diags.is_empty(),
+        "int + string should produce a diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn type_invalid_binary_string_plus_int() {
+    let uri = uri("/test/diag_str_int.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let x = \"hello\" + 1; x; }");
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    let diags = analysis.diagnostics(file_id);
+    assert!(
+        !diags.is_empty(),
+        "string + int should produce a diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn type_invalid_binary_float_plus_string() {
+    let uri = uri("/test/diag_float_str.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let x = 1.5 + \"hello\"; x; }");
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    let diags = analysis.diagnostics(file_id);
+    assert!(
+        !diags.is_empty(),
+        "float + string should produce a diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn type_valid_binary_string_plus_string() {
+    let uri = uri("/test/ok_str_str.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let x = \"hello\" + \" world\"; x; }");
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    // String concatenation is valid — the only diagnostics should be
+    // about unused variables if any, not about the binary operation.
+    let diags = analysis.diagnostics(file_id);
+    let type_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.message().contains("arithmetic")
+                || d.message().contains("cannot")
+                || d.message().contains("invalid")
+        })
+        .collect();
+    assert!(
+        type_diags.is_empty(),
+        "string + string should be valid, got: {type_diags:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

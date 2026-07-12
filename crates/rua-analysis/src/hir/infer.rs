@@ -194,17 +194,35 @@ struct InferenceContext<'a> {
 }
 
 /// Check whether `lhs op rhs` is clearly incompatible for arithmetic —
-/// BOOL, UNIT, or non-Add String operands don't make sense with + - * / %.
+/// BOOL, UNIT, or mixed String/numeric operands don't make sense
+/// with + - * / %.
 fn is_incompatible_arithmetic(lhs: &Ty, rhs: &Ty, op: BinaryOp) -> bool {
+    if lhs.is_unknown() || lhs.is_never() || rhs.is_unknown() || rhs.is_never() {
+        return false;
+    }
+    if matches!(lhs, Ty::Named(_)) || matches!(rhs, Ty::Named(_)) {
+        return false; // may have operator overloading
+    }
     let bad = |t: &Ty| *t == Ty::BOOL || *t == Ty::UNIT;
-    let bad_string = |t: &Ty, other: &Ty| {
-        *t == Ty::STRING
-            && op != BinaryOp::Add
-            && !other.is_unknown()
-            && !other.is_never()
-            && *other != Ty::STRING
-    };
-    bad(lhs) || bad(rhs) || bad_string(lhs, rhs) || bad_string(rhs, lhs)
+    if bad(lhs) || bad(rhs) {
+        return true;
+    }
+    // String is only valid with Add when both sides are String.
+    let lhs_str = *lhs == Ty::STRING;
+    let rhs_str = *rhs == Ty::STRING;
+    if lhs_str && rhs_str {
+        return op != BinaryOp::Add; // "a" - "b" is invalid
+    }
+    if lhs_str || rhs_str {
+        return true; // "a" + 1, 1 + "a", etc. are all invalid
+    }
+    // Mixed numeric+non-numeric (but not Named, String, Bool, Unit).
+    let lhs_num = lhs.is_numeric();
+    let rhs_num = rhs.is_numeric();
+    if lhs_num != rhs_num {
+        return true; // 1 + some_struct, etc.
+    }
+    false
 }
 
 impl<'a> InferenceContext<'a> {
