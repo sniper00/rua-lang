@@ -21,6 +21,89 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
+// Completion context — built once per request, passed to all completion fns.
+// ---------------------------------------------------------------------------
+
+/// Bundled context for a single completion request.  Built once at the entry
+/// point and passed through to scope / member / path completions, replacing
+/// the previous 4–5 ad-hoc parameters.
+pub(crate) struct CompletionContext<'a> {
+    pub db: &'a Rc<BaseDb>,
+    pub position: FilePosition,
+    pub offset: u32,
+    pub partial_range: TextRange,
+    pub token: Option<SyntaxToken>,
+
+    // ── AST-derived context (replaces token-based heuristics) ──────────
+    pub in_type_position: bool,
+    pub in_expression_position: bool,
+    pub in_pattern_position: bool,
+    pub in_method_body: bool,
+    pub in_impl_block: bool,
+    pub in_loop: bool,
+}
+
+impl<'a> CompletionContext<'a> {
+    fn new(
+        db: &'a Rc<BaseDb>,
+        position: FilePosition,
+    ) -> Option<Self> {
+        let text = db.file_text(position.file_id)?;
+        let parse = db.parse(position.file_id);
+        let root = parse.syntax_node();
+        let offset = position.offset.min(text.len() as u32);
+        let partial_range = partial_ident_range(text.as_ref(), offset);
+        let token = token_at_offset(root, offset);
+
+        // Walk up from the cursor token to determine syntactic context.
+        let mut in_type_position = false;
+        let mut in_expression_position = false;
+        let mut in_pattern_position = false;
+        let mut in_method_body = false;
+        let mut in_impl_block = false;
+        let mut in_loop = false;
+
+        let mut node: Option<rua_syntax::SyntaxNode> =
+            token.as_ref().and_then(|t| t.parent());
+        while let Some(current) = &node {
+            match current.kind() {
+                SyntaxKind::Colon
+                | SyntaxKind::ParamList
+                | SyntaxKind::FieldDecl => in_type_position = true,
+                SyntaxKind::Block => in_expression_position = true,
+                SyntaxKind::LetStmt => in_pattern_position = true,
+                SyntaxKind::MatchArm => in_pattern_position = true,
+                SyntaxKind::ImplDecl => in_impl_block = true,
+                SyntaxKind::WhileExpr | SyntaxKind::LoopExpr | SyntaxKind::ForExpr => {
+                    in_loop = true;
+                }
+                _ => {}
+            }
+            node = current.parent();
+        }
+
+        // Determine whether cursor is inside a method body.
+        let def_map = db.def_map(position.file_id);
+        in_method_body = innermost_body_owner(&def_map, position, offset)
+            .is_some_and(|d| d.kind() == DefKind::Method);
+
+        Some(Self {
+            db,
+            position,
+            offset,
+            partial_range,
+            token,
+            in_type_position,
+            in_expression_position,
+            in_pattern_position,
+            in_method_body,
+            in_impl_block,
+            in_loop,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -28,48 +111,37 @@ pub(crate) fn completions(
     db: &Rc<BaseDb>,
     position: FilePosition,
 ) -> Vec<CompletionItem> {
-    let Some(text) = db.file_text(position.file_id) else {
+    let Some(ctx) = CompletionContext::new(db, position) else {
         return Vec::new();
     };
-    let parse = db.parse(position.file_id);
-    let root = parse.syntax_node();
-    let offset = position.offset.min(text.len() as u32);
-
-    // Find the partial identifier prefix at the cursor (e.g. `val` before `ues`).
-    let partial_range = partial_ident_range(text.as_ref(), offset);
-
-    let token = token_at_offset(root, offset);
 
     // Member access: cursor right after `.` (token IS the dot) or after `.x`
-    let after_dot = token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
-        || token.as_ref().and_then(previous_significant).is_some_and(|t| t.kind() == SyntaxKind::Dot);
+    let after_dot = ctx.token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
+        || ctx.token.as_ref().and_then(previous_significant).is_some_and(|t| t.kind() == SyntaxKind::Dot);
     let mut items = if after_dot {
-        member_completions(db, position, offset)
-    } else if let Some(ref tok) = token
+        member_completions(&ctx)
+    } else if let Some(ref tok) = ctx.token
         && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon)
     {
-        path_completions(db, position, tok, partial_range)
+        path_completions(&ctx)
     } else {
-        scope_completions(db, position, offset, partial_range, token.as_ref())
+        scope_completions(&ctx)
     };
 
     // Filter by the typed prefix so the client only sees relevant matches.
-    // Only filter when the prefix contains at least one letter or underscore
-    // (pure-digit prefixes like `42` shouldn't filter out everything).
-    if !partial_range.is_empty() {
-        let start = partial_range.start() as usize;
-        let end = partial_range.end() as usize;
+    let text = ctx.db.file_text(ctx.position.file_id).unwrap_or_default();
+    if !ctx.partial_range.is_empty() {
+        let start = ctx.partial_range.start() as usize;
+        let end = ctx.partial_range.end() as usize;
         if start <= end && end <= text.len() {
             let prefix = &text[start..end];
-            // Skip filtering if prefix is purely numeric (e.g. cursor at `42`).
             let is_pure_numeric = !prefix.is_empty()
                 && prefix.bytes().all(|b| b.is_ascii_digit());
             if !is_pure_numeric {
                 let prefix_lower = prefix.to_lowercase();
                 items.retain(|item| {
                     let label_lower = item.label().to_lowercase();
-                    let matches = is_subsequence(&prefix_lower, &label_lower);
-                    matches
+                    is_subsequence(&prefix_lower, &label_lower)
                         || item.lookup().is_some_and(|l| {
                             is_subsequence(&prefix_lower, &l.to_lowercase())
                         })
@@ -189,21 +261,24 @@ const BUILTIN_MACROS: &[(&str, MacroDelimiter)] = &[
     ("include_bytes", MacroDelimiter::Parentheses),
 ];
 
-fn scope_completions(
-    db: &Rc<BaseDb>,
-    position: FilePosition,
-    offset: u32,
-    partial_range: TextRange,
-    token: Option<&SyntaxToken>,
-) -> Vec<CompletionItem> {
+fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let db = ctx.db;
+    let position = ctx.position;
+    let offset = ctx.offset;
+    let partial_range = ctx.partial_range;
+    let token = ctx.token.as_ref();
+
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
+    // Token-based heuristics remain the primary signal for keyword
+    // suppression.  AST context flags are available on `ctx` for future
+    // use but currently augment only type-position detection.
     let in_expr_context = token.is_some_and(is_expression_context);
-    let in_type_pos = token.is_some_and(is_type_position);
+    let in_type_pos = ctx.in_type_position || token.is_some_and(is_type_position);
 
     // 0. Match context — offer enum variants when inside a match expression.
-    let def_map = db.def_map(position.file_id);
+    let def_map = ctx.db.def_map(ctx.position.file_id);
     let in_method = innermost_body_owner(&def_map, position, offset)
         .is_some_and(|d| d.kind() == DefKind::Method);
     if let Some((_enum_ty, enum_template)) =
@@ -503,11 +578,10 @@ fn scope_completions(
 // Member completion (after `.`)
 // ---------------------------------------------------------------------------
 
-fn member_completions(
-    db: &Rc<BaseDb>,
-    position: FilePosition,
-    offset: u32,
-) -> Vec<CompletionItem> {
+fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let db = ctx.db;
+    let position = ctx.position;
+    let offset = ctx.offset;
     let def_map = db.def_map(position.file_id);
     let receiver_ty = infer_dot_receiver(db, &def_map, position, offset);
 
@@ -798,12 +872,11 @@ pub(crate) fn infer_dot_receiver(
 // Path completion (after `::`)
 // ---------------------------------------------------------------------------
 
-fn path_completions(
-    db: &Rc<BaseDb>,
-    position: FilePosition,
-    token: &SyntaxToken,
-    partial_range: TextRange,
-) -> Vec<CompletionItem> {
+fn path_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let db = ctx.db;
+    let position = ctx.position;
+    let partial_range = ctx.partial_range;
+    let Some(ref token) = ctx.token else { return Vec::new(); };
     let def_map = db.def_map(position.file_id);
     let segments = path_segments_before(token);
     if segments.is_empty() {
