@@ -7,10 +7,9 @@ end
 
 ---@return integer|nil
 local function use_option()
-    local __t1, __t2 = maybe()
-    if __t2 ~= nil then return nil, __t2 end
-    if __t1 == nil then return nil end
-    local value = __t1
+    local value, __t1 = maybe()
+    if __t1 ~= nil then return nil, __t1 end
+    if value == nil then return nil end
     return value * 2
 end
 
@@ -21,9 +20,8 @@ end
 
 ---@return integer|nil
 local function propagate_none()
-    local __t3, __t4 = absent()
-    if __t4 ~= nil then return nil, __t4 end
-    if __t3 == nil then return nil end
-    local _x = __t3
+    local _x, __t2 = absent()
+    if __t2 ~= nil then return nil, __t2 end
+    if _x == nil then return nil end
     return 99
 end

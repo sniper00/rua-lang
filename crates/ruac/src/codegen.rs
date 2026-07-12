@@ -716,6 +716,24 @@ impl Codegen<'_> {
                 }
                 if let ExprKind::Closure { params, body, .. } = &init.kind {
                     self.gen_closure_local(name, params, body);
+                } else if let ExprKind::Try { expr } = &init.kind {
+                    // let v = expr? : generate nil-check directly with target name.
+                    let v = self.gen_inline(expr);
+                    let may_multi = matches!(
+                        &expr.kind,
+                        ExprKind::Call { .. } | ExprKind::MethodCall { .. }
+                    );
+                    if may_multi {
+                        let err_name = self.fresh_tmp();
+                        self.line(&format!("local {}, {} = {}", name, err_name, v));
+                        self.line(&format!(
+                            "if {} ~= nil then return nil, {} end",
+                            err_name, err_name
+                        ));
+                    } else {
+                        self.line(&format!("local {} = {}", name, v));
+                    }
+                    self.line(&format!("if {} == nil then return nil end", name));
                 } else if self
                     .info
                     .iter_plan(init.span.file, init.span.start, init.span.len)

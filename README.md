@@ -169,10 +169,9 @@ end
 
 ---@return string|nil, string|nil
 local function use_config()
-    local __t1, __t2 = load_config("app.rua")
-    if __t2 ~= nil then return nil, __t2 end
-    if __t1 == nil then return nil end
-    local config = __t1
+    local config, __t1 = load_config("app.rua")
+    if __t1 ~= nil then return nil, __t1 end
+    if config == nil then return nil end
     return config
 end
 ```
@@ -191,9 +190,8 @@ fn maybe_double(x: Option<i64>) -> Option<i64> {
 ```lua
 ---@return integer|nil
 local function maybe_double(x)
-    local __t1 = x
-    if __t1 == nil then return nil end
-    local v = __t1
+    local v = x
+    if v == nil then return nil end
     return v * 2
 end
 ```
@@ -363,12 +361,10 @@ fn chain(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 ```lua
 ---@return integer|nil
 local function chain(a, b)
-    local __t1 = a
-    if __t1 == nil then return nil end
-    local va = __t1
-    local __t2 = b
-    if __t2 == nil then return nil end
-    local vb = __t2
+    local va = a
+    if va == nil then return nil end
+    local vb = b
+    if vb == nil then return nil end
     return va + vb
 end
 ```
