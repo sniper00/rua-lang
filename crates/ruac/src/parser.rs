@@ -201,11 +201,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            if simple {
-                if let Some(g) = generics.iter_mut().find(|g| g.name == name) {
+            if simple
+                && let Some(g) = generics.iter_mut().find(|g| g.name == name) {
                     g.bounds.extend(bounds);
                 }
-            }
             if !self.accept(T::Comma)? {
                 break;
             }

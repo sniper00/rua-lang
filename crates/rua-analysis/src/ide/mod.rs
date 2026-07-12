@@ -265,7 +265,7 @@ impl Analysis {
         let expr = body.expr(expr_id)?;
 
         let (callable, param_names, args) = self.resolve_call_target(
-            &body, &inference, &def_map, &member_index, expr,
+            body, inference, &def_map, &member_index, expr,
         )?;
 
         // Build parameter display: use original names when available.

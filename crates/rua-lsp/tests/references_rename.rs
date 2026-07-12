@@ -28,7 +28,7 @@ fn references_cross_file_parses_and_intra_file_works() {
     let pp_b = srv.pp(&uri_b, 0, 7).unwrap();
     let refs_b = analysis.references(pp_b, true);
     assert!(
-        refs_b.len() >= 1,
+        !refs_b.is_empty(),
         "intra-file refs to helper should find declaration, got {refs_b:?}"
     );
 
@@ -37,7 +37,7 @@ fn references_cross_file_parses_and_intra_file_works() {
     let pp_a = srv.pp(&uri_a, 0, 3).unwrap();
     let refs_a = analysis.references(pp_a, true);
     assert!(
-        refs_a.len() >= 1,
+        !refs_a.is_empty(),
         "intra-file refs to main should find declaration, got {refs_a:?}"
     );
 }

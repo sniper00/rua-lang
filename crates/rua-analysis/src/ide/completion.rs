@@ -27,6 +27,7 @@ use super::{
 /// Bundled context for a single completion request.  Built once at the entry
 /// point and passed through to scope / member / path completions, replacing
 /// the previous 4–5 ad-hoc parameters.
+#[allow(dead_code)]
 pub(crate) struct CompletionContext<'a> {
     pub db: &'a Rc<BaseDb>,
     pub position: FilePosition,
@@ -59,7 +60,6 @@ impl<'a> CompletionContext<'a> {
         let mut in_type_position = false;
         let mut in_expression_position = false;
         let mut in_pattern_position = false;
-        let mut in_method_body = false;
         let mut in_impl_block = false;
         let mut in_loop = false;
 
@@ -84,7 +84,7 @@ impl<'a> CompletionContext<'a> {
 
         // Determine whether cursor is inside a method body.
         let def_map = db.def_map(position.file_id);
-        in_method_body = innermost_body_owner(&def_map, position, offset)
+        let in_method_body = innermost_body_owner(&def_map, position, offset)
             .is_some_and(|d| d.kind() == DefKind::Method);
 
         Some(Self {
@@ -630,7 +630,7 @@ fn apply_type_compat_boost(
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
-    items: &mut Vec<CompletionItem>,
+    items: &mut [CompletionItem],
 ) {
     let Some(expected) = expected_type_at_cursor(db, def_map, position, offset) else {
         return;
@@ -647,7 +647,7 @@ fn apply_type_compat_boost(
     }
 }
 
-fn apply_replacement_ranges(items: &mut Vec<CompletionItem>, partial_range: TextRange) {
+fn apply_replacement_ranges(items: &mut [CompletionItem], partial_range: TextRange) {
     if partial_range.is_empty() {
         return;
     }
@@ -1209,7 +1209,7 @@ fn visible_locals(
     };
     let inference = &ctx.inference;
 
-    let Some(scope) = find_innermost_scope(&body, &source_map, scopes, offset) else {
+    let Some(scope) = find_innermost_scope(body, source_map, scopes, offset) else {
         return Vec::new();
     };
 
@@ -1435,8 +1435,8 @@ pub(crate) fn definition_signature(
         DefKind::Module => Some(format!("mod {}", definition.name())),
         DefKind::Field | DefKind::Variant => {
             let member_index = db.member_index(def_map.root_file());
-            if let Some(parent_id) = definition.owner() {
-                if let Some(template_ty) = member_index.type_template(parent_id) {
+            if let Some(parent_id) = definition.owner()
+                && let Some(template_ty) = member_index.type_template(parent_id) {
                     let candidates = match definition.kind() {
                         DefKind::Field => member_index.field_candidates(template_ty),
                         DefKind::Variant => member_index.associated_candidates(template_ty),
@@ -1448,7 +1448,6 @@ pub(crate) fn definition_signature(
                         return Some(format!("{}: {}", definition.name(), c.ty()));
                     }
                 }
-            }
             Some(definition.name().to_string())
         }
         DefKind::TypeAlias => Some(definition.name().to_string()),
@@ -1579,7 +1578,7 @@ fn pattern_scrutinee_enum(
             continue;
         }
         if let Some(result) = enum_type_template(
-            db, def_map, position.file_id, &inference, *scrutinee,
+            db, def_map, position.file_id, inference, *scrutinee,
         ) {
             return Some(result);
         }
@@ -1610,13 +1609,12 @@ fn pattern_scrutinee_enum(
             // Accept any offset from a generous left margin up to the
             // body start so we cover `while let |` and `while let Some(|`.
             let left = body_range.range.start().saturating_sub(100);
-            if offset >= left && offset <= body_range.range.start() {
-                if let Some(result) = enum_type_template(
-                    db, def_map, position.file_id, &inference, *scrutinee,
+            if offset >= left && offset <= body_range.range.start()
+                && let Some(result) = enum_type_template(
+                    db, def_map, position.file_id, inference, *scrutinee,
                 ) {
                     return Some(result);
                 }
-            }
         }
     }
 
@@ -1644,7 +1642,7 @@ fn match_scrutinee_enum(
             continue;
         }
         if let Some(result) =
-            enum_type_template(db, def_map, position.file_id, &inference, *scrutinee)
+            enum_type_template(db, def_map, position.file_id, inference, *scrutinee)
         {
             return Some(result);
         }

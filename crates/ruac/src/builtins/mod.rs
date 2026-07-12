@@ -88,7 +88,7 @@ pub fn load_builtins_dir(dir: &Path) -> Result<Vec<crate::ast::Item>, String> {
 
     for entry in paths {
         let p = entry.path();
-        if p.extension().map_or(true, |ext| ext != "ruai") {
+        if p.extension().is_none_or(|ext| ext != "ruai") {
             continue;
         }
         let src = fs::read_to_string(&p)

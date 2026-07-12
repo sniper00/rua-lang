@@ -306,7 +306,7 @@ fn add_infinite_loop_lint(file_id: FileId, text: &str, diagnostics: &mut Vec<Dia
             if let Some(eq_pos) = rest.find('=') {
                 let rhs = rest[eq_pos + 1..].trim();
                 let scrutinee = rhs.strip_prefix("mut ").unwrap_or(rhs)
-                    .split(|c: char| c == ' ' || c == '{')
+                    .split([' ', '{'])
                     .next()
                     .unwrap_or("")
                     .trim();

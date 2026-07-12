@@ -14,7 +14,7 @@ fn selection_range_expands_from_token() {
     let analysis = srv.snapshot();
     let parse = analysis.parse(file_id);
     let root = parse.syntax_node();
-    let source = root.text().to_string();
+    let _source = root.text().to_string();
 
     // Find a token at some offset
     let offset: u32 = 16; // the `x` in `let x`

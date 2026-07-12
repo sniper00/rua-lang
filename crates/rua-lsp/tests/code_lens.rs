@@ -67,8 +67,8 @@ fn code_lens_counts_references() {
         if matches!(
             d.kind(),
             rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-        ) {
-            if let Some(body) = analysis.body(d.id()) {
+        )
+            && let Some(body) = analysis.body(d.id()) {
                 let mut seen = std::collections::HashSet::new();
                 for (_, nr) in body.name_refs() {
                     if let Some(n) = nr.name() {
@@ -79,7 +79,6 @@ fn code_lens_counts_references() {
                     *ref_counts.entry(n).or_default() += 1;
                 }
             }
-        }
     }
 
     let used_count = ref_counts.get("used_fn").copied().unwrap_or(0);

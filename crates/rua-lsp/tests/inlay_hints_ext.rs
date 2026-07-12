@@ -29,7 +29,7 @@ fn inlay_hint_type_hint_position_after_binding_name() {
                 && !ty.is_unknown()
                 && let Some(fr) = source_map.binding_range(bid)
             {
-                let binding_end = fr.range.end();
+                let _binding_end = fr.range.end();
                 // Hint should be placed right after the binding name
                 assert_eq!(fr.range.start(), 16); // byte offset of `my_var`
                 // The type of 42 should be i64

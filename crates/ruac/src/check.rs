@@ -737,13 +737,11 @@ fn check_path(info: &Info, segs: &[String], sp: SourceRange, errs: &mut Vec<Diag
     if segs.len() >= 2 {
         let en = &segs[segs.len() - 2];
         let var = &segs[segs.len() - 1];
-        if info.is_enum(en) {
-            if let Some(vs) = info.enums.get(en) {
-                if !vs.contains_key(var) {
+        if info.is_enum(en)
+            && let Some(vs) = info.enums.get(en)
+                && !vs.contains_key(var) {
                     errs.push(at(sp, format!("enum `{}` has no variant `{}`", en, var)));
                 }
-            }
-        }
     }
 }
 

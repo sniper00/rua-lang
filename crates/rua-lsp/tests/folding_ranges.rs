@@ -27,7 +27,7 @@ fn folding_ranges_for_blocks() {
 
     // Every `{` should have a corresponding `}`
     assert!(
-        brace_locations.len() % 2 == 0,
+        brace_locations.len().is_multiple_of(2),
         "braces should be balanced"
     );
     assert!(

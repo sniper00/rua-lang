@@ -64,7 +64,7 @@ fn call_hierarchy_outgoing_finds_callees() {
     let item = srv.snapshot().call_hierarchy_prepare(pp);
     assert!(item.is_some(), "call hierarchy prepare should succeed");
 
-    let outgoing = srv.snapshot().call_hierarchy_outgoing(&item.unwrap());
+    let _outgoing = srv.snapshot().call_hierarchy_outgoing(&item.unwrap());
     // Outgoing calls may return empty if call graph resolution isn't
     // fully wired. Verify the caller itself was correctly identified.
     let caller_item = srv.snapshot().call_hierarchy_prepare(pp).unwrap();

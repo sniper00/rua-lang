@@ -100,11 +100,10 @@ fn completions_enum_variant_match_body_parsed() {
 
     // The match expression should be findable in the body
     let has_match = def_map.definitions().any(|d| {
-        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
-            if let Some(body) = analysis.body(d.id()) {
+        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method)
+            && let Some(body) = analysis.body(d.id()) {
                 return body.exprs().any(|(_, e)| matches!(e, rua_analysis::Expr::Match { .. }));
             }
-        }
         false
     });
     assert!(has_match, "match expression should be in the body");

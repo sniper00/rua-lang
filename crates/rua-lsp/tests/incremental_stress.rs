@@ -477,13 +477,10 @@ fn completions_sort_locals_before_keywords() {
     let local_pos = items.iter().position(|i| i.label() == "my_counter");
     let kw_pos = items.iter().position(|i| i.label() == "fn");
 
-    match (local_pos, kw_pos) {
-        (Some(l), Some(k)) => assert!(
-            l < k,
-            "local my_counter (position {l}) must sort before keyword fn (position {k})"
-        ),
-        _ => {}
-    }
+    if let (Some(l), Some(k)) = (local_pos, kw_pos) { assert!(
+        l < k,
+        "local my_counter (position {l}) must sort before keyword fn (position {k})"
+    ) }
 }
 
 #[test]
@@ -1176,7 +1173,7 @@ fn references_finds_local_variable_uses() {
     // Should find at least 1 read reference (the `x` in tail position).
     // The binding itself is not included because include_declaration=false.
     assert!(
-        refs.len() >= 1,
+        !refs.is_empty(),
         "should find references to x, got {refs:?}"
     );
 }

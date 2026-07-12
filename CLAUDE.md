@@ -56,7 +56,7 @@ cargo fmt --all
 cargo test -p rua-syntax --test goldens regenerate_goldens -- --ignored
 ```
 
-**Important**: `cargo clippy --all-targets` includes `ruac` which has 23 pre-existing clippy errors. Always scope clippy to `-p rua-analysis -p rua-lsp` when working on IDE features.
+**Note**: `cargo clippy --all-targets` will also check `ruac`. To keep cycle times short when only touching IDE crates, scope clippy to `-p rua-analysis -p rua-lsp --features lsp`.
 
 ## Analysis pipeline (the "two-tree" design)
 

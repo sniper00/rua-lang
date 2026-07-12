@@ -138,12 +138,12 @@ impl Ctx {
             let en = &segs[segs.len() - 2];
             let var = &segs[segs.len() - 1];
             let shape = self.enums.get(en)?.get(var)?;
-            Some((en.clone(), var.clone(), shape.clone()))
+            Some((en.clone(), var.clone(), *shape))
         } else if segs.len() == 1 {
             let var = &segs[0];
             let en = self.variant_enum.get(var)?;
             let shape = self.enums.get(en)?.get(var)?;
-            Some((en.clone(), var.clone(), shape.clone()))
+            Some((en.clone(), var.clone(), *shape))
         } else {
             None
         }
@@ -214,8 +214,8 @@ fn type_to_emmylua(ty: &Type) -> String {
                     "any|nil"
                 }
                 "Result" => {
-                    let ok = args.first().map(|a| type_to_emmylua(a)).unwrap_or_else(|| "any".into());
-                    let err = args.get(1).map(|a| type_to_emmylua(a)).unwrap_or_else(|| "any".into());
+                    let ok = args.first().map(type_to_emmylua).unwrap_or_else(|| "any".into());
+                    let err = args.get(1).map(type_to_emmylua).unwrap_or_else(|| "any".into());
                     return format!("{{ ok: {ok} }}|{{ err: {err} }}");
                 }
                 "HashMap" => "table",
@@ -269,9 +269,8 @@ impl Codegen<'_> {
                 Stmt::While { body, .. } | Stmt::Loop { body } | Stmt::WhileLet { body, .. } | Stmt::For { body, .. } => {
                     if Self::block_has_continue(body) { return true; }
                 }
-                Stmt::Expr(e) => {
-                    if Self::expr_has_continue(e) { return true; }
-                }
+                Stmt::Expr(e)
+                    if Self::expr_has_continue(e) => { return true; }
                 _ => {}
             }
         }
@@ -283,7 +282,7 @@ impl Codegen<'_> {
             ExprKind::Block(b) => Self::block_has_continue(b),
             ExprKind::If { then_block, else_block, .. } => {
                 Self::block_has_continue(then_block)
-                    || else_block.as_ref().map_or(false, |eb| match eb.as_ref() {
+                    || else_block.as_ref().is_some_and(|eb| match eb.as_ref() {
                         ElseBranch::Block(b) => Self::block_has_continue(b),
                         ElseBranch::If(e) => Self::expr_has_continue(e),
                     })
@@ -313,7 +312,7 @@ impl Codegen<'_> {
     // --- program ----------------------------------------------------------
 
     fn gen_program(&mut self, prog: &Program) {
-        let struct_names: Vec<&str> = prog
+        let _struct_names: Vec<&str> = prog
             .items
             .iter()
             .filter_map(|i| match i {
@@ -321,7 +320,7 @@ impl Codegen<'_> {
                 _ => None,
             })
             .collect();
-        let enum_names: Vec<&str> = prog
+        let _enum_names: Vec<&str> = prog
             .items
             .iter()
             .filter_map(|i| match i {
@@ -406,11 +405,10 @@ impl Codegen<'_> {
             }
         }
         for item in &prog.items {
-            if let Item::Mod(m) = item {
-                if !m.is_decl {
+            if let Item::Mod(m) = item
+                && !m.is_decl {
                     self.gen_mod(m, &traits);
                 }
-            }
         }
         self.gen_impls(&prog.items, &traits);
 
@@ -501,14 +499,13 @@ impl Codegen<'_> {
                 for m in &im.methods {
                     overridden.insert(m.name.as_str());
                     self.gen_method(&im.type_name, m);
-                    if let Some(tr) = &im.trait_name {
-                        if let Some(meta) = op_alias(tr, &m.name) {
+                    if let Some(tr) = &im.trait_name
+                        && let Some(meta) = op_alias(tr, &m.name) {
                             self.line(&format!("{0}.{1} = {0}.{2}", im.type_name, meta, m.name));
                         }
-                    }
                 }
-                if let Some(tr) = &im.trait_name {
-                    if let Some(td) = traits.get(tr.as_str()) {
+                if let Some(tr) = &im.trait_name
+                    && let Some(td) = traits.get(tr.as_str()) {
                         for tm in &td.methods {
                             if tm.default.is_some() && !overridden.contains(tm.name.as_str()) {
                                 self.gen_trait_default(&im.type_name, tm);
@@ -521,7 +518,6 @@ impl Codegen<'_> {
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -1050,11 +1046,9 @@ impl Codegen<'_> {
         self.indent -= 1;
         self.line("end");
 
-        if plan.consumer == IterConsumerKind::For {
-            if let Some((_, body)) = for_body {
-                if Self::block_has_continue(body) { self.line("::continue::"); }
-            }
-        }
+        if plan.consumer == IterConsumerKind::For
+            && let Some((_, body)) = for_body
+                && Self::block_has_continue(body) { self.line("::continue::"); }
         for (adapter, state) in chain.adapters.iter().zip(&states) {
             if adapter.kind == IterAdapterKind::Take {
                 let counter = state.counter.as_deref().unwrap_or("0");
@@ -1440,9 +1434,9 @@ impl Codegen<'_> {
                     self.indent += 1;
                     // Identity closure `|v| v` → just return the value
                     if let ExprKind::Closure { params, body, .. } = &args[0].kind {
-                        if params.len() == 1 {
-                            if let ClosureBody::Expr(inner) = body {
-                                if let ExprKind::Path(segs) = &inner.kind
+                        if params.len() == 1
+                            && let ClosureBody::Expr(inner) = body
+                                && let ExprKind::Path(segs) = &inner.kind
                                     && segs.len() == 1 && segs[0] == params[0].name
                                 {
                                     // Identity: |v| v → value unchanged
@@ -1450,9 +1444,7 @@ impl Codegen<'_> {
                                     self.line("end");
                                     return val;
                                 }
-                            }
-                        }
-                        let applied = self.gen_inlined_closure(&args[0], &[val.clone()]);
+                        let applied = self.gen_inlined_closure(&args[0], std::slice::from_ref(val));
                         self.line(&format!("{} = {}", val, applied));
                     }
                     self.indent -= 1;
@@ -1503,17 +1495,15 @@ impl Codegen<'_> {
     fn gen_path(&mut self, segs: &[String]) -> String {
         // Check codegen rules first (e.g. `None` → `nil`).
         let key = segs.join("::");
-        if let Some(rule) = self.builtin_rules.get(&key) {
-            if let crate::builtins::CodegenRule::Literal(lua) = rule {
+        if let Some(rule) = self.builtin_rules.get(&key)
+            && let crate::builtins::CodegenRule::Literal(lua) = rule {
                 return (*lua).to_string();
             }
-        }
-        if let Some((en, var, shape)) = self.ctx.resolve_variant(segs) {
-            if let VarShape::Unit = shape {
+        if let Some((en, var, shape)) = self.ctx.resolve_variant(segs)
+            && let VarShape::Unit = shape {
                 let meta = enum_ref(segs, &en);
                 return format!("setmetatable({{ tag = \"{}\" }}, {})", var, meta);
             }
-        }
         segs.join(".")
     }
 
@@ -1735,11 +1725,10 @@ fn binop_lua(op: BinOp) -> &'static str {
 
 fn lua_int_literal(s: &str) -> String {
     let clean = s.replace('_', "");
-    if let Some(bits) = clean.strip_prefix("0b").or_else(|| clean.strip_prefix("0B")) {
-        if let Ok(v) = i64::from_str_radix(bits, 2) {
+    if let Some(bits) = clean.strip_prefix("0b").or_else(|| clean.strip_prefix("0B"))
+        && let Ok(v) = i64::from_str_radix(bits, 2) {
             return v.to_string();
         }
-    }
     clean
 }
 

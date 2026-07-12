@@ -719,11 +719,11 @@ impl<'a> InferenceContext<'a> {
             | BinaryOp::Greater
             | BinaryOp::GreaterOrEqual => {
                 // Ordering operators require numeric operands.
-                if !lhs_ty.is_unknown()
-                    && !rhs_ty.is_unknown()
-                    && !lhs_ty.is_never()
-                    && !rhs_ty.is_never()
-                    && !(lhs_ty.is_numeric() && rhs_ty.is_numeric())
+                if !(lhs_ty.is_unknown()
+                    || rhs_ty.is_unknown()
+                    || lhs_ty.is_never()
+                    || rhs_ty.is_never()
+                    || (lhs_ty.is_numeric() && rhs_ty.is_numeric()))
                 {
                     self.diagnostics
                         .push(InferenceDiagnostic::InvalidBinary {

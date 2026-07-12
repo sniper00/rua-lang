@@ -47,14 +47,13 @@ fn on_type_formatting_brace_indent() {
     // The line after `{` should have indentation
     let lines: Vec<&str> = source.lines().collect();
     let brace_line = lines.iter().position(|l| l.contains('{'));
-    if let Some(idx) = brace_line {
-        if let Some(next_line) = lines.get(idx + 1) {
+    if let Some(idx) = brace_line
+        && let Some(next_line) = lines.get(idx + 1) {
             assert!(
                 next_line.starts_with("    ") || next_line.starts_with('\t'),
                 "line after brace should be indented, got: '{next_line}'"
             );
         }
-    }
 }
 
 #[test]

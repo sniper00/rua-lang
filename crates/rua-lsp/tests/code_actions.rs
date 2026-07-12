@@ -30,17 +30,15 @@ fn code_action_fill_match_arms_missing_variants_detected() {
 
     // The match has a scrutinee and arms — verify body analysis works
     for d in def_map.definitions() {
-        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
-            if let Some(body) = analysis.body(d.id()) {
-                if let Some((_eid, rua_analysis::Expr::Match { scrutinee, arms })) =
+        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method)
+            && let Some(body) = analysis.body(d.id())
+                && let Some((_eid, rua_analysis::Expr::Match { scrutinee, arms })) =
                     body.exprs().find(|(_, e)| matches!(e, rua_analysis::Expr::Match { .. }))
                 {
                     // scrutinee exists, arms exist
                     assert!(!arms.is_empty(), "match should have arms");
                     let _ = scrutinee;
                 }
-            }
-        }
     }
 }
 
@@ -57,8 +55,8 @@ fn code_action_fill_match_arms_exhaustive_noop() {
 
     // Both variants are covered → should have no missing variants
     for d in def_map.definitions() {
-        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
-            if let Some(body) = analysis.body(d.id()) {
+        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method)
+            && let Some(body) = analysis.body(d.id()) {
                 let arm_count = body.exprs().filter(|(_, e)| matches!(e, rua_analysis::Expr::Match { .. }))
                     .map(|(_, e)| if let rua_analysis::Expr::Match { arms, .. } = e { arms.len() } else { 0 })
                     .sum::<usize>();
@@ -67,7 +65,6 @@ fn code_action_fill_match_arms_exhaustive_noop() {
                     assert_eq!(arm_count, 2, "exhaustive match should have 2 arms, got {arm_count}");
                 }
             }
-        }
     }
 }
 
@@ -104,12 +101,11 @@ fn code_action_add_mut_prerequisite_check() {
     assert!(main_def.is_some());
 
     // Verify x binding exists and is NOT mutable
-    if let Some(main) = main_def {
-        if let Some(body) = analysis.body(main.id()) {
+    if let Some(main) = main_def
+        && let Some(body) = analysis.body(main.id()) {
             let bindings: Vec<_> = body.bindings().filter_map(|(_, b)| b.name()).collect();
             assert!(bindings.contains(&"x"), "x binding must exist in body, got: {bindings:?}");
         }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,9 +133,9 @@ fn code_action_sort_struct_fields_detects_unsorted() {
 
     // After formatting, fields should be alphabetically sorted: a_name, m_host, z_port
     let formatted = rua_syntax::format::format_str(&source);
-    let z_pos = formatted.find("z_port").unwrap_or(usize::MAX);
-    let a_pos = formatted.find("a_name").unwrap_or(usize::MAX);
-    let m_pos = formatted.find("m_host").unwrap_or(usize::MAX);
+    let _z_pos = formatted.find("z_port").unwrap_or(usize::MAX);
+    let _a_pos = formatted.find("a_name").unwrap_or(usize::MAX);
+    let _m_pos = formatted.find("m_host").unwrap_or(usize::MAX);
     // Formatting should not panic; sorted order depends on formatter implementation
     assert!(formatted.contains("a_name") && formatted.contains("m_host") && formatted.contains("z_port"),
         "formatted source should contain all fields");
@@ -188,13 +184,12 @@ fn code_action_extract_variable_expression_present() {
     let def_map = analysis.def_map(file_id);
     let main = def_map.definitions().find(|d| d.name() == "main");
     assert!(main.is_some());
-    if let Some(main) = main {
-        if let Some(body) = analysis.body(main.id()) {
+    if let Some(main) = main
+        && let Some(body) = analysis.body(main.id()) {
             // Body should contain the binding `result`
             let names: Vec<&str> = body.bindings().filter_map(|(_, b)| b.name()).collect();
             assert!(names.contains(&"result"), "binding result must exist, got: {names:?}");
         }
-    }
 }
 
 #[test]
@@ -208,9 +203,9 @@ fn code_action_inline_variable_usage_present() {
     let analysis = srv.snapshot();
     let def_map = analysis.def_map(file_id);
 
-    if let Some(main) = def_map.definitions().find(|d| d.name() == "main") {
-        if let Some(body) = analysis.body(main.id()) {
-            if let Some(resolution) = analysis.body_resolution(main.id()) {
+    if let Some(main) = def_map.definitions().find(|d| d.name() == "main")
+        && let Some(body) = analysis.body(main.id())
+            && let Some(resolution) = analysis.body_resolution(main.id()) {
                 // Find the `y` name_ref and verify it resolves to the y binding
                 for (_nrid, nr) in body.name_refs() {
                     if nr.name() == Some("y") {
@@ -218,8 +213,6 @@ fn code_action_inline_variable_usage_present() {
                     }
                 }
             }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -202,6 +202,7 @@ pub enum MacroDelimiter {
 /// Previously these were 14 hardcoded magic integers scattered across
 /// `scope_completions()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CompletionRelevance {
     pub base: u8,
     pub exact_type_match: bool,
@@ -280,18 +281,6 @@ impl CompletionRelevance {
     }
 }
 
-impl Default for CompletionRelevance {
-    fn default() -> Self {
-        Self {
-            base: 0,
-            exact_type_match: false,
-            type_name_match: false,
-            is_local: false,
-            is_from_this_crate: false,
-            is_deprecated: false,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionItem {

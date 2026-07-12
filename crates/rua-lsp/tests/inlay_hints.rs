@@ -129,7 +129,7 @@ fn inlay_hint_no_hint_when_type_annotation_present() {
         for (bid, b) in body.bindings() {
             if b.name() == Some("x")
                 && let Some(ty) = inference.type_of_binding(bid)
-                && let Some(fr) = source_map.binding_range(bid)
+                && let Some(_fr) = source_map.binding_range(bid)
             {
                 hints_for_x.push(ty.to_string());
             }

@@ -560,7 +560,7 @@ fn builtin_method_detail(recv: &Ty, method: &str) -> Option<String> {
         Ty::Vec(t) => {
             let elem = t.name();
             Some(match method {
-                "len" => format!("fn len(&self) -> i64"),
+                "len" => "fn len(&self) -> i64".to_string(),
                 "get" => format!("fn get(&self, index: usize) -> Option<{}>", elem),
                 "push" => format!("fn push(&mut self, value: {})", elem),
                 "pop" => format!("fn pop(&mut self) -> Option<{}>", elem),
@@ -1304,8 +1304,8 @@ impl Tc {
                     sig.generics = gens;
                     local.insert(m.name.clone(), sig);
                 }
-                if let Some(tr) = &im.trait_name {
-                    if let Some(tms) = traits.get(tr) {
+                if let Some(tr) = &im.trait_name
+                    && let Some(tms) = traits.get(tr) {
                         for (mname, (sig, has_default)) in tms {
                             if *has_default && !overridden.contains(mname) {
                                 local.entry(mname.clone()).or_insert(FnSig {
@@ -1316,7 +1316,6 @@ impl Tc {
                             }
                         }
                     }
-                }
                 let table = tc.methods.entry(im.type_name.clone()).or_default();
                 for (k, v) in local {
                     table.insert(k, v);
@@ -1335,19 +1334,16 @@ impl Tc {
                 }
                 // Inherited trait default methods: look up their definition spans
                 // from the trait's own table.
-                if let Some(tr) = &im.trait_name {
-                    if let Some(tms) = traits.get(tr) {
+                if let Some(tr) = &im.trait_name
+                    && let Some(tms) = traits.get(tr) {
                         for (mname, (_, has_default)) in tms {
-                            if *has_default && !mdefs.contains_key(mname) {
-                                if let Some(tm_table) = tc.trait_method_defs.get(tr) {
-                                    if let Some(&(sp, ref detail)) = tm_table.get(mname) {
+                            if *has_default && !mdefs.contains_key(mname)
+                                && let Some(tm_table) = tc.trait_method_defs.get(tr)
+                                    && let Some(&(sp, ref detail)) = tm_table.get(mname) {
                                         mdefs.insert(mname.clone(), (sp, detail.clone()));
                                     }
-                                }
-                            }
                         }
                     }
-                }
                 tc.method_defs.insert(im.type_name.clone(), mdefs);
             }
         }
@@ -1747,8 +1743,8 @@ impl Tc {
             self.reject_iter_escape(&actual, tail.span);
         }
         // Only check a concrete, non-unit declared return against a concrete tail.
-        if let Some(tail) = &body.tail {
-            if ret_ty.is_concrete()
+        if let Some(tail) = &body.tail
+            && ret_ty.is_concrete()
                 && ret_ty != Ty::Unit
                 && actual.is_concrete()
                 && !compatible(&ret_ty, &actual)
@@ -1762,7 +1758,6 @@ impl Tc {
                     ),
                 );
             }
-        }
         self.pop();
         self.gen_bounds.clear();
     }
@@ -2202,16 +2197,15 @@ impl Tc {
         }
 
         // Option<T>::map(fn) -> Option<U>
-        if method == "map" && args.len() == 1 {
-            if let Ty::Option(inner) = recv {
-                let param_ty = (**inner).clone();
+        if method == "map" && args.len() == 1
+            && let Ty::Option(inner) = recv {
+                let _param_ty = (**inner).clone();
                 let ret_ty = match &arg_tys[0] {
                     Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
                     _ => Ty::Unknown,
                 };
                 return Some(Ty::Option(Box::new(ret_ty)));
             }
-        }
 
         let Ty::Iter(item, draft) = recv else {
             if matches!(
@@ -2412,12 +2406,7 @@ impl Tc {
                     // When collect() has no explicit type argument, infer
                     // `Vec<T>` from the iterator item type or from the
                     // surrounding let-binding type annotation.
-                    let target = if matches!(**item, Ty::Unknown) {
-                        item
-                    } else {
-                        item
-                    };
-                    Ty::Vec(target.clone())
+                    Ty::Vec(item.clone())
                 };
                 self.finish_iter_plan(
                     draft,
@@ -2597,8 +2586,8 @@ impl Tc {
                 // Only check calls whose receiver is a known user type that
                 // actually declares the method; everything else is Unknown so
                 // Vec/HashMap/String/extern method calls are never flagged.
-                if let Ty::Named(tname) = &rt {
-                    if let Some(sig) = self.methods.get(tname).and_then(|m| m.get(method)) {
+                if let Ty::Named(tname) = &rt
+                    && let Some(sig) = self.methods.get(tname).and_then(|m| m.get(method)) {
                         let params = sig.params.clone();
                         let ret = sig.ret.clone();
                         let generics = sig.generics.clone();
@@ -2635,12 +2624,11 @@ impl Tc {
                         }
                         return ret;
                     }
-                }
                 // Receiver typed as a generic parameter: resolve the method via
                 // its trait bounds. If some bound trait declares the method, use
                 // that signature; otherwise stay silent (Unknown).
-                if let Ty::Generic(gname) = &rt {
-                    if let Some((tname, params, ret, generics)) =
+                if let Ty::Generic(gname) = &rt
+                    && let Some((tname, params, ret, generics)) =
                         self.resolve_generic_method(gname, method)
                     {
                         self.check_method_call(&tname, method, &params, &arg_tys, args, sp);
@@ -2658,11 +2646,10 @@ impl Tc {
                         }
                         return ret;
                     }
-                }
                 // Std `String` methods: record the call so codegen routes it
                 // through `rt.str`, and yield the method's return type.
-                if matches!(rt, Ty::Str) {
-                    if let Some(ret) = str_method_ret(method) {
+                if matches!(rt, Ty::Str)
+                    && let Some(ret) = str_method_ret(method) {
                         self.str_methods.insert((sp.start, sp.len));
                         // Record a member hit for LSP hover (no real def site).
                         if let Some(detail) = str_method_detail(method) {
@@ -2679,7 +2666,6 @@ impl Tc {
                         }
                         return ret;
                     }
-                }
                 if let Some(ret) =
                     self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, sp)
                 {
@@ -2694,8 +2680,8 @@ impl Tc {
                 // Record a member hit for LSP hover when this is a recognized
                 // builtin (Vec/HashMap method with a real return type). Sentinel
                 // target spans (0, 0) signal "no jump target" to the LSP layer.
-                if ret != Ty::Unknown {
-                    if let Some(detail) = builtin_method_detail(&rt, method) {
+                if ret != Ty::Unknown
+                    && let Some(detail) = builtin_method_detail(&rt, method) {
                         self.members.push(MemberTarget {
                             member_file: method_span.file,
                             member_start: method_span.start,
@@ -2707,7 +2693,6 @@ impl Tc {
                             kind: MemberKind::Method,
                         });
                     }
-                }
                 ret
             }
             ExprKind::Field {
@@ -3339,13 +3324,12 @@ impl Tc {
             return Some(v);
         }
         let variant = path.last()?;
-        if let Ty::Named(enum_name) = ty {
-            if let Some(VariantPayload::Tuple(tys)) =
+        if let Ty::Named(enum_name) = ty
+            && let Some(VariantPayload::Tuple(tys)) =
                 self.enum_variants.get(enum_name).and_then(|m| m.get(variant))
             {
                 return Some(tys.clone());
             }
-        }
         None
     }
 
@@ -3353,13 +3337,12 @@ impl Tc {
     /// scrutinee `ty`, when it's a user enum variant. `None` → Unknown fields.
     fn struct_payload(&self, path: &[String], ty: &Ty) -> Option<Vec<(String, Ty)>> {
         let variant = path.last()?;
-        if let Ty::Named(enum_name) = ty {
-            if let Some(VariantPayload::Struct(fields)) =
+        if let Ty::Named(enum_name) = ty
+            && let Some(VariantPayload::Struct(fields)) =
                 self.enum_variants.get(enum_name).and_then(|m| m.get(variant))
             {
                 return Some(fields.clone());
             }
-        }
         None
     }
 }

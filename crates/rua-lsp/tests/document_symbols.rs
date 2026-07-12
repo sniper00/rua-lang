@@ -18,7 +18,7 @@ fn document_symbols_include_nested_modules() {
 
     // Should have symbols for the module, its contents, and main
     assert!(
-        symbols.len() >= 1,
+        !symbols.is_empty(),
         "should produce symbols for module content, got {symbols:?}"
     );
 

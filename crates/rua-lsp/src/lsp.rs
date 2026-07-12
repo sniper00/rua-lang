@@ -480,8 +480,8 @@ impl Server {
             if matches!(
                 d.kind(),
                 rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
-                if let Some(body) = analysis.body(d.id()) {
+            )
+                && let Some(body) = analysis.body(d.id()) {
                     let mut seen = std::collections::HashSet::new();
                     for (_, nr) in body.name_refs() {
                         if let Some(n) = nr.name() {
@@ -492,7 +492,6 @@ impl Server {
                         *ref_counts.entry(n).or_default() += 1;
                     }
                 }
-            }
         }
 
         let mut lenses = Vec::new();

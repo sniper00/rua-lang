@@ -3,6 +3,7 @@
 //! Provides a minimal `TestServer` that mirrors the production `Server` without
 //! LSP protocol overhead — tests call the `Analysis` API directly via
 //! `snapshot()`.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -22,6 +23,7 @@ pub struct TestServer {
     next_file_id: u32,
 }
 
+#[allow(dead_code)]
 impl TestServer {
     pub fn new() -> Self {
         Self {
