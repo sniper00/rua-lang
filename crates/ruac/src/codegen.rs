@@ -1600,19 +1600,26 @@ impl Codegen<'_> {
             ExprKind::StructLit { path, fields } => self.gen_struct_lit(path, fields),
             ExprKind::Try { expr } => {
                 let inner = self.gen_inline(expr);
-                let ok = self.fresh_tmp();
-                let err = self.fresh_tmp();
-                // Capture up to 2 return values: the value and an optional error.
-                self.line(&format!("local {}, {} = {}", ok, err, inner));
-                // If there's an error (Result::Err), propagate as nil, err.
-                self.line(&format!(
-                    "if {} ~= nil then return nil, {} end",
-                    err, err
-                ));
-                // If the value itself is nil (Option::None), propagate nil.
-                self.line(&format!("if {} == nil then return nil end", ok));
-                // Otherwise unwrap: works for Option::Some and Result::Ok.
-                ok
+                let may_multi =
+                    matches!(&expr.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+                if may_multi {
+                    // Function call: capture both value and optional error.
+                    let ok = self.fresh_tmp();
+                    let err = self.fresh_tmp();
+                    self.line(&format!("local {}, {} = {}", ok, err, inner));
+                    self.line(&format!(
+                        "if {} ~= nil then return nil, {} end",
+                        err, err
+                    ));
+                    self.line(&format!("if {} == nil then return nil end", ok));
+                    ok
+                } else {
+                    // Plain value / variable: no multi-return, only need nil check.
+                    let ok = self.fresh_tmp();
+                    self.line(&format!("local {} = {}", ok, inner));
+                    self.line(&format!("if {} == nil then return nil end", ok));
+                    ok
+                }
             }
             // Control-flow in operand position: hoist into a temp.
             ExprKind::If { .. }
