@@ -1,0 +1,17 @@
+fn maybe() -> Option<i64> {
+    Some(42)
+}
+
+fn use_option() -> Option<i64> {
+    let value = maybe()?;
+    Some(value * 2)
+}
+
+fn absent() -> Option<i64> {
+    None
+}
+
+fn propagate_none() -> Option<i64> {
+    let _x = absent()?; // should short-circuit
+    Some(99)
+}

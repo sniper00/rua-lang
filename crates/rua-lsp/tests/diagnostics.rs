@@ -279,6 +279,55 @@ fn type_valid_binary_string_plus_string() {
     );
 }
 
+#[test]
+fn type_invalid_try_on_non_result() {
+    let uri = uri("/test/diag_try.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let x: i64 = 42; let _y = x?; }");
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    let diags = analysis.diagnostics(file_id);
+    assert!(
+        !diags.is_empty(),
+        "? on non-Result/Option should produce a diagnostic, got: {diags:?}"
+    );
+}
+
+#[test]
+fn type_valid_try_on_result() {
+    let uri = uri("/test/ok_try_result.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn load() -> Result<i64, String> { Ok(5) }\nfn use_val() -> Result<i64, String> { let v = load()?; Ok(v + 1) }",
+    );
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let type_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message().contains("?") || d.message().contains("Result") || d.message().contains("Option"))
+        .collect();
+    assert!(type_diags.is_empty(), "? on Result should not error, got: {type_diags:?}");
+}
+
+#[test]
+fn type_valid_try_on_option() {
+    let uri = uri("/test/ok_try_option.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn maybe() -> Option<i64> { Some(42) }\nfn use_val() -> Option<i64> { let v = maybe()?; Some(v + 1) }",
+    );
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let type_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message().contains("?") || d.message().contains("Result") || d.message().contains("Option"))
+        .collect();
+    assert!(type_diags.is_empty(), "? on Option should not error, got: {type_diags:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Type error diagnostics — unsatisfied trait bound
 // ---------------------------------------------------------------------------

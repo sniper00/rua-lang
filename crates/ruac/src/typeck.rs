@@ -2808,10 +2808,19 @@ impl Tc {
             }
             ExprKind::Try { expr } => {
                 // `e?` unwraps a Result<T,_> or Option<T> to T.
-                match self.infer(expr) {
-                    Ty::Result(t, _) => *t,
-                    Ty::Option(t) => *t,
-                    _ => Ty::Unknown,
+                let inner = self.infer(expr);
+                match &inner {
+                    Ty::Result(t, _) | Ty::Option(t) => t.as_ref().clone(),
+                    ty => {
+                        self.err(
+                            expr.span,
+                            format!(
+                                "`?` operator requires `Result` or `Option`, found `{}`",
+                                ty.name()
+                            ),
+                        );
+                        Ty::Unknown
+                    }
                 }
             }
             ExprKind::If {

@@ -43,10 +43,11 @@ pub enum DiagnosticCode {
     TypeNotIterable = 204,
     TypeInvalidUnary = 205,
     TypeInvalidBinary = 206,
-    TypeUnsatisfiedTraitBound = 207,
-    TypeUnknownField = 208,
-    TypeUnknownMethod = 209,
-    TypeMissingMatchArm = 210,
+    TypeInvalidTry = 207,
+    TypeUnsatisfiedTraitBound = 208,
+    TypeUnknownField = 209,
+    TypeUnknownMethod = 210,
+    TypeMissingMatchArm = 211,
 
     // Lint warnings (0300–0399)
     LintUnusedVariable = 300,
@@ -78,10 +79,11 @@ impl DiagnosticCode {
             Self::TypeNotIterable => "E0204",
             Self::TypeInvalidUnary => "E0205",
             Self::TypeInvalidBinary => "E0206",
-            Self::TypeUnsatisfiedTraitBound => "E0207",
-            Self::TypeUnknownField => "E0208",
-            Self::TypeUnknownMethod => "E0209",
-            Self::TypeMissingMatchArm => "E0210",
+            Self::TypeInvalidTry => "E0207",
+            Self::TypeUnsatisfiedTraitBound => "E0208",
+            Self::TypeUnknownField => "E0209",
+            Self::TypeUnknownMethod => "E0210",
+            Self::TypeMissingMatchArm => "E0211",
             Self::LintUnusedVariable => "W0300",
             Self::LintRedundantMut => "W0301",
             Self::LintUnreachableCode => "W0302",
@@ -114,6 +116,7 @@ impl DiagnosticCode {
             | Self::TypeNotIterable
             | Self::TypeInvalidUnary
             | Self::TypeInvalidBinary
+            | Self::TypeInvalidTry
             | Self::TypeUnsatisfiedTraitBound
             | Self::TypeUnknownField
             | Self::TypeUnknownMethod
@@ -816,6 +819,14 @@ fn convert_inference_diagnostic(
             (
                 DiagnosticCode::TypeInvalidBinary,
                 format!("cannot apply binary `{op:?}` to `{lhs}` and `{rhs}`"),
+                range,
+            )
+        }
+        InferenceDiagnostic::InvalidTry { expr, found } => {
+            let range = expr_range(*expr, source_map)?;
+            (
+                DiagnosticCode::TypeInvalidTry,
+                format!("`?` operator requires `Result` or `Option`, found `{found}`"),
                 range,
             )
         }

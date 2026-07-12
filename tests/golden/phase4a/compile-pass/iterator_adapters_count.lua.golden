@@ -19,7 +19,7 @@ function main()
             local __t11
             do
                 local value = __t8
-                __t11 = value
+                __t11 = { ok = value }
             end
             if __t11 == nil then
                 __t10 = false

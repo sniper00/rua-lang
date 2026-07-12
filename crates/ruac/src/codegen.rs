@@ -1474,8 +1474,13 @@ impl Codegen<'_> {
                 let inner = self.gen_inline(expr);
                 let r = self.fresh_tmp();
                 self.line(&format!("local {} = {}", r, inner));
-                // Propagate Err (docs §4.8). Option `?` needs the type checker.
-                self.line(&format!("if {0} ~= nil and {0}.err ~= nil then return {0} end", r));
+                // Propagate None (nil) or Err (table with .err field).
+                // Both Some(val) and Ok(val) are { ok = val }, so unwrapping
+                // via .ok works for both after the guard passes.
+                self.line(&format!(
+                    "if {0} == nil or {0}.err ~= nil then return {0} end",
+                    r
+                ));
                 format!("{}.ok", r)
             }
             // Control-flow in operand position: hoist into a temp.

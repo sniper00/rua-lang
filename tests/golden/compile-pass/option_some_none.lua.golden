@@ -3,7 +3,7 @@ local present, absent
 
 ---@return integer|nil
 function present()
-    return 5
+    return { ok = 5 }
 end
 
 ---@return integer|nil

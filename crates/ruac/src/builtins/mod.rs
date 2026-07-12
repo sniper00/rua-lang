@@ -45,10 +45,12 @@ impl Default for CodegenRules {
         let mut m = HashMap::new();
 
         // --- Option<T> ---
+        // Some(x) wraps as { ok = x } so that ? can distinguish Some(val) from
+        // None (nil).  This mirrors Result's Ok/Err table convention.
         m.insert("None".into(), CodegenRule::Literal("nil"));
-        m.insert("Some".into(), CodegenRule::InlineArg);
+        m.insert("Some".into(), CodegenRule::TableCtor { tag: Some("ok") });
         m.insert("Option::None".into(), CodegenRule::Literal("nil"));
-        m.insert("Option::Some".into(), CodegenRule::InlineArg);
+        m.insert("Option::Some".into(), CodegenRule::TableCtor { tag: Some("ok") });
 
         // --- Result<T, E> ---
         m.insert("Ok".into(), CodegenRule::TableCtor { tag: Some("ok") });

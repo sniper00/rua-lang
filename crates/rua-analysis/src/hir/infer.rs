@@ -63,6 +63,10 @@ pub enum InferenceDiagnostic {
         rhs: Ty,
         op: BinaryOp,
     },
+    InvalidTry {
+        expr: ExprId,
+        found: Ty,
+    },
     UnsatisfiedTraitBound {
         call: ExprId,
         actual: Ty,
@@ -790,9 +794,17 @@ impl<'a> InferenceContext<'a> {
 
     fn infer_try_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
         match self.infer_expr(expr, expected) {
-            Ty::Result(ok, _) => *ok,
+            Ty::Result(ok, _) | Ty::Option(ok) => *ok,
             Ty::Never => Ty::Never,
-            _ => Ty::Unknown,
+            other => {
+                if !other.is_unknown() {
+                    self.diagnostics.push(InferenceDiagnostic::InvalidTry {
+                        expr,
+                        found: other.clone(),
+                    });
+                }
+                Ty::Unknown
+            }
         }
     }
 

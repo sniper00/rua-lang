@@ -1,0 +1,1 @@
+<golden>/compile-fail/try_on_non_result.rua:3: `?` operator requires `Result` or `Option`, found `i64`
