@@ -150,7 +150,11 @@ impl Ctx {
     }
 }
 
-pub fn generate(prog: &Program, info: &TypeInfo) -> String {
+pub fn generate(
+    prog: &Program,
+    info: &TypeInfo,
+    rules: &crate::builtins::CodegenRules,
+) -> String {
     let mut cg = Codegen {
         out: String::new(),
         indent: 0,
@@ -159,6 +163,7 @@ pub fn generate(prog: &Program, info: &TypeInfo) -> String {
         uses_rt: false,
         closure_return_targets: Vec::new(),
         info,
+        builtin_rules: rules,
     };
     cg.gen_program(prog);
 
@@ -181,6 +186,7 @@ struct Codegen<'a> {
     /// closure body instead of returning from the enclosing Rua function.
     closure_return_targets: Vec<(String, String)>,
     info: &'a TypeInfo,
+    builtin_rules: &'a crate::builtins::CodegenRules,
 }
 
 impl Codegen<'_> {
@@ -1302,8 +1308,12 @@ impl Codegen<'_> {
     }
 
     fn gen_path(&mut self, segs: &[String]) -> String {
-        if segs.len() == 1 && segs[0] == "None" {
-            return "nil".to_string();
+        // Check codegen rules first (e.g. `None` → `nil`).
+        let key = segs.join("::");
+        if let Some(rule) = self.builtin_rules.get(&key) {
+            if let crate::builtins::CodegenRule::Literal(lua) = rule {
+                return (*lua).to_string();
+            }
         }
         if let Some((en, var, shape)) = self.ctx.resolve_variant(segs) {
             if let VarShape::Unit = shape {
@@ -1316,32 +1326,23 @@ impl Codegen<'_> {
 
     fn gen_call(&mut self, callee: &Expr, args: &[Expr]) -> String {
         if let ExprKind::Path(segs) = &callee.kind {
-            let head = segs.last().cloned().unwrap_or_default();
-            // Option / Result built-ins.
-            if segs.len() == 1 {
-                match head.as_str() {
-                    "Some" => return self.gen_inline(&args[0]),
-                    "Ok" => {
+            // Check codegen rules for builtin constructors.
+            let key = segs.join("::");
+            if let Some(rule) = self.builtin_rules.get(&key) {
+                use crate::builtins::CodegenRule::*;
+                match rule {
+                    InlineArg if !args.is_empty() => return self.gen_inline(&args[0]),
+                    TableCtor { tag: Some("ok") } if !args.is_empty() => {
                         let v = self.gen_inline(&args[0]);
                         return format!("{{ ok = {} }}", v);
                     }
-                    "Err" => {
+                    TableCtor { tag: Some("err") } if !args.is_empty() => {
                         let v = self.gen_inline(&args[0]);
                         return format!("{{ err = {} }}", v);
                     }
-                    _ => {}
-                }
-            }
-            // Collection constructors.
-            if segs.len() == 2 {
-                match (segs[0].as_str(), segs[1].as_str()) {
-                    ("HashMap", "new") => {
+                    RtCall(lua) => {
                         self.uses_rt = true;
-                        return "rt.map()".to_string();
-                    }
-                    ("Vec", "new") => {
-                        self.uses_rt = true;
-                        return "rt.vec({ n = 0 })".to_string();
+                        return (*lua).to_string();
                     }
                     _ => {}
                 }

@@ -39,13 +39,17 @@ fn run(args: &[String]) -> Result<(), String> {
 fn print_usage() {
     println!("ruac — Rua -> Lua 5.5 compiler\n");
     println!("USAGE:");
-    println!("    ruac build <file.rua> [-o <out.lua>]");
-    println!("    ruac check <file.rua>");
+    println!("    ruac build <file.rua> [-o <out.lua>] [--builtins-dir <dir>]");
+    println!("    ruac check <file.rua> [--builtins-dir <dir>]");
 }
 
 fn build(args: &[String]) -> Result<(), String> {
-    let (input, out) = parse_build_args(args)?;
-    let lua = ruac::compile_path(&input)?;
+    let (input, out, builtins_dir) = parse_build_args(args)?;
+    let lua = if let Some(ref d) = builtins_dir {
+        ruac::compile_path_with_builtins(&input, d)
+    } else {
+        ruac::compile_path(&input)
+    }?;
     let out = out.unwrap_or_else(|| input.with_extension("lua"));
     std::fs::write(&out, lua).map_err(|e| format!("writing {}: {}", out.display(), e))?;
     println!("compiled {} -> {}", input.display(), out.display());
@@ -53,20 +57,19 @@ fn build(args: &[String]) -> Result<(), String> {
 }
 
 fn check(args: &[String]) -> Result<(), String> {
-    let input = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or("check: missing <file.rua>")?;
-    let (program, files) = ruac::parse_and_resolve(&input)?;
+    let (input, builtins_dir) = parse_check_args(args)?;
+    let (mut program, files) = ruac::parse_and_resolve(&input)?;
+    ruac::load_builtins(&mut program, builtins_dir.as_deref());
     ruac::check::check(&program, &files)?;
     ruac::typeck::check(&program, &files)?;
     println!("ok: {}", input.display());
     Ok(())
 }
 
-fn parse_build_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+fn parse_build_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
     let mut input: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
+    let mut builtins_dir: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -75,7 +78,15 @@ fn parse_build_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), Strin
                 let o = args.get(i).ok_or("build: `-o` requires a path")?;
                 out = Some(PathBuf::from(o));
             }
+            "--builtins-dir" => {
+                i += 1;
+                let d = args.get(i).ok_or("`--builtins-dir` requires a path")?;
+                builtins_dir = Some(PathBuf::from(d));
+            }
             other => {
+                if other.starts_with('-') {
+                    return Err(format!("build: unknown flag `{}`", other));
+                }
                 if input.is_some() {
                     return Err(format!("build: unexpected argument `{}`", other));
                 }
@@ -85,5 +96,32 @@ fn parse_build_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), Strin
         i += 1;
     }
     let input = input.ok_or("build: missing <file.rua>")?;
-    Ok((input, out))
+    Ok((input, out, builtins_dir))
+}
+
+fn parse_check_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let mut input: Option<PathBuf> = None;
+    let mut builtins_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--builtins-dir" => {
+                i += 1;
+                let d = args.get(i).ok_or("`--builtins-dir` requires a path")?;
+                builtins_dir = Some(PathBuf::from(d));
+            }
+            other => {
+                if other.starts_with('-') {
+                    return Err(format!("check: unknown flag `{}`", other));
+                }
+                if input.is_some() {
+                    return Err(format!("check: unexpected argument `{}`", other));
+                }
+                input = Some(PathBuf::from(other));
+            }
+        }
+        i += 1;
+    }
+    let input = input.ok_or("check: missing <file.rua>")?;
+    Ok((input, builtins_dir))
 }

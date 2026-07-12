@@ -20,6 +20,7 @@
 //! these facades as part of narrowing `ruac`'s public API.
 
 pub mod ast;
+pub mod builtins;
 pub mod check;
 pub mod codegen;
 pub mod diag;
@@ -31,30 +32,93 @@ pub mod token;
 pub mod tokenize;
 pub mod typeck;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::diag::Diag;
 
+/// Load builtin .ruai declarations from a directory and prepend them to the
+/// program items. If `dir` is None, looks for `builtins/` next to the compiler
+/// binary, then in the current directory.
+pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) {
+    // Try explicit path first, then binary-relative, then cwd-relative.
+    let dirs: Vec<PathBuf> = if let Some(d) = dir {
+        vec![d.to_path_buf()]
+    } else {
+        // Find the builtins directory relative to the binary.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("builtins")));
+        let mut dirs = Vec::new();
+        if let Some(d) = exe_dir {
+            dirs.push(d);
+        }
+        dirs.push(PathBuf::from("builtins"));
+        dirs
+    };
+
+    let mut loaded = false;
+    for d in &dirs {
+        match builtins::load_builtins_dir(d) {
+            Ok(items) if !items.is_empty() => {
+                let mut combined = items;
+                combined.append(&mut program.items);
+                program.items = combined;
+                loaded = true;
+                break;
+            }
+            Ok(_) => {} // empty dir, try next
+            Err(e) => eprintln!("ruac: warning: {}", e),
+        }
+    }
+    if !loaded {
+        // No builtins found — this is fine for minimal usage but types like
+        // Option/Result/Vec won't be available.
+    }
+}
+
 /// Compile Rua source text to Lua 5.5 source text. File modules (`mod name;`)
 /// are not available here (no base directory); use [`compile_path`] for those.
+/// Uses default builtins directory resolution.
 pub fn compile_str(src: &str) -> Result<String, String> {
+    _compile_str(src, None)
+}
+
+/// Like [`compile_str`] but with an explicit builtins directory.
+pub fn compile_str_with_builtins(src: &str, builtins_dir: &Path) -> Result<String, String> {
+    _compile_str(src, Some(builtins_dir))
+}
+
+fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, String> {
     let mut program = parser::parse(src)?;
-    // File id 0 with an empty path: diagnostics fall back to `line: msg`.
+    load_builtins(&mut program, builtins_dir);
     let mut files = vec![String::new()];
     resolve::resolve_modules(&mut program.items, None, &mut files)?;
     resolve::resolve_uses(&mut program);
     check::check(&program, &files)?;
     let info = typeck::check(&program, &files)?;
-    Ok(codegen::generate(&program, &info))
+    let rules = builtins::CodegenRules::default();
+    Ok(codegen::generate(&program, &info, &rules))
 }
 
 /// Compile a Rua source file (resolving `mod name;` file modules relative to the
-/// file's directory) to Lua 5.5 source text.
+/// file's directory) to Lua 5.5 source text. Uses default builtins resolution.
 pub fn compile_path(path: &Path) -> Result<String, String> {
-    let (program, files) = parse_and_resolve(path)?;
+    _compile_path(path, None)
+}
+
+/// Like [`compile_path`] but with an explicit builtins directory.
+pub fn compile_path_with_builtins(path: &Path, builtins_dir: &Path) -> Result<String, String> {
+    _compile_path(path, Some(builtins_dir))
+}
+
+fn _compile_path(path: &Path, builtins_dir: Option<&Path>) -> Result<String, String> {
+    let (mut program, files) = parse_and_resolve(path)?;
+    load_builtins(&mut program, builtins_dir);
+    resolve::resolve_uses(&mut program);
     check::check(&program, &files)?;
     let info = typeck::check(&program, &files)?;
-    Ok(codegen::generate(&program, &info))
+    let rules = builtins::CodegenRules::default();
+    Ok(codegen::generate(&program, &info, &rules))
 }
 
 /// Parse a file and splice in its file modules, without semantic checks. Returns
