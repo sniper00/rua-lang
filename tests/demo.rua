@@ -1,41 +1,252 @@
-//! Rua LSP 能力演示脚本 — 覆盖 hover / goto / references / rename /
-//! completion / diagnostics / semantic-tokens / document-symbols / formatting.
+//! Rua 语言完整语法演示 — 覆盖所有支持的语法特性。
 //!
-//! 在 VS Code 中逐行体验：把光标放在标识符上等待 hover，F12 跳转定义，
-//! Shift+F12 查找引用，F2 重命名，Ctrl+Space 触发补全。
-// ---------------------------------------------------------------------------
-// 1. 结构体、字段、方法 — 体验 hover / goto / completion / references
-// ---------------------------------------------------------------------------
-/// A point in 2D space with an optional label.
+//! 在 VS Code 中体验：hover (悬停), F12 (跳转定义), Shift+F12 (查找引用),
+//! F2 (重命名), Ctrl+Space (触发补全), Shift+Alt+F (格式化)。
+//!
+//! 语法覆盖：struct / enum / trait / impl / mod / use / fn / let / if /
+//! while / for / loop / match / return / break / continue / closure /
+//! generic / where / extern / pattern / range / literal / comment。
 
+// ===========================================================================
+// 1. 结构体 — 命名结构体、单元结构体、泛型结构体
+// ===========================================================================
+
+/// A 2D point with integer coordinates and an optional label.
 struct Point {
     x: i64,
     y: i64,
     label: String,
 }
 
-/// Compute the squared distance from origin.
-fn distance_sq(p: &Point) -> i64 {
-    p.x * p.x + p.y * p.y
+/// A unit struct (no fields).
+struct Marker;
+
+/// A generic container.
+struct Container<T> {
+    value: T,
 }
 
-impl Point {
-    /// Move the point by (dx, dy).
-    fn translate(&mut self, dx: i64, dy: i64) {
-        self.x = self.x + dx;
-        self.y = self.y + dy;
-    }
+/// A nested generic type.
+struct Wrapper<T> {
+    inner: Option<Result<T, String>>,
 }
 
-// ---------------------------------------------------------------------------
-// 2. 枚举 + match narrowing — 体验补全（Color:: 后触发路径补全）
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 2. 枚举 — 单元变体、元组变体、结构体变体
+// ===========================================================================
+
 enum Color {
     Red,
     Green,
     Blue,
     Rgb(i64, i64, i64),
 }
+
+enum Message {
+    Quit,
+    Move { x: i64, y: i64 },
+    Write(String),
+    ChangeColor(i64, i64, i64),
+}
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// ===========================================================================
+// 3. Trait — 方法声明、默认实现、where 子句
+// ===========================================================================
+
+trait Named {
+    fn name(&self) -> String;
+}
+
+trait Greet {
+    fn hello(&self) -> String;
+
+    fn bye(&self) -> String {
+        "bye".to_string()
+    }
+}
+
+trait Movable {
+    fn translate(&mut self, dx: i64, dy: i64);
+}
+
+// ===========================================================================
+// 4. Impl — 为结构体实现、为 trait 实现
+// ===========================================================================
+
+impl Point {
+    fn new(x: i64, y: i64, label: String) -> Point {
+        Point { x, y, label }
+    }
+
+    fn distance_sq(&self) -> i64 {
+        self.x * self.x + self.y * self.y
+    }
+
+    fn translate(&mut self, dx: i64, dy: i64) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+
+struct Person {
+    name: String,
+}
+
+impl Named for Person {
+    fn name(&self) -> String {
+        self.name
+    }
+}
+
+impl Greet for Person {
+    fn hello(&self) -> String {
+        format!("Hello, {}!", self.name)
+    }
+}
+
+// ===========================================================================
+// 5. 泛型函数 + where 子句
+// ===========================================================================
+
+fn identity<T>(value: T) -> T {
+    value
+}
+
+fn label<T>(value: T) -> String
+where
+    T: Named,
+{
+    value.name()
+}
+
+fn first<T>(value: T) -> T
+where
+    T: Named,
+{
+    value
+}
+
+// ===========================================================================
+// 6. 模块系统 — 嵌套模块、use 声明
+// ===========================================================================
+
+mod math {
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    pub fn multiply(a: i64, b: i64) -> i64 {
+        a * b
+    }
+
+    pub mod trig {
+        pub fn sin(_x: f64) -> f64 {
+            0.0
+        }
+    }
+}
+
+mod utils {
+    pub fn greet(name: String) -> String {
+        format!("Hi, {}!", name)
+    }
+}
+
+use math::add;
+use math::trig::sin;
+use utils::{greet as say_hi};
+
+// ===========================================================================
+// 7. let 语句 — 简单绑定、类型注解、可变绑定、解构
+// ===========================================================================
+
+fn demo_let() {
+    let simple = 42;
+    let typed: i64 = 100;
+    let mut mutable = 0;
+    mutable = mutable + 1;
+
+    let inferred_bool = true;
+    let inferred_float = 3.14159;
+    let text = "hello";
+
+    // shadowing
+    let x = 1;
+    let x = x + 1;
+    let x = x * 2;
+}
+
+// ===========================================================================
+// 8. 控制流 — if/else, while, for, loop, return, break, continue
+// ===========================================================================
+
+fn demo_control_flow(n: i64) -> i64 {
+    // if/else 表达式
+    let sign = if n > 0 {
+        "positive"
+    } else if n < 0 {
+        "negative"
+    } else {
+        "zero"
+    };
+
+    // if/else 作为值
+    let abs = if n >= 0 { n } else { -n };
+
+    // while 循环
+    let mut count = 0;
+    while count < 10 {
+        count = count + 1;
+    }
+
+    // for-in range
+    let mut sum = 0;
+    for i in 0..10 {
+        sum = sum + i;
+    }
+
+    // for-in inclusive range
+    for j in 1..=5 {
+        sum = sum + j;
+    }
+
+    // while loop as expression (simulating loop + break)
+    let mut result = 0;
+    while count < 100 {
+        count = count + 1;
+        result = count;
+    }
+
+    // early return
+    if n == 0 {
+        return 0;
+    }
+
+    // continue
+    let mut even_sum = 0;
+    for i in 0..20 {
+        if i % 2 != 0 {
+            continue;
+        }
+        even_sum = even_sum + i;
+    }
+
+    abs + sum + result + even_sum
+}
+
+// ===========================================================================
+// 9. match 表达式 — 穷尽匹配、模式解构、守卫
+// ===========================================================================
 
 fn describe_color(c: Color) -> String {
     match c {
@@ -46,173 +257,290 @@ fn describe_color(c: Color) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3. Trait + impl — 体验 interface 类型补全
-// ---------------------------------------------------------------------------
-trait Greet {
-    fn hello(&self) -> String;
-
-    fn bye(&self) -> String {
-        "bye".to_string()
+fn classify_message(msg: Message) -> i64 {
+    match msg {
+        Message::Quit => 0,
+        Message::Move { x, y } => x + y,
+        Message::Write(text) => text.len(),
+        Message::ChangeColor(r, g, b) => r + g + b,
     }
 }
 
-struct Person {
-    name: String,
-}
-
-impl Greet for Person {
-    fn hello(&self) -> String {
-        format!("Hello, {}!", self.name)
+fn match_with_wildcard(x: Option<i64>) -> i64 {
+    match x {
+        Option::Some(v) => v,
+        Option::None => 0,
     }
 }
+
+// ===========================================================================
+// 10. 模式匹配 — if-let, while-let, 模式解构
+// ===========================================================================
+
+fn demo_patterns(maybe: Option<Point>) -> i64 {
+    // if-let 窄化
+    if let Option::Some(p) = maybe {
+        return p.x + p.y;
+    }
+
+    // while-let 窄化
+    let mut opt = Option::Some(1);
+    while let Option::Some(v) = opt {
+        if v > 10 {
+            opt = Option::None;
+        }
+    }
+
+    // 多个 let 绑定
+    let num = 42;
+    let flag = true;
+
+    // 通配符
+    let _unused = 99;
+
+    num
+}
+
+// ===========================================================================
+// 11. 闭包 — 简单闭包、带类型注解、多参数
+// ===========================================================================
+
+fn demo_closures() -> i64 {
+    // 简单闭包
+    let increment = |value: i64| value + 1;
+
+    // 无参数闭包
+    let forty_two = || 42;
+
+    // 带类型注解的闭包
+    let add = |a: i64, b: i64| -> i64 { a + b };
+
+    // 闭包捕获外部变量
+    let base = 10;
+    let offset = |x| x + base;
+
+    increment(forty_two()) + add(1, 2) + offset(5)
+}
+
+// ===========================================================================
+// 12. 方法调用链 + 字段访问 + 表达式
+// ===========================================================================
+
+fn demo_expressions() -> i64 {
+    // 算术运算
+    let arithmetic = 1 + 2 * 3 - 4 / 2;
+
+    // 比较 + 逻辑运算
+    let comparison = 5 > 3 && 4 < 10;
+    let logical = !false || true;
+
+    // 字段访问链
+    let p = Point::new(3, 4, "demo");
+    let px = p.x;
+    let py = p.y;
+
+    // 方法调用链
+    let mut c = Container { value: vec![1, 2, 3] };
+
+    // 结构体字面量
+    let origin = Point { x: 0, y: 0, label: "origin" };
+
+    // range 表达式
+    for _ in 0..5 {}
+
+    // 块表达式
+    let block_value = {
+        let a = 10;
+        let b = 20;
+        a + b
+    };
+
+    // if-else 表达式赋值
+    let conditional = if px > 0 { px } else { 0 };
+
+    arithmetic + px + py + block_value + conditional
+}
+
+// ===========================================================================
+// 13. 迭代器 — map/filter/fold/find/any/all/collect
+// ===========================================================================
+
+fn demo_iterators() -> i64 {
+    let values = vec![1, 2, 3, 4, 5];
+
+    let doubled: Vec<i64> = values
+        .iter()
+        .map(|x| x * 2)
+        .filter(|x| x > 5)
+        .collect();
+
+    let total = values.iter().fold(0, |acc, x| acc + x);
+
+    let found: Option<i64> = values
+        .iter()
+        .find(|x| x > 3)
+        .map(|v| v);
+
+    let has_big = values.iter().any(|x| x > 10);
+    let all_small = values.iter().all(|x| x < 100);
+    let count = values.iter().filter(|x| x % 2 == 0).count();
+
+    total
+}
+
+// ===========================================================================
+// 14. extern 外部函数声明
+// ===========================================================================
+
+extern "lua" {
+    pub fn log(message: String);
+    pub fn format(template: String, ...) -> String;
+}
+
+fn demo_extern() {
+    log("LSP demo is running!".to_string());
+    let msg = format("hello {}", "world".to_string());
+}
+
+// ===========================================================================
+// 15. 字面量 — 整数、浮点、字符串（含转义）、布尔
+// ===========================================================================
+
+fn demo_literals() {
+    let zero = 0;
+    let integer = 12345;
+    let negative = -42;
+    let fraction = 3.14159;
+
+    let t = true;
+    let f = false;
+
+    let plain = "hello world";
+    let quote = "say \"hello\"";
+    let newline = "first\nsecond";
+    let path = "c:\\tmp\\rua";
+    let unicode = "你好世界";
+}
+
+// ===========================================================================
+// 16. 注释 — 行注释、块注释、嵌套块注释、文档注释
+// ===========================================================================
+
+// 行注释
+
+/* 块注释 */
+
+/* 嵌套 /* 内部 */ 块注释 */
+
+/// 文档注释 — 用于函数
+/// 可以多行
+fn demo_comments() -> i64 {
+    let x = 1; // 行尾注释
+    /* 内联块注释 */ x
+}
+
+// ===========================================================================
+// 17. self 接收器 — self, &self, &mut self
+// ===========================================================================
+
+struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    fn take(self) -> i64 {
+        self.value
+    }
+
+    fn read(&self) -> i64 {
+        self.value
+    }
+
+    fn increment(&mut self) {
+        self.value = self.value + 1;
+    }
+
+    fn reset(&mut self) {
+        self.value = 0;
+    }
+}
+
+fn demo_self_receivers() -> i64 {
+    let c = Counter { value: 10 };
+    let val = c.read();
+    val
+}
+
+// ===========================================================================
+// 18. dyn trait — trait object
+// ===========================================================================
 
 fn greet_someone(g: &dyn Greet) -> String {
     g.hello()
 }
 
-// ---------------------------------------------------------------------------
-// 4. 闭包 + 迭代器 — 体验 closure parameter 类型推断 + iterator 补全
-// ---------------------------------------------------------------------------
-fn demo_iterators() -> i64 {
-    let values = vec![1, 2, 3, 4, 5];
-
-    let doubled: Vec<i64> = values.iter().map(| x | x * 2).filter(| x | x> 5).collect();
-
-    let total = values.iter().fold(0, | acc, x | acc + x);
-
-    let found: Option<i64> = values.iter().find(| x | x> 3).map(| v | v);
-
-    let has_big = values.iter().any(| x | x> 10);
-    let all_small = values.iter().all(| x | x<100);
-
-    total
+fn demo_trait_object(person: &Person) -> String {
+    greet_someone(person)
 }
 
-// ---------------------------------------------------------------------------
-// 5. 模式匹配 — 体验 narrowing + if-let / while-let
-// ---------------------------------------------------------------------------
-fn demo_patterns(maybe_point: Option<Point>) -> i64 {
-    let mut result = 0;
+// ===========================================================================
+// entry point — 综合演示
+// ===========================================================================
 
-    // if-let narrowing — 在 body 内 `p` 推断为 Point
-    if let Some(p) = maybe_point {
-        result = p.x + p.y;
-    }
-
-    // match with pattern narrowing
-    match maybe_point {
-        Some(p) => p.x,
-        None => 0,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 6. 局部变量 + 赋值 — 体验局部补全 / hover / references / rename
-// ---------------------------------------------------------------------------
-fn demo_locals() -> i64 {
-    let mut counter = 0;
-    let message = "hello";
-
-    counter = counter + 1;
-    counter = counter + 2;
-
-    let answer: i64 = 42;
-    answer + counter
-}
-
-// ---------------------------------------------------------------------------
-// 7. Result 类型 — 体验 builtin variant 补全 (Ok / Err)
-// ---------------------------------------------------------------------------
-fn demo_result(should_fail: bool) -> Result<i64, String> {
-    if should_fail {
-        Err("something went wrong".to_string())
-    } else {
-        Ok(42)
-    }
-}
-
-fn use_result() -> i64 {
-    match demo_result(false) {
-        Ok(value) => value,
-        Err(msg) => 0,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 8. 泛型函数 — 体验类型参数
-// ---------------------------------------------------------------------------
-fn identity<T>(value: T) -> T {
-    value
-}
-
-fn demo_generics() {
-    let a: i64 = identity(1);
-    let b: String = identity("hi".to_string());
-}
-
-// ---------------------------------------------------------------------------
-// 9. 模块 — 体验 document symbols 树形结构
-// ---------------------------------------------------------------------------
-mod utils {
-    pub fn add(a: i64, b: i64) -> i64 {
-        a + b
-    }
-
-    pub fn multiply(a: i64, b: i64) -> i64 {
-        a * b
-    }
-}
-
-fn demo_module() -> i64 {
-    utils::add(3, 4)
-}
-
-// ---------------------------------------------------------------------------
-// 10. 外部函数声明 — 体验 hover 显示签名
-// ---------------------------------------------------------------------------
-extern "lua" {
-    pub fn log(msg: String);
-}
-
-fn demo_extern() {
-    log("LSP demo is running!".to_string());
-}
-
-fn stable( value: i64 ) -> i64 {
-    // The compiler ignores trivia while preserving behavior.
-    value + "123"
-}
-
-// --- entry point ---
 fn main() {
-    let origin = Point { x: 0, y: 0, label: "origin".to_string() };
+    // 结构体 + 方法
+    let origin = Point::new(0, 0, "origin");
+    let dist = origin.distance_sq();
 
-
-    
-    
-
-    let dist = distance_sq(&origin);
-    
-
-    let mut p = Point { x: 3, y: 4, label: "p".to_string() };
+    let mut p = Point::new(3, 4, "moving");
     p.translate(1, 2);
-    p.label;
 
+    // 枚举 + match
+    let red = Color::Red;
+    describe_color(red);
+    let rgb = Color::Rgb(255, 128, 0);
+    describe_color(rgb);
 
+    let msg = Message::Move { x: 10, y: 20 };
+    classify_message(msg);
 
-    let c = Color::Rgb(255, 128, 0);
-    describe_color(c);
+    // trait + impl
+    let alice = Person { name: "Alice" };
+    alice.hello();
+    greet_someone(alice);
 
-    let person = Person { name: "Alice".to_string() };
-    greet_someone(&person);
+    // 模块
+    let sum = math::add(3, 4);
+    let product = math::multiply(5, 6);
+    say_hi("Bob");
 
+    // 控制流
+    demo_control_flow(42);
+
+    // 迭代器
     demo_iterators();
-    demo_patterns(Some(Point { x: 10, y: 20, label: "demo".to_string() }));
-    demo_locals();
-    use_result();
-    demo_generics();
-    demo_module();
+
+    // 闭包
+    demo_closures();
+
+    // 模式匹配
+    demo_patterns(Option::None);
+
+    // 表达式
+    demo_expressions();
+
+    // trait object
+    demo_trait_object(alice);
+
+    // self 接收器
+    demo_self_receivers();
+
+    // extern
     demo_extern();
 
+    // 字面量
+    demo_literals();
+
+    // 注释
+    demo_comments();
 }
