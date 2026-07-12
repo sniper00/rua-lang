@@ -13,7 +13,7 @@ Key design constraint: no borrow checker, no lifetimes, no ownership — static 
 **Every change must include:**
 1. **Tests** — LSP-level features go in `crates/rua-lsp/tests/incremental_stress.rs`; analysis internals go in `crates/rua-analysis/tests/`. No change lands without a test that fails before the fix and passes after.
 2. **Documentation** — update relevant docs in `docs/` or doc comments on public APIs when behaviour changes.
-3. **Commit** — after tests pass and clippy is clean, commit immediately. Include `Co-Authored-By: Claude <noreply@anthropic.com>`.
+3. **Commit** — after tests pass and clippy is clean, commit immediately. Do NOT include `Co-Authored-By` or any other trailer.
    - Use `feat:` prefix for new features and user-facing additions.
    - Use `fix:` prefix for bug fixes and refactors.
    - Use `docs:` for documentation-only changes.
