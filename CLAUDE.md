@@ -128,3 +128,4 @@ The `mut` in `&mut self` is about **reference mutability** (mutation through the
 - `docs/rua-analysis-lsp-migration-plan.md` — Migration plan for LSP features
 - `docs/rua-construction-plan.md` — Construction phases
 - `docs/rua-lsp-features.md` — LSP feature checklist
+- `docs/rua-vs-rust-analyzer-gap-analysis.md` — Architecture gap analysis vs rust-analyzer: what to borrow, what to fix
