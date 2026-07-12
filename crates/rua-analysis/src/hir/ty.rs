@@ -460,6 +460,20 @@ impl<'a> TypeLoweringContext<'a> {
             return Ty::GenericParam(GenericParamTy::new(*id, path));
         }
 
+        // Built-in types with fixed semantics (Option, Result) are recognised
+        // directly, even when a user-defined enum with the same name exists.
+        // This ensures `?` operator and pattern matching work uniformly.
+        let builtin = match path.as_str() {
+            "Option" if args.len() == 1 => Some(Ty::Option(Box::new(args[0].clone()))),
+            "Result" if args.len() == 2 => {
+                Some(Ty::Result(Box::new(args[0].clone()), Box::new(args[1].clone())))
+            }
+            _ => None,
+        };
+        if let Some(builtin) = builtin {
+            return builtin;
+        }
+
         // A project definition is stronger evidence than a builtin spelling.
         // This keeps workspace/library precedence intact for legal names such
         // as a user-defined `Vec`, while unresolved spellings still fall back
@@ -479,11 +493,6 @@ impl<'a> TypeLoweringContext<'a> {
             "String" | "str" if args.is_empty() => Some(Ty::STRING),
             "Vec" if args.len() == 1 => Some(Ty::Vec(Box::new(args[0].clone()))),
             "HashMap" if args.len() == 2 => Some(Ty::HashMap(
-                Box::new(args[0].clone()),
-                Box::new(args[1].clone()),
-            )),
-            "Option" if args.len() == 1 => Some(Ty::Option(Box::new(args[0].clone()))),
-            "Result" if args.len() == 2 => Some(Ty::Result(
                 Box::new(args[0].clone()),
                 Box::new(args[1].clone()),
             )),

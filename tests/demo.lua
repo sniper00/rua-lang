@@ -464,36 +464,28 @@ end
 
 ---@return integer|nil, string|nil
 local function load_and_parse(path)
-    local __t46, __t47 = load_config(path)
+    local config, __t46 = load_config(path)
+    if __t46 ~= nil then return nil, __t46 end
+    if config == nil then return nil end
+    local value, __t47 = parse_int(config)
     if __t47 ~= nil then return nil, __t47 end
-    if __t46 == nil then return nil end
-    local config = __t46
-    local __t48, __t49 = parse_int(config)
-    if __t49 ~= nil then return nil, __t49 end
-    if __t48 == nil then return nil end
-    local value = __t48
+    if value == nil then return nil end
     return value + 1
 end
 
 ---@return integer|nil
 local function maybe_double(x)
-    local __t50, __t51 = x
-    if __t51 ~= nil then return nil, __t51 end
-    if __t50 == nil then return nil end
-    local v = __t50
+    local v = x
+    if v == nil then return nil end
     return v * 2
 end
 
 ---@return integer|nil
 local function chain_option(a, b)
-    local __t52, __t53 = a
-    if __t53 ~= nil then return nil, __t53 end
-    if __t52 == nil then return nil end
-    local va = __t52
-    local __t54, __t55 = b
-    if __t55 ~= nil then return nil, __t55 end
-    if __t54 == nil then return nil end
-    local vb = __t54
+    local va = a
+    if va == nil then return nil end
+    local vb = b
+    if vb == nil then return nil end
     return va + vb
 end
 

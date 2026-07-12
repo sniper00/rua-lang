@@ -793,8 +793,9 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn infer_try_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
-        match self.infer_expr(expr, expected) {
-            Ty::Result(ok, _) | Ty::Option(ok) => *ok,
+        let inner = self.infer_expr(expr, expected);
+        match &inner {
+            Ty::Result(ok, _) | Ty::Option(ok) => (**ok).clone(),
             Ty::Never => Ty::Never,
             other => {
                 if !other.is_unknown() {
