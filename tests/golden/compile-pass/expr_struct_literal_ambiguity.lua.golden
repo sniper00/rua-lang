@@ -4,7 +4,6 @@
 local Choice = {}
 Choice.__index = Choice
 
----@param flag boolean
 ---@return Choice
 local function choose(flag)
     if flag then

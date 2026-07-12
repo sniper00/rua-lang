@@ -45,15 +45,11 @@ local format = format or function(...) end
 ---@class math
 local math = {}
 
----@param a integer
----@param b integer
 ---@return integer
 function math.add(a, b)
     return a + b
 end
 
----@param a integer
----@param b integer
 ---@return integer
 function math.multiply(a, b)
     return a * b
@@ -62,7 +58,6 @@ end
 ---@class trig
 local trig = {}
 
----@param _x number
 ---@return number
 function trig.sin(_x)
     return 0.0
@@ -71,28 +66,24 @@ end
 ---@class utils
 local utils = {}
 
----@param name string
 ---@return string
 function utils.greet(name)
     return rt.format("Hi, {}!", name)
 end
 
 ---@generic T
----@param value T
 ---@return T
 local function identity(value)
     return value
 end
 
 ---@generic T
----@param value T
 ---@return string
 local function label(value)
     return value:name()
 end
 
 ---@generic T
----@param value T
 ---@return T
 local function first(value)
     return value
@@ -112,7 +103,6 @@ local function demo_let()
     local x = x * 2
 end
 
----@param n integer
 ---@return integer
 local function demo_control_flow(n)
     local sign
@@ -163,7 +153,6 @@ local function demo_control_flow(n)
     return abs + sum + result + even_sum
 end
 
----@param c Color
 ---@return string
 local function describe_color(c)
     local __t1 = c
@@ -183,7 +172,6 @@ local function describe_color(c)
     end
 end
 
----@param msg Message
 ---@return integer
 local function classify_message(msg)
     local __t2 = msg
@@ -206,7 +194,6 @@ local function classify_message(msg)
     end
 end
 
----@param x integer|nil
 ---@return integer
 local function match_with_wildcard(x)
     local __t3 = x
@@ -220,7 +207,6 @@ local function match_with_wildcard(x)
     end
 end
 
----@param maybe Point|nil
 ---@return integer
 local function demo_patterns(maybe)
     local __t4 = maybe
@@ -452,19 +438,16 @@ local function demo_self_receivers()
     return val
 end
 
----@param g Greet
 ---@return string
 local function greet_someone(g)
     return g:hello()
 end
 
----@param person Person
 ---@return string
 local function demo_trait_object(person)
     return greet_someone(person)
 end
 
----@param path string
 ---@return string|nil, string|nil
 local function load_config(path)
     if path == "" then
@@ -474,13 +457,11 @@ local function load_config(path)
     end
 end
 
----@param raw string
 ---@return integer|nil, string|nil
 local function parse_int(raw)
     return 42
 end
 
----@param path string
 ---@return integer|nil, string|nil
 local function load_and_parse(path)
     local __t46, __t47 = load_config(path)
@@ -494,7 +475,6 @@ local function load_and_parse(path)
     return value + 1
 end
 
----@param x integer|nil
 ---@return integer|nil
 local function maybe_double(x)
     local __t50, __t51 = x
@@ -504,8 +484,6 @@ local function maybe_double(x)
     return v * 2
 end
 
----@param a integer|nil
----@param b integer|nil
 ---@return integer|nil
 local function chain_option(a, b)
     local __t52, __t53 = a
@@ -562,9 +540,6 @@ local function main()
     demo_comments()
 end
 
----@param x integer
----@param y integer
----@param label string
 ---@return Point
 function Point.new(x, y, label)
     return setmetatable({ x = x, y = y, label = label }, Point)
@@ -575,7 +550,6 @@ function Point:distance_sq()
     return self.x * self.x + self.y * self.y
 end
 
----@param dy integer
 function Point:translate(dx, dy)
     self.x = self.x + dx
     self.y = self.y + dy

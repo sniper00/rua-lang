@@ -5,7 +5,6 @@
 local Point = {}
 Point.__index = Point
 
----@param point Point
 ---@return integer
 local function read(point)
     return point:sum()

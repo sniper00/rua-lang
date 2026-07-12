@@ -3,8 +3,6 @@
 ---@class math
 local math = {}
 
----@param a integer
----@param b integer
 ---@return integer
 function math.add(a, b)
     return a + b

@@ -4,14 +4,11 @@
 local Item = {}
 Item.__index = Item
 
----@param value integer
 ---@return integer
 local function id(value)
     return value
 end
 
----@param item Item
----@param values integer[]
 ---@return integer
 local function read(item, values)
     return id(item.value) + values[0]

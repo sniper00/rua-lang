@@ -3,7 +3,6 @@
 local Item = {}
 Item.__index = Item
 
----@param item Item
 ---@return string
 local function read(item)
     return item:name()

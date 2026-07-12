@@ -4,7 +4,6 @@ local Item = {}
 Item.__index = Item
 
 ---@generic T
----@param value T
 ---@return string
 local function label(value)
     return value:name()

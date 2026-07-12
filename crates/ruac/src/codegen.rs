@@ -229,16 +229,6 @@ fn type_to_emmylua(ty: &Type) -> String {
     }
 }
 
-fn emit_param_annotations(out: &mut String, params: &[Param]) {
-    for p in params {
-        out.push_str(&format!(
-            "---@param {} {}\n",
-            p.name,
-            type_to_emmylua(&p.ty)
-        ));
-    }
-}
-
 fn emit_return_annotation(out: &mut String, ret: &Option<Type>) {
     if let Some(r) = ret {
         out.push_str(&format!("---@return {}\n", type_to_emmylua(r)));
@@ -259,7 +249,8 @@ impl Codegen<'_> {
             let gens: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
             self.out.push_str(&format!("---@generic {}\n", gens.join(", ")));
         }
-        emit_param_annotations(&mut self.out, &f.params);
+        // Parameter types are explicit in Rua source; only emit the return
+        // annotation so LuaLS can infer the result type at call sites.
         emit_return_annotation(&mut self.out, &f.ret);
     }
 
@@ -662,15 +653,7 @@ impl Codegen<'_> {
 
     fn gen_method(&mut self, type_name: &str, m: &FnDecl) {
         self.blank();
-        // Emit param/return annotations (skip `self` param if present).
-        let skip_self = if m.has_self { 1 } else { 0 };
-        for p in m.params.iter().skip(skip_self) {
-            self.line(&format!(
-                "---@param {} {}",
-                p.name,
-                type_to_emmylua(&p.ty)
-            ));
-        }
+        // Return annotation so LuaLS can infer result types.
         if let Some(ret) = &m.ret {
             self.line(&format!("---@return {}", type_to_emmylua(ret)));
         }
