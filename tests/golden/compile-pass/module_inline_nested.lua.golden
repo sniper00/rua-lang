@@ -13,6 +13,7 @@ do
     do
         local value
 
+---@return integer
         function value()
             return 7
         end

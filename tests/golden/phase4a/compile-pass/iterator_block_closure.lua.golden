@@ -2,6 +2,7 @@
 local rt = require("rua_rt")
 local main
 
+---@return integer[]
 function main()
     local __t1 = 0
     local __t2 = 4

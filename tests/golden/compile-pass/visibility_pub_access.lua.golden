@@ -9,6 +9,7 @@ api = {}
 do
     local visible
 
+---@return integer
     function visible()
         return 1
     end

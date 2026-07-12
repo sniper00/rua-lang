@@ -2,6 +2,7 @@
 local rt = require("rua_rt")
 local main
 
+---@return integer
 function main()
     local values = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
     local total = 0

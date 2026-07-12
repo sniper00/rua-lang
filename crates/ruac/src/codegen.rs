@@ -332,9 +332,8 @@ impl Codegen<'_> {
         for item in &prog.items {
             match item {
                 Item::Struct(s) => {
+                    // EmmyLua: @class + @field BEFORE the class table
                     self.emit_struct_annotation(s);
-                    self.line(&format!("{0} = {{}}", s.name));
-                    self.line(&format!("{0}.__index = {0}", s.name));
                     for field in &s.fields {
                         self.line(&format!(
                             "---@field {} {}",
@@ -342,6 +341,8 @@ impl Codegen<'_> {
                             type_to_emmylua(&field.ty)
                         ));
                     }
+                    self.line(&format!("{0} = {{}}", s.name));
+                    self.line(&format!("{0}.__index = {0}", s.name));
                 }
                 Item::Enum(e) => {
                     self.line(&format!("---@class {0}", e.name));

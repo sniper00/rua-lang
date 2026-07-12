@@ -9,6 +9,9 @@ math = {}
 do
     local add
 
+---@param a integer
+---@param b integer
+---@return integer
     function add(a, b)
         return (a + b)
     end

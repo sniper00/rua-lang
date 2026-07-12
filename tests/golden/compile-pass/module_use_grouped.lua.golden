@@ -10,10 +10,12 @@ math = {}
 do
     local one, two
 
+---@return integer
     function one()
         return 1
     end
 
+---@return integer
     function two()
         return 2
     end

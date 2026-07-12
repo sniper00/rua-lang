@@ -9,10 +9,12 @@ api = {}
 do
     local hidden, visible
 
+---@return integer
     function hidden()
         return 1
     end
 
+---@return integer
     function visible()
         return hidden()
     end
