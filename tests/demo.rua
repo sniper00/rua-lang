@@ -49,15 +49,15 @@ enum Message {
     ChangeColor(i64, i64, i64),
 }
 
-enum Option<T> {
-    Some(T),
-    None,
-}
+// enum Option<T> {
+//     Some(T),
+//     None,
+// }
 
-enum Result<T, E> {
-    Ok(T),
-    Err(E),
-}
+// enum Result<T, E> {
+//     Ok(T),
+//     Err(E),
+// }
 
 // ===========================================================================
 // 3. Trait — 方法声明、默认实现、where 子句

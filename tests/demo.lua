@@ -25,12 +25,6 @@ Color.__index = Color
 ---@class Message
 local Message = {}
 Message.__index = Message
----@class Option
-local Option = {}
-Option.__index = Option
----@class Result
-local Result = {}
-Result.__index = Result
 ---@class Person
 ---@field name string
 local Person = {}

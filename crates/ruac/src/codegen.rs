@@ -1444,13 +1444,30 @@ impl Codegen<'_> {
                 tests.push(format!("({0} >= {1} and {0} {2} {3})", subject, l, op, h));
             }
             Pattern::Path(segs) => {
-                if segs.len() == 1 && segs[0] == "None" {
-                    tests.push(format!("{} == nil", subject));
-                } else if let Some((_, var, _)) = self.ctx.resolve_variant(segs) {
-                    tests.push(format!("{}.tag == \"{}\"", subject, var));
-                } else {
-                    // best-effort: treat last segment as a tag
-                    tests.push(format!("{}.tag == \"{}\"", subject, segs.last().unwrap()));
+                let joined = segs.join("::");
+                match joined.as_str() {
+                    "None" | "Option::None" => {
+                        tests.push(format!("{} == nil", subject));
+                    }
+                    "Some" | "Option::Some" | "Ok" | "Result::Ok" => {
+                        tests.push(format!("{} == nil", err_subject));
+                        // bind subject as the value
+                    }
+                    "Err" | "Result::Err" => {
+                        tests.push(format!("{} ~= nil", err_subject));
+                    }
+                    _ => {
+                        if let Some((_, var, _)) = self.ctx.resolve_variant(segs) {
+                            tests.push(format!("{}.tag == \"{}\"", subject, var));
+                        } else {
+                            // best-effort: treat last segment as a tag
+                            tests.push(format!(
+                                "{}.tag == \"{}\"",
+                                subject,
+                                segs.last().unwrap()
+                            ));
+                        }
+                    }
                 }
             }
             Pattern::TupleVariant { path, elems } => {
