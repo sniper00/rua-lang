@@ -409,6 +409,42 @@ impl Outer {
 }
 
 #[test]
+fn lint_redundant_mut_not_triggered_by_mut_method_call() {
+    // Calling a method that takes `&mut self` on a local variable
+    // (e.g. `p.translate(1, 2)`) should suppress W0301 — the `mut` is
+    // required because the method borrows p mutably.
+    let uri = uri("/test/mut_method.rua");
+    let mut srv = TestServer::new();
+
+    srv.open(
+        &uri,
+        r#"
+struct Point { x: i64, y: i64 }
+impl Point {
+    fn translate(&mut self, dx: i64, dy: i64) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+fn main() {
+    let mut p = Point { x: 3, y: 4 };
+    p.translate(1, 2);
+}
+"#,
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0301 = diags
+        .iter()
+        .any(|d| d.code() == Some(DiagnosticCode::LintRedundantMut));
+    assert!(
+        !has_w0301,
+        "W0301 should not fire when local calls &mut self method: {diags:?}"
+    );
+}
+
+#[test]
 fn snapshot_isolation_across_changes() {
     let uri = uri("/test/snap.rua");
     let mut srv = TestServer::new();

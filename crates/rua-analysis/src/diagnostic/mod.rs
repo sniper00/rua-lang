@@ -384,7 +384,7 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                 }
             }
 
-        // Lint: unused variables.
+        // Lint: unused variables and redundant-mut.
         if let Some(body) = db.body(definition.id())
             && let Some(source_map) = db.body_source_map(definition.id())
             && let Some(resolution) = db.body_resolution(definition.id())
@@ -464,7 +464,57 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                                 if lid.binding() == binding_id
                         )
                     });
-                if !has_field_write
+                // &mut self method calls: `p.translate(…)` where translate takes
+                // &mut self.  The name-ref to `p` is a Read in local use tracking,
+                // but the method borrows p mutably, so `mut` is required.
+                let has_mut_method_call = has_field_write
+                    || (db.infer(definition.id()).is_some_and(|inference| {
+                        body.exprs().any(|(_eid, expr)| {
+                            let (receiver, method) = match expr {
+                                crate::hir::Expr::MethodCall {
+                                    receiver,
+                                    method,
+                                    ..
+                                } => (*receiver, *method),
+                                _ => return false,
+                            };
+                            // Check that the receiver path resolves to our binding.
+                            let receiver_path = match body.expr(receiver) {
+                                Some(crate::hir::Expr::Path(path)) if path.len() == 1 => {
+                                    path[0]
+                                }
+                                _ => return false,
+                            };
+                            if !matches!(
+                                resolution.resolve(receiver_path),
+                                Some(crate::hir::LocalResolveResult::Resolved(lid))
+                                    if lid.binding() == binding_id
+                            ) {
+                                return false;
+                            }
+                            // Resolve the method to see if it takes &mut self.
+                            let Some(receiver_ty) =
+                                inference.type_of_expr(receiver)
+                            else {
+                                return false;
+                            };
+                            let Some(ref_info) = body.name_ref(method) else {
+                                return false;
+                            };
+                            let Some(method_name) = ref_info.name() else {
+                                return false;
+                            };
+                            let member_index = db.member_index(file_id);
+                            let Some(method_res) = member_index
+                                .resolve_method(receiver_ty, method_name)
+                            else {
+                                return false;
+                            };
+                            method_res.receiver()
+                                == Some(crate::hir::ReceiverKind::MutRef)
+                        })
+                    }));
+                if !has_mut_method_call
                     && let Some(fr) = source_map.binding_range(binding_id)
                 {
                     diagnostics.push(
