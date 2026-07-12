@@ -284,33 +284,51 @@ fn main() {
 ```lua
 local function main()
     local doubled
-    local __src = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
-    local __out = rt.vec({ n = 0 })
-    for __i = 0, __src.n - 1 do
-        local __v = __src[__i]
-        -- map: x * 2
-        local __keep = true
-        if __keep then
-            __v = (function(x) return x * 2 end)(__v)
+    local __t1 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
+    local __t2 = rt.vec({ n = 0 })
+    for __t4 = 0, __t1.n - 1 do
+        local __t3 = __t1[__t4]
+        local __t5 = true
+        if __t5 then
+            local __t6
+            do
+                local x = __t3
+                __t6 = x * 2          -- map body inlined directly
+            end
+            __t3 = __t6
         end
-        -- filter: x > 5
-        if __keep then
-            if not ((function(x) return x > 5 end)(__v)) then __keep = false end
+        if __t5 then
+            local __t7
+            do
+                local x = __t3
+                __t7 = x > 5           -- filter body inlined directly
+            end
+            if not __t7 then __t5 = false end
         end
-        if __keep then
-            __out[__out.n] = __v
-            __out.n = __out.n + 1
+        if __t5 then
+            __t2[__t2.n] = __t3
+            __t2.n = __t2.n + 1
         end
     end
-    doubled = __out
+    doubled = __t2
 
     local total
-    local __src2 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
-    local __acc = 0
-    for __i2 = 0, __src2.n - 1 do
-        __acc = (function(acc, x) return acc + x end)(__acc, __src2[__i2])
+    local __t8 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
+    local __t9 = 0
+    for __t11 = 0, __t8.n - 1 do
+        local __t10 = __t8[__t11]
+        local __t12 = true
+        if __t12 then
+            local __t13
+            do
+                local acc = __t9
+                local x = __t10
+                __t13 = acc + x       -- fold body inlined directly
+            end
+            __t9 = __t13
+        end
     end
-    total = __acc
+    total = __t9
 end
 ```
 
