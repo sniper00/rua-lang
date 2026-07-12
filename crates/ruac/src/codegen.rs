@@ -664,7 +664,7 @@ impl Codegen<'_> {
                 self.line(&format!("local {} = {}", m, s));
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, &m, &mut tests, &mut binds);
+                self.pat_test(pat, &m, "\"\"", &mut tests, &mut binds);
                 let cond = if tests.is_empty() {
                     "true".to_string()
                 } else {
@@ -1139,7 +1139,7 @@ impl Codegen<'_> {
                 self.line(&format!("local {} = {}", m, s));
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, &m, &mut tests, &mut binds);
+                self.pat_test(pat, &m, "\"\"", &mut tests, &mut binds);
                 let cond = if tests.is_empty() {
                     "true".to_string()
                 } else {
@@ -1209,12 +1209,13 @@ impl Codegen<'_> {
 
     fn gen_match(&mut self, scrut: &Expr, arms: &[MatchArm], dest: &Dest) {
         let m = self.fresh_tmp();
+        let me = self.fresh_tmp(); // error companion for Result::Err
         let s = self.gen_inline(scrut);
-        self.line(&format!("local {} = {}", m, s));
+        self.line(&format!("local {}, {} = {}", m, me, s));
 
         let mut last_is_wildcard = false;
         for (i, arm) in arms.iter().enumerate() {
-            let (tests, binds) = self.arm_tests(arm, &m);
+            let (tests, binds) = self.arm_tests(arm, &m, &me);
             let prefix = if i == 0 { "if " } else { "elseif " };
             let has_test = !tests.is_empty();
 
@@ -1256,11 +1257,11 @@ impl Codegen<'_> {
     }
 
     /// Structural tests + bindings for a match arm against subject variable `m`.
-    fn arm_tests(&mut self, arm: &MatchArm, m: &str) -> (Vec<String>, Vec<(String, String)>) {
+    fn arm_tests(&mut self, arm: &MatchArm, m: &str, me: &str) -> (Vec<String>, Vec<(String, String)>) {
         if arm.pats.len() == 1 {
             let mut tests = Vec::new();
             let mut binds = Vec::new();
-            self.pat_test(&arm.pats[0], m, &mut tests, &mut binds);
+            self.pat_test(&arm.pats[0], m, me, &mut tests, &mut binds);
             (tests, binds)
         } else {
             // or-patterns: combine alternatives; bindings are not supported here.
@@ -1268,7 +1269,7 @@ impl Codegen<'_> {
             for p in &arm.pats {
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(p, m, &mut tests, &mut binds);
+                self.pat_test(p, m, me, &mut tests, &mut binds);
                 let cond = if tests.is_empty() {
                     "true".to_string()
                 } else {
@@ -1284,6 +1285,7 @@ impl Codegen<'_> {
         &mut self,
         pat: &Pattern,
         subject: &str,
+        err_subject: &str,
         tests: &mut Vec<String>,
         binds: &mut Vec<(String, String)>,
     ) {
@@ -1318,26 +1320,24 @@ impl Codegen<'_> {
                 let head = path.last().map(String::as_str).unwrap_or("");
                 match head {
                     "Some" => {
-                        // Some(x) now wraps as { ok = x } (like Ok), so we
-                        // must match a non-nil table and destructure .ok.
-                        tests.push(format!("({0} ~= nil and {0}.err == nil)", subject));
+                        // Some(x) is the bare value; None is nil.
+                        tests.push(format!("{} ~= nil", subject));
                         if let Some(inner) = elems.first() {
-                            let sub = format!("{}.ok", subject);
-                            self.pat_test(inner, &sub, tests, binds);
+                            self.pat_test(inner, subject, err_subject, tests, binds);
                         }
                     }
                     "Ok" => {
-                        tests.push(format!("({0} ~= nil and {0}.err == nil)", subject));
+                        // Ok(x) is the bare value; Err sets err_subject.
+                        tests.push(format!("{} == nil", err_subject));
                         if let Some(inner) = elems.first() {
-                            let sub = format!("{}.ok", subject);
-                            self.pat_test(inner, &sub, tests, binds);
+                            self.pat_test(inner, subject, err_subject, tests, binds);
                         }
                     }
                     "Err" => {
-                        tests.push(format!("({0} ~= nil and {0}.err ~= nil)", subject));
+                        // Err(e) → nil, e.  Bind e = err_subject.
+                        tests.push(format!("{} ~= nil", err_subject));
                         if let Some(inner) = elems.first() {
-                            let sub = format!("{}.err", subject);
-                            self.pat_test(inner, &sub, tests, binds);
+                            self.pat_test(inner, err_subject, err_subject, tests, binds);
                         }
                     }
                     _ => {
@@ -1348,7 +1348,7 @@ impl Codegen<'_> {
                         }
                         for (i, elem) in elems.iter().enumerate() {
                             let sub = format!("{}[{}]", subject, i + 1);
-                            self.pat_test(elem, &sub, tests, binds);
+                            self.pat_test(elem, &sub, err_subject, tests, binds);
                         }
                     }
                 }
@@ -1361,7 +1361,7 @@ impl Codegen<'_> {
                 }
                 for (fname, fpat) in fields {
                     let sub = format!("{}.{}", subject, fname);
-                    self.pat_test(fpat, &sub, tests, binds);
+                    self.pat_test(fpat, &sub, err_subject, tests, binds);
                 }
             }
         }
@@ -1475,16 +1475,19 @@ impl Codegen<'_> {
             ExprKind::StructLit { path, fields } => self.gen_struct_lit(path, fields),
             ExprKind::Try { expr } => {
                 let inner = self.gen_inline(expr);
-                let r = self.fresh_tmp();
-                self.line(&format!("local {} = {}", r, inner));
-                // Propagate None (nil) or Err (table with .err field).
-                // Both Some(val) and Ok(val) are { ok = val }, so unwrapping
-                // via .ok works for both after the guard passes.
+                let ok = self.fresh_tmp();
+                let err = self.fresh_tmp();
+                // Capture up to 2 return values: the value and an optional error.
+                self.line(&format!("local {}, {} = {}", ok, err, inner));
+                // If there's an error (Result::Err), propagate as nil, err.
                 self.line(&format!(
-                    "if {0} == nil or {0}.err ~= nil then return {0} end",
-                    r
+                    "if {} ~= nil then return nil, {} end",
+                    err, err
                 ));
-                format!("{}.ok", r)
+                // If the value itself is nil (Option::None), propagate nil.
+                self.line(&format!("if {} == nil then return nil end", ok));
+                // Otherwise unwrap: works for Option::Some and Result::Ok.
+                ok
             }
             // Control-flow in operand position: hoist into a temp.
             ExprKind::If { .. }
@@ -1523,13 +1526,9 @@ impl Codegen<'_> {
                 use crate::builtins::CodegenRule::*;
                 match rule {
                     InlineArg if !args.is_empty() => return self.gen_inline(&args[0]),
-                    TableCtor { tag: Some("ok") } if !args.is_empty() => {
+                    MultiReturn if !args.is_empty() => {
                         let v = self.gen_inline(&args[0]);
-                        return format!("{{ ok = {} }}", v);
-                    }
-                    TableCtor { tag: Some("err") } if !args.is_empty() => {
-                        let v = self.gen_inline(&args[0]);
-                        return format!("{{ err = {} }}", v);
+                        return format!("nil, {}", v);
                     }
                     RtCall(lua) => {
                         self.uses_rt = true;

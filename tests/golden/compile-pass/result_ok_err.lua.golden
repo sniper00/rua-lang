@@ -3,10 +3,10 @@ local success, failure
 
 ---@return { ok: integer }|{ err: string }
 function success()
-    return { ok = 5 }
+    return 5
 end
 
 ---@return { ok: integer }|{ err: string }
 function failure()
-    return { err = "failed" }
+    return nil, "failed"
 end

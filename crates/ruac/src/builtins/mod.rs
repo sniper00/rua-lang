@@ -24,6 +24,8 @@ pub enum CodegenRule {
     InlineArg,
     /// Wrap the arguments in a Lua table constructor.
     TableCtor { tag: Option<&'static str> },
+    /// Generate `nil, <first arg>` — Lua-idiomatic error return (2 values).
+    MultiReturn,
     /// Generate a call to the `rua_rt` runtime library.
     RtCall(&'static str),
 }
@@ -45,18 +47,18 @@ impl Default for CodegenRules {
         let mut m = HashMap::new();
 
         // --- Option<T> ---
-        // Some(x) wraps as { ok = x } so that ? can distinguish Some(val) from
-        // None (nil).  This mirrors Result's Ok/Err table convention.
+        // Lua-idiomatic: Some(v) is the bare value, None is nil.
         m.insert("None".into(), CodegenRule::Literal("nil"));
-        m.insert("Some".into(), CodegenRule::TableCtor { tag: Some("ok") });
+        m.insert("Some".into(), CodegenRule::InlineArg);
         m.insert("Option::None".into(), CodegenRule::Literal("nil"));
-        m.insert("Option::Some".into(), CodegenRule::TableCtor { tag: Some("ok") });
+        m.insert("Option::Some".into(), CodegenRule::InlineArg);
 
         // --- Result<T, E> ---
-        m.insert("Ok".into(), CodegenRule::TableCtor { tag: Some("ok") });
-        m.insert("Err".into(), CodegenRule::TableCtor { tag: Some("err") });
-        m.insert("Result::Ok".into(), CodegenRule::TableCtor { tag: Some("ok") });
-        m.insert("Result::Err".into(), CodegenRule::TableCtor { tag: Some("err") });
+        // Lua-idiomatic: Ok(v) is the bare value, Err(e) returns nil, e.
+        m.insert("Ok".into(), CodegenRule::InlineArg);
+        m.insert("Err".into(), CodegenRule::MultiReturn);
+        m.insert("Result::Ok".into(), CodegenRule::InlineArg);
+        m.insert("Result::Err".into(), CodegenRule::MultiReturn);
 
         // --- Vec<T> ---
         m.insert("Vec::new".into(), CodegenRule::RtCall("rt.vec({ n = 0 })"));
