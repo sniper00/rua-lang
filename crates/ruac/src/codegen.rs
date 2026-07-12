@@ -1318,9 +1318,12 @@ impl Codegen<'_> {
                 let head = path.last().map(String::as_str).unwrap_or("");
                 match head {
                     "Some" => {
-                        tests.push(format!("{} ~= nil", subject));
+                        // Some(x) now wraps as { ok = x } (like Ok), so we
+                        // must match a non-nil table and destructure .ok.
+                        tests.push(format!("({0} ~= nil and {0}.err == nil)", subject));
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject, tests, binds);
+                            let sub = format!("{}.ok", subject);
+                            self.pat_test(inner, &sub, tests, binds);
                         }
                     }
                     "Ok" => {
