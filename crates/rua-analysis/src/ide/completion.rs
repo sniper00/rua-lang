@@ -271,18 +271,53 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
-    // Token-based heuristics remain the primary signal for keyword
-    // suppression.  AST context flags are available on `ctx` for future
-    // use but currently augment only type-position detection.
-    let in_expr_context = token.is_some_and(is_expression_context);
+    let def_map = db.def_map(position.file_id);
+    let in_method = ctx.in_method_body;
     let in_type_pos = ctx.in_type_position || token.is_some_and(is_type_position);
+    let in_expr_context = token.is_some_and(is_expression_context);
 
-    // 0. Match context — offer enum variants when inside a match expression.
-    let def_map = ctx.db.def_map(ctx.position.file_id);
-    let in_method = innermost_body_owner(&def_map, position, offset)
-        .is_some_and(|d| d.kind() == DefKind::Method);
+    // Context-sensitive completions (only fire inside specific AST nodes).
+    complete_match_variants(db, &def_map, position, offset, &mut items, &mut seen);
+    complete_struct_fields(db, &def_map, position, offset, &mut items, &mut seen);
+    complete_iflet_variants(db, &def_map, position, offset, &mut items, &mut seen);
+
+    // General completions (always available, subject to context filtering).
+    complete_keywords(
+        &mut items, &mut seen, in_method, in_type_pos, in_expr_context,
+    );
+    complete_snippets(&mut items, &mut seen);
+    complete_locals(db, &def_map, position, offset, &mut items, &mut seen, in_type_pos);
+    complete_module_defs(db, &def_map, position, offset, &mut items, &mut seen, in_type_pos);
+    complete_cross_module_defs(db, &def_map, position, offset, &mut items, &mut seen);
+    complete_builtin_types(token, &mut items, &mut seen, in_type_pos);
+    complete_builtin_constructors(&mut items, &mut seen, in_type_pos);
+    complete_builtin_macros(&mut items, &mut seen, in_type_pos);
+
+    // Post-processing.
+    apply_type_compat_boost(db, &def_map, position, offset, &mut items);
+    apply_replacement_ranges(&mut items, partial_range);
+    CompletionItem::normalize(&mut items);
+    items
+}
+
+// ---------------------------------------------------------------------------
+// Member completion (after `.`)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Individual completion contributors (extracted from scope_completions)
+// ---------------------------------------------------------------------------
+
+fn complete_match_variants(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     if let Some((_enum_ty, enum_template)) =
-        match_scrutinee_enum(db, &def_map, position, offset)
+        match_scrutinee_enum(db, def_map, position, offset)
     {
         for candidate in db
             .member_index(position.file_id)
@@ -290,57 +325,75 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
         {
             if seen.insert(candidate.name().to_string()) {
                 let name = candidate.name().to_string();
-                let detail = candidate.ty().to_string();
-                // Build a snippet with placeholders for tuple variants.
-                let insert = CompletionInsert::Call {
-                    callee: name.clone(),
-                    params: vec![], // variant constructors don't have named params
-                };
                 items.push(
-                    CompletionItem::new(name, CompletionKind::Variant)
-                        .with_detail(detail)
-                        .with_insert(insert)
-                        .with_relevance(CompletionRelevance::match_variant()), // highest — above locals
+                    CompletionItem::new(name.clone(), CompletionKind::Variant)
+                        .with_detail(candidate.ty().to_string())
+                        .with_insert(CompletionInsert::Call {
+                            callee: name,
+                            params: vec![],
+                        })
+                        .with_relevance(CompletionRelevance::match_variant()),
                 );
             }
         }
     }
+}
 
-    // 0b. Struct literal context — offer field names when inside `Type { | }`.
-    if let Some(struct_ty) = struct_literal_type(db, &def_map, position, offset) {
+fn complete_struct_fields(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some(struct_ty) = struct_literal_type(db, def_map, position, offset) {
         for candidate in db
             .member_index(position.file_id)
             .field_candidates(&struct_ty)
         {
             if seen.insert(candidate.name().to_string()) {
-                let n = candidate.name().to_string();
-                let ty = candidate.ty().to_string();
                 items.push(
-                    CompletionItem::new(n.clone(), CompletionKind::Field)
-                        .with_detail(ty)
+                    CompletionItem::new(candidate.name().to_string(), CompletionKind::Field)
+                        .with_detail(candidate.ty().to_string())
                         .with_relevance(CompletionRelevance::struct_field()),
                 );
             }
         }
     }
+}
 
-    // 0c. if-let / while-let pattern position — offer enum variants.
-    if let Some((_ty, template)) = pattern_scrutinee_enum(db, &def_map, position, offset) {
-        for candidate in db.member_index(position.file_id).associated_candidates(&template) {
+fn complete_iflet_variants(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some((_ty, template)) = pattern_scrutinee_enum(db, def_map, position, offset) {
+        for candidate in db
+            .member_index(position.file_id)
+            .associated_candidates(&template)
+        {
             if seen.insert(candidate.name().to_string()) {
-                let name = candidate.name().to_string();
                 items.push(
-                    CompletionItem::new(name, CompletionKind::Variant)
+                    CompletionItem::new(candidate.name().to_string(), CompletionKind::Variant)
                         .with_detail(candidate.ty().to_string())
-                        .with_relevance(CompletionRelevance::iflet_variant()), // above match scrutinee variants
+                        .with_relevance(CompletionRelevance::iflet_variant()),
                 );
             }
         }
     }
+}
 
-    // 1. Keywords — suppress declaration keywords in expression context;
-    //    in type positions, suppress all keywords. Use snippet templates
-    //    for statement-level keywords.
+fn complete_keywords(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_method: bool,
+    in_type_pos: bool,
+    in_expr_context: bool,
+) {
     for kw in RUA_KEYWORDS {
         if in_type_pos {
             continue;
@@ -349,9 +402,8 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
             continue;
         }
         if seen.insert(kw.to_string()) {
-            let mut item =
-                CompletionItem::new(*kw, CompletionKind::Keyword)
-                    .with_relevance(CompletionRelevance::keyword());
+            let mut item = CompletionItem::new(*kw, CompletionKind::Keyword)
+                .with_relevance(CompletionRelevance::keyword());
             if let Some(snippet) = keyword_snippet(kw) {
                 item = item
                     .with_detail(format!("{kw} … (snippet)"))
@@ -359,15 +411,18 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
             } else {
                 item = item.with_detail(format!("keyword {kw}"));
             }
-            // Boost `self` inside method bodies.
             if *kw == "self" && in_method {
-                item = item.with_relevance(CompletionRelevance::self_keyword()); // above locals
+                item = item.with_relevance(CompletionRelevance::self_keyword());
             }
             items.push(item);
         }
     }
+}
 
-    // 1b. Additional snippet patterns (if-let, while-let).
+fn complete_snippets(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     for (label, snippet) in SNIPPET_PATTERNS {
         if seen.insert(label.to_string()) {
             items.push(
@@ -378,120 +433,135 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
             );
         }
     }
+}
 
-    // 2. Locals in scope — skip in type position. Boost frequently-used locals.
-    if !in_type_pos {
-        let usage_counts = local_usage_counts(db, &def_map, position, offset);
-        for local in visible_locals(db, &def_map, position, offset) {
-            if seen.insert(local.name.clone()) {
-                let extra = usage_counts
-                    .get(&local.name)
-                    .map(|c| (*c).min(5))
-                    .unwrap_or(0);
-                items.push(
-                    CompletionItem::new(local.name.clone(), CompletionKind::Variable)
-                        .with_detail(local.ty)
-                        .with_relevance(CompletionRelevance::local(extra as u8)),
-                );
-            }
+fn complete_locals(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    let usage_counts = local_usage_counts(db, def_map, position, offset);
+    for local in visible_locals(db, def_map, position, offset) {
+        if seen.insert(local.name.clone()) {
+            let extra = usage_counts.get(&local.name).map(|c| (*c).min(5)).unwrap_or(0);
+            items.push(
+                CompletionItem::new(local.name.clone(), CompletionKind::Variable)
+                    .with_detail(local.ty)
+                    .with_relevance(CompletionRelevance::local(extra as u8)),
+            );
         }
     }
+}
 
-    // 3. Module-level definitions — in type position, only include types.
-    if let Some(module_id) = module_at_position(&def_map, position.file_id, offset) {
-        for definition in def_map.definitions() {
-            if definition.module_id() != module_id {
-                continue;
-            }
-            // Fields and variants are not bare names in scope.
-            if matches!(definition.kind(), DefKind::Field | DefKind::Variant) {
-                continue;
-            }
-            // In type position, only struct/enum/trait/type alias.
-            if in_type_pos
-                && !matches!(
-                    definition.kind(),
-                    DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
-                )
-            {
-                continue;
-            }
-            if seen.insert(definition.name().to_string()) {
-                let kind = def_kind_to_completion_kind(definition.kind());
-                let mut item =
-                    CompletionItem::new(definition.name(), kind).with_relevance(CompletionRelevance::same_module());
-                if let Some(sig) = definition_signature(db, &def_map, definition) {
-                    item = item.with_detail(sig);
-                }
-                if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
-                    item = item.with_documentation(doc);
-                }
-                items.push(item);
-            }
+fn complete_module_defs(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    let Some(module_id) = module_at_position(def_map, position.file_id, offset) else {
+        return;
+    };
+    for definition in def_map.definitions() {
+        if definition.module_id() != module_id {
+            continue;
         }
-    }
-
-    // 3b. Cross-module pub symbols (auto-import candidates).
-    if let Some(current_module) =
-        module_at_position(&def_map, position.file_id, offset)
-    {
-        for definition in def_map.definitions() {
-            if definition.module_id() == current_module {
-                continue; // already shown
-            }
-            if !matches!(
-                definition.visibility(),
-                crate::hir::Visibility::Public
-            ) {
-                continue;
-            }
-            if !matches!(
+        if matches!(definition.kind(), DefKind::Field | DefKind::Variant) {
+            continue;
+        }
+        if in_type_pos
+            && !matches!(
                 definition.kind(),
-                DefKind::Function
-                    | DefKind::Struct
-                    | DefKind::Enum
-                    | DefKind::Trait
-                    | DefKind::TypeAlias
-                    | DefKind::Module
-            ) {
-                continue;
+                DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
+            )
+        {
+            continue;
+        }
+        if seen.insert(definition.name().to_string()) {
+            let kind = def_kind_to_completion_kind(definition.kind());
+            let mut item = CompletionItem::new(definition.name(), kind)
+                .with_relevance(CompletionRelevance::same_module());
+            if let Some(sig) = definition_signature(db, def_map, definition) {
+                item = item.with_detail(sig);
             }
-            if seen.insert(definition.name().to_string()) {
-                let module = def_map.module(definition.module_id());
-                let module_path = module
-                    .and_then(|m| m.name())
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                let import_path =
-                    format!("use {module_path}::{};", definition.name());
-                let kind = def_kind_to_completion_kind(definition.kind());
-                let mut item = CompletionItem::new(definition.name(), kind)
-                    .with_detail(format!(
-                        "{} (from {module_path})",
-                        definition.name()
-                    ))
-                    .with_import_path(import_path)
-                    .with_relevance(CompletionRelevance::cross_module());
-                if let Some(sig) = definition_signature(db, &def_map, definition) {
-                    item = item.with_detail(sig);
-                }
-                items.push(item);
+            if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
+                item = item.with_documentation(doc);
             }
+            items.push(item);
         }
     }
+}
 
-    // 4. Built-in types — boost numeric types in arithmetic context.
+fn complete_cross_module_defs(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Some(current_module) = module_at_position(def_map, position.file_id, offset) else {
+        return;
+    };
+    for definition in def_map.definitions() {
+        if definition.module_id() == current_module {
+            continue;
+        }
+        if !matches!(definition.visibility(), crate::hir::Visibility::Public) {
+            continue;
+        }
+        if !matches!(
+            definition.kind(),
+            DefKind::Function
+                | DefKind::Struct
+                | DefKind::Enum
+                | DefKind::Trait
+                | DefKind::TypeAlias
+                | DefKind::Module
+        ) {
+            continue;
+        }
+        if seen.insert(definition.name().to_string()) {
+            let module = def_map.module(definition.module_id());
+            let module_path = module
+                .and_then(|m| m.name())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let mut item = CompletionItem::new(definition.name(), def_kind_to_completion_kind(definition.kind()))
+                .with_detail(format!("{} (from {module_path})", definition.name()))
+                .with_import_path(format!("use {module_path}::{};", definition.name()))
+                .with_relevance(CompletionRelevance::cross_module());
+            if let Some(sig) = definition_signature(db, def_map, definition) {
+                item = item.with_detail(sig);
+            }
+            items.push(item);
+        }
+    }
+}
+
+fn complete_builtin_types(
+    token: Option<&SyntaxToken>,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
     let in_arithmetic = token.is_some_and(|t| {
-        previous_significant(t)
-            .is_some_and(|prev| {
-                matches!(
-                    prev.kind(),
-                    SyntaxKind::Plus
-                        | SyntaxKind::Minus
-                        | SyntaxKind::Star
-                        | SyntaxKind::Slash
-                )
-            })
+        previous_significant(t).is_some_and(|prev| {
+            matches!(
+                prev.kind(),
+                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash
+            )
+        })
     });
     let numeric_types: &[&str] = &["i64", "f64"];
     for ty in BUILTIN_TYPES {
@@ -510,73 +580,83 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
             );
         }
     }
-
-    // 5. Built-in constructors — skip in type position.
-    if !in_type_pos {
-        for (name, detail) in BUILTIN_VALUES {
-            if seen.insert(name.to_string()) {
-                items.push(
-                    CompletionItem::new(*name, CompletionKind::Variant)
-                        .with_detail(*detail)
-                        .with_relevance(CompletionRelevance::builtin_const()),
-                );
-            }
-        }
-    }
-
-    // 6. Built-in macros — skip in type position.
-    if !in_type_pos {
-        for (name, delimiter) in BUILTIN_MACROS {
-            if seen.insert(name.to_string()) {
-                let label = format!("{name}!");
-                items.push(
-                    CompletionItem::new(label, CompletionKind::Macro)
-                        .with_detail(format!("{name}!(...)  (built-in macro)"))
-                        .with_lookup(name.to_string())
-                        .with_insert(CompletionInsert::MacroCall {
-                            name: name.to_string(),
-                            delimiter: *delimiter,
-                        })
-                        .with_relevance(CompletionRelevance::builtin_macro()),
-                );
-            }
-        }
-    }
-
-    // Boost items whose type matches the expected type at the cursor.
-    if let Some(expected) = expected_type_at_cursor(db, &def_map, position, offset) {
-        let expected_str = expected.to_string();
-        for item in &mut items {
-            if let Some(detail) = item.detail() {
-                let boost = type_compatibility_score(
-                    detail,
-                    &expected_str,
-                    &expected,
-                );
-                if boost > 0 {
-                    let boosted = item.relevance_raw().with_boost(boost);
-                    *item = item.clone().with_relevance(boosted);
-                }
-            }
-        }
-    }
-
-    // Set replacement range: VS Code uses this to replace the typed prefix.
-    if !partial_range.is_empty() {
-        for item in &mut items {
-            if item.replacement_range().is_none() {
-                *item = item.clone().with_replacement_range(partial_range);
-            }
-        }
-    }
-
-    CompletionItem::normalize(&mut items);
-    items
 }
 
-// ---------------------------------------------------------------------------
-// Member completion (after `.`)
-// ---------------------------------------------------------------------------
+fn complete_builtin_constructors(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    for (name, detail) in BUILTIN_VALUES {
+        if seen.insert(name.to_string()) {
+            items.push(
+                CompletionItem::new(*name, CompletionKind::Variant)
+                    .with_detail(*detail)
+                    .with_relevance(CompletionRelevance::builtin_const()),
+            );
+        }
+    }
+}
+
+fn complete_builtin_macros(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    for (name, delimiter) in BUILTIN_MACROS {
+        if seen.insert(name.to_string()) {
+            items.push(
+                CompletionItem::new(format!("{name}!"), CompletionKind::Macro)
+                    .with_detail(format!("{name}!(...)  (built-in macro)"))
+                    .with_lookup(name.to_string())
+                    .with_insert(CompletionInsert::MacroCall {
+                        name: name.to_string(),
+                        delimiter: *delimiter,
+                    })
+                    .with_relevance(CompletionRelevance::builtin_macro()),
+            );
+        }
+    }
+}
+
+fn apply_type_compat_boost(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+) {
+    let Some(expected) = expected_type_at_cursor(db, def_map, position, offset) else {
+        return;
+    };
+    let expected_str = expected.to_string();
+    for item in items.iter_mut() {
+        if let Some(detail) = item.detail() {
+            let boost = type_compatibility_score(detail, &expected_str, &expected);
+            if boost > 0 {
+                let boosted = item.relevance_raw().with_boost(boost);
+                *item = item.clone().with_relevance(boosted);
+            }
+        }
+    }
+}
+
+fn apply_replacement_ranges(items: &mut Vec<CompletionItem>, partial_range: TextRange) {
+    if partial_range.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if item.replacement_range().is_none() {
+            *item = item.clone().with_replacement_range(partial_range);
+        }
+    }
+}
 
 fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let db = ctx.db;
