@@ -27,11 +27,11 @@ pub use crate::diagnostic::{
 };
 pub use closure_iterator::ClosureParameterInfo;
 pub use contract::{
-    CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind, FileEdit, FilePosition,
-    FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId,
-    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget,
-    SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange,
-    TextEdit, TextRange, TypeHierarchyItem,
+    CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance,
+    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget,
+    ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult,
+    RenameError, RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers,
+    SignatureHelpInfo, SourceChange, TextEdit, TextRange, TypeHierarchyItem,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 

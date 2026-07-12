@@ -1,9 +1,9 @@
 //! Public protocol-neutral IDE contract tests.
 
 use rua_analysis::{
-    AnalysisHost, Change, CompletionInsert, CompletionItem, CompletionKind, Diagnostic,
-    DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity, FileId, FileKind,
-    FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectId,
+    AnalysisHost, Change, CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance,
+    Diagnostic, DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity, FileId,
+    FileKind, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectId,
     ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, SemanticToken,
     SemanticTokenKind, SemanticTokenModifiers, SourceChange, SourceRootId, SourceRootKind,
     TextEdit, TextRange, normalize_diagnostics,
@@ -124,7 +124,7 @@ fn ide_contract_navigation_hover_and_completion_are_protocol_neutral() {
         })
         .with_replacement_range(TextRange::new(40, 42))
         .with_target(navigation.target_range())
-        .with_relevance(10);
+        .with_relevance(CompletionRelevance::from_score(10));
     assert_eq!(completion.label(), "area");
     assert!(matches!(
         completion.insert(),
@@ -152,13 +152,13 @@ fn ide_contract_list_sort_keys_are_deterministic() {
     let target = FileRange::new(FileId::new(0), TextRange::new(1, 2));
     let input = vec![
         CompletionItem::new("zeta", CompletionKind::Variable),
-        CompletionItem::new("alpha", CompletionKind::Variable).with_relevance(1),
+        CompletionItem::new("alpha", CompletionKind::Variable).with_relevance(CompletionRelevance::from_score(1)),
         CompletionItem::new("alpha", CompletionKind::Variable),
         CompletionItem::new("beta", CompletionKind::Variable),
         CompletionItem::new("beta", CompletionKind::Variable).with_documentation("documented"),
         CompletionItem::new("renamed", CompletionKind::Function)
             .with_target(target)
-            .with_relevance(2),
+            .with_relevance(CompletionRelevance::from_score(2)),
         CompletionItem::new("same-target", CompletionKind::Function).with_target(target),
     ];
     let mut completions = input.clone();

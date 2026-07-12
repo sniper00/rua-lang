@@ -37,11 +37,11 @@ pub use hir::{
 };
 pub use ide::{
     Analysis, AnalysisHost, CallHierarchyItem, ClosureParameterInfo, CompletionInsert,
-    CompletionItem, CompletionKind, DocumentSymbol, FileEdit, FilePosition, FileRange,
-    HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId, ProjectPosition,
-    QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget, SemanticToken,
-    SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange, TextEdit,
-    TextRange, TypeHierarchyItem, WorkspaceSymbol,
+    CompletionItem, CompletionKind, CompletionRelevance, DocumentSymbol, FileEdit, FilePosition,
+    FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId,
+    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget,
+    SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange,
+    TextEdit, TextRange, TypeHierarchyItem, WorkspaceSymbol,
 };
 pub use semantic::{LocalReference, Semantics};
 pub use vfs::{

@@ -4146,10 +4146,10 @@ mod tests {
         // Locals (relevance 95) should sort before keywords (relevance 50).
         let local = rua_analysis::CompletionItem::new("my_var", rua_analysis::CompletionKind::Variable)
             .with_detail("my_var: i64")
-            .with_relevance(95);
+            .with_relevance(rua_analysis::CompletionRelevance::local(0));
         let keyword = rua_analysis::CompletionItem::new("fn", rua_analysis::CompletionKind::Keyword)
             .with_detail("keyword fn")
-            .with_relevance(50);
+            .with_relevance(rua_analysis::CompletionRelevance::keyword());
 
         let li = empty_line_index();
         let lsp_local = completion_to_lsp(&local, &li, "", FileId::new(0));
@@ -4166,9 +4166,9 @@ mod tests {
     #[test]
     fn sort_text_falls_back_to_label_for_equal_relevance() {
         let a = rua_analysis::CompletionItem::new("alpha", rua_analysis::CompletionKind::Variable)
-            .with_relevance(80);
+            .with_relevance(rua_analysis::CompletionRelevance::path_member());
         let b = rua_analysis::CompletionItem::new("beta", rua_analysis::CompletionKind::Variable)
-            .with_relevance(80);
+            .with_relevance(rua_analysis::CompletionRelevance::path_member());
 
         let li = empty_line_index();
         let lsp_a = completion_to_lsp(&a, &li, "", FileId::new(0));

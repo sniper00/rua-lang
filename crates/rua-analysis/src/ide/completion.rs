@@ -16,7 +16,8 @@ use crate::{
 };
 
 use super::{
-    CompletionInsert, CompletionItem, CompletionKind, FilePosition, MacroDelimiter,
+    CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, FilePosition,
+    MacroDelimiter,
 };
 
 // ---------------------------------------------------------------------------
@@ -224,7 +225,7 @@ fn scope_completions(
                     CompletionItem::new(name, CompletionKind::Variant)
                         .with_detail(detail)
                         .with_insert(insert)
-                        .with_relevance(93), // highest — above locals
+                        .with_relevance(CompletionRelevance::match_variant()), // highest — above locals
                 );
             }
         }
@@ -242,7 +243,7 @@ fn scope_completions(
                 items.push(
                     CompletionItem::new(n.clone(), CompletionKind::Field)
                         .with_detail(ty)
-                        .with_relevance(93),
+                        .with_relevance(CompletionRelevance::struct_field()),
                 );
             }
         }
@@ -256,7 +257,7 @@ fn scope_completions(
                 items.push(
                     CompletionItem::new(name, CompletionKind::Variant)
                         .with_detail(candidate.ty().to_string())
-                        .with_relevance(94), // above match scrutinee variants
+                        .with_relevance(CompletionRelevance::iflet_variant()), // above match scrutinee variants
                 );
             }
         }
@@ -275,7 +276,7 @@ fn scope_completions(
         if seen.insert(kw.to_string()) {
             let mut item =
                 CompletionItem::new(*kw, CompletionKind::Keyword)
-                    .with_relevance(50);
+                    .with_relevance(CompletionRelevance::keyword());
             if let Some(snippet) = keyword_snippet(kw) {
                 item = item
                     .with_detail(format!("{kw} … (snippet)"))
@@ -285,7 +286,7 @@ fn scope_completions(
             }
             // Boost `self` inside method bodies.
             if *kw == "self" && in_method {
-                item = item.with_relevance(96); // above locals
+                item = item.with_relevance(CompletionRelevance::self_keyword()); // above locals
             }
             items.push(item);
         }
@@ -298,7 +299,7 @@ fn scope_completions(
                 CompletionItem::new(*label, CompletionKind::Keyword)
                     .with_detail(format!("{label} … (snippet)"))
                     .with_insert(CompletionInsert::Snippet(snippet.to_string()))
-                    .with_relevance(51),
+                    .with_relevance(CompletionRelevance::snippet()),
             );
         }
     }
@@ -315,7 +316,7 @@ fn scope_completions(
                 items.push(
                     CompletionItem::new(local.name.clone(), CompletionKind::Variable)
                         .with_detail(local.ty)
-                        .with_relevance(95 + extra as u16),
+                        .with_relevance(CompletionRelevance::local(extra as u8)),
                 );
             }
         }
@@ -343,7 +344,7 @@ fn scope_completions(
             if seen.insert(definition.name().to_string()) {
                 let kind = def_kind_to_completion_kind(definition.kind());
                 let mut item =
-                    CompletionItem::new(definition.name(), kind).with_relevance(85);
+                    CompletionItem::new(definition.name(), kind).with_relevance(CompletionRelevance::same_module());
                 if let Some(sig) = definition_signature(db, &def_map, definition) {
                     item = item.with_detail(sig);
                 }
@@ -395,7 +396,7 @@ fn scope_completions(
                         definition.name()
                     ))
                     .with_import_path(import_path)
-                    .with_relevance(75);
+                    .with_relevance(CompletionRelevance::cross_module());
                 if let Some(sig) = definition_signature(db, &def_map, definition) {
                     item = item.with_detail(sig);
                 }
@@ -421,11 +422,11 @@ fn scope_completions(
     for ty in BUILTIN_TYPES {
         if seen.insert(ty.to_string()) {
             let relevance = if in_arithmetic && numeric_types.contains(ty) {
-                88 // just below locals
+                CompletionRelevance::arithmetic_num()
             } else if in_type_pos {
-                90
+                CompletionRelevance::builtin_type_pos()
             } else {
-                40
+                CompletionRelevance::builtin_type()
             };
             items.push(
                 CompletionItem::new(*ty, CompletionKind::BuiltinType)
@@ -442,7 +443,7 @@ fn scope_completions(
                 items.push(
                     CompletionItem::new(*name, CompletionKind::Variant)
                         .with_detail(*detail)
-                        .with_relevance(35),
+                        .with_relevance(CompletionRelevance::builtin_const()),
                 );
             }
         }
@@ -461,7 +462,7 @@ fn scope_completions(
                             name: name.to_string(),
                             delimiter: *delimiter,
                         })
-                        .with_relevance(20),
+                        .with_relevance(CompletionRelevance::builtin_macro()),
                 );
             }
         }
@@ -478,9 +479,8 @@ fn scope_completions(
                     &expected,
                 );
                 if boost > 0 {
-                    *item = item
-                        .clone()
-                        .with_relevance(item.relevance() + boost);
+                    let boosted = item.relevance_raw().with_boost(boost);
+                    *item = item.clone().with_relevance(boosted);
                 }
             }
         }
@@ -539,7 +539,7 @@ fn member_completions(
         let name = candidate.name().to_string();
         let mut item = CompletionItem::new(name.clone(), kind)
             .with_detail(detail)
-            .with_relevance(90);
+            .with_relevance(CompletionRelevance::member());
 
         if candidate.kind() == crate::hir::MemberKind::Method {
             // Look up the method resolution; HIR params already exclude
@@ -626,7 +626,7 @@ fn member_completions(
                 CompletionItem::new(suffix, CompletionKind::Keyword)
                     .with_detail(label)
                     .with_insert(CompletionInsert::Snippet(insert_text))
-                    .with_relevance(85), // below fields/methods, above keywords
+                    .with_relevance(CompletionRelevance::postfix()), // below fields/methods, above keywords
             );
         }
     }
@@ -822,7 +822,7 @@ fn path_completions(
                 && seen.insert(definition.name().to_string()) {
                     let kind = def_kind_to_completion_kind(definition.kind());
                     let mut item =
-                        CompletionItem::new(definition.name(), kind).with_relevance(80);
+                        CompletionItem::new(definition.name(), kind).with_relevance(CompletionRelevance::path_member());
                     if let Some(sig) = definition_signature(db, &def_map, definition) {
                         item = item.with_detail(sig);
                     }
@@ -846,7 +846,7 @@ fn path_completions(
                                     CompletionKind::Variant,
                                 )
                                 .with_detail(candidate.ty().to_string())
-                                .with_relevance(85),
+                                .with_relevance(CompletionRelevance::path_variant()),
                             );
                         }
                     }

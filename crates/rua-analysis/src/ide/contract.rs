@@ -194,6 +194,105 @@ pub enum MacroDelimiter {
     Braces,
 }
 
+/// Orthogonal relevance score for a completion item, modelled after
+/// rust-analyzer's `CompletionRelevance`.  Each dimension contributes to the
+/// final `score()` so the ranking is transparent and new categories have a
+/// clear place to land.
+///
+/// Previously these were 14 hardcoded magic integers scattered across
+/// `scope_completions()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionRelevance {
+    pub base: u8,
+    pub exact_type_match: bool,
+    pub type_name_match: bool,
+    pub is_local: bool,
+    pub is_from_this_crate: bool,
+    pub is_deprecated: bool,
+}
+
+impl CompletionRelevance {
+    // ── Category constructors (one per completion source) ──────────────
+
+    const DEFAULT: Self = Self {
+        base: 0, exact_type_match: false, type_name_match: false,
+        is_local: false, is_from_this_crate: false, is_deprecated: false,
+    };
+
+    /// Construct a relevance with just a base score, for tests.
+    pub const fn from_score(base: u8) -> Self {
+        Self { base, ..Self::DEFAULT }
+    }
+
+    pub const fn keyword() -> Self { Self { base: 50, ..Self::DEFAULT } }
+    pub const fn snippet() -> Self { Self { base: 51, ..Self::DEFAULT } }
+    pub const fn builtin_type() -> Self { Self { base: 40, ..Self::DEFAULT } }
+    pub const fn builtin_type_pos() -> Self { Self { base: 90, ..Self::DEFAULT } }
+    pub const fn local(usage: u8) -> Self {
+        let extra = if usage > 5 { 5 } else { usage };
+        Self { base: 95 + extra, is_local: true, ..Self::DEFAULT }
+    }
+    pub const fn self_keyword() -> Self { Self { base: 96, is_local: true, ..Self::DEFAULT } }
+    pub const fn member() -> Self { Self { base: 90, ..Self::DEFAULT } }
+    pub const fn same_module() -> Self { Self { base: 85, is_from_this_crate: true, ..Self::DEFAULT } }
+    pub const fn cross_module() -> Self { Self { base: 75, ..Self::DEFAULT } }
+    pub const fn postfix() -> Self { Self { base: 85, ..Self::DEFAULT } }
+    pub const fn match_variant() -> Self { Self { base: 93, ..Self::DEFAULT } }
+    pub const fn struct_field() -> Self { Self { base: 93, ..Self::DEFAULT } }
+    pub const fn iflet_variant() -> Self { Self { base: 94, ..Self::DEFAULT } }
+    pub const fn path_member() -> Self { Self { base: 80, ..Self::DEFAULT } }
+    pub const fn path_variant() -> Self { Self { base: 85, ..Self::DEFAULT } }
+    pub const fn builtin_const() -> Self { Self { base: 35, ..Self::DEFAULT } }
+    pub const fn builtin_macro() -> Self { Self { base: 20, ..Self::DEFAULT } }
+    pub const fn arithmetic_num() -> Self { Self { base: 88, ..Self::DEFAULT } }
+
+    // ── Modifiers ──────────────────────────────────────────────────────
+
+    pub const fn with_exact_type_match(mut self, matches: bool) -> Self {
+        self.exact_type_match = matches;
+        self
+    }
+
+    pub const fn with_type_name_match(mut self, matches: bool) -> Self {
+        self.type_name_match = matches;
+        self
+    }
+
+    pub const fn with_deprecated(mut self, deprecated: bool) -> Self {
+        self.is_deprecated = deprecated;
+        self
+    }
+
+    /// Resolve all dimensions into a comparable integer score.
+    pub fn score(&self) -> u16 {
+        let mut s = self.base as u16;
+        if self.exact_type_match { s += 10; }
+        if self.type_name_match { s += 5; }
+        if self.is_local { s += 2; }
+        if self.is_from_this_crate { s += 3; }
+        if self.is_deprecated { s = s.saturating_sub(20); }
+        s
+    }
+
+    /// Return a copy with the base score increased by `boost` (saturating at 255).
+    pub fn with_boost(self, boost: u16) -> Self {
+        Self { base: self.base.saturating_add(boost as u8), ..self }
+    }
+}
+
+impl Default for CompletionRelevance {
+    fn default() -> Self {
+        Self {
+            base: 0,
+            exact_type_match: false,
+            type_name_match: false,
+            is_local: false,
+            is_from_this_crate: false,
+            is_deprecated: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionItem {
     label: String,
@@ -204,7 +303,7 @@ pub struct CompletionItem {
     insert: Option<CompletionInsert>,
     replacement_range: Option<TextRange>,
     target: Option<FileRange>,
-    relevance: u16,
+    relevance: CompletionRelevance,
     deprecated: bool,
     /// If set, the LSP client should add this import statement.
     import_path: Option<String>,
@@ -221,7 +320,7 @@ impl CompletionItem {
             insert: None,
             replacement_range: None,
             target: None,
-            relevance: 0,
+            relevance: CompletionRelevance::default(),
             deprecated: false,
             import_path: None,
         }
@@ -257,7 +356,7 @@ impl CompletionItem {
         self
     }
 
-    pub const fn with_relevance(mut self, relevance: u16) -> Self {
+    pub const fn with_relevance(mut self, relevance: CompletionRelevance) -> Self {
         self.relevance = relevance;
         self
     }
@@ -299,7 +398,11 @@ impl CompletionItem {
         self.target
     }
 
-    pub const fn relevance(&self) -> u16 {
+    pub fn relevance(&self) -> u16 {
+        self.relevance.score()
+    }
+
+    pub fn relevance_raw(&self) -> CompletionRelevance {
         self.relevance
     }
 
@@ -318,8 +421,8 @@ impl CompletionItem {
 
     pub fn normalize(items: &mut Vec<Self>) {
         items.sort_by(|left, right| {
-            Reverse(left.relevance)
-                .cmp(&Reverse(right.relevance))
+            Reverse(left.relevance.score())
+                .cmp(&Reverse(right.relevance.score()))
                 .then_with(|| left.label.cmp(&right.label))
                 .then_with(|| left.kind.cmp(&right.kind))
                 .then_with(|| left.detail.cmp(&right.detail))
