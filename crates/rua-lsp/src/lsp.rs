@@ -3636,13 +3636,15 @@ fn completion_to_lsp(
         }))
     });
 
-    // label_details: structured display — the detail part shows the type
-    // signature next to the label, and description shows the origin.
-    // VS Code renders label_details.detail directly after the label with
-    // no automatic separator, so we prepend ": " for type-like details.
+    // label_details: structured display.  VS Code renders
+    // label_details.detail directly after the label with no automatic
+    // separator, so we only populate it for type-like kinds (prepended
+    // with ": ").  Methods, functions, and keywords rely on the
+    // top-level `detail` field instead, which VS Code renders with
+    // proper spacing.
     let label_details = {
         let raw_detail = item.detail().map(|d| d.to_string());
-        let detail = raw_detail.map(|d| match item.kind() {
+        let detail = raw_detail.and_then(|d| match item.kind() {
             CompletionKind::Field
             | CompletionKind::Variable
             | CompletionKind::Parameter
@@ -3652,12 +3654,15 @@ fn completion_to_lsp(
             | CompletionKind::Trait
             | CompletionKind::BuiltinType
             | CompletionKind::TypeAlias
-            | CompletionKind::Module => format!(": {d}"),
+            | CompletionKind::Module => Some(format!(": {d}")),
+            // Methods, functions, keywords, postfix templates — the
+            // top-level detail already provides the signature/description
+            // with correct spacing; duplicating it here concatenates.
             CompletionKind::Method
             | CompletionKind::Function
             | CompletionKind::Keyword
             | CompletionKind::Impl
-            | CompletionKind::Macro => d,
+            | CompletionKind::Macro => None,
         });
         let description = match item.kind() {
             CompletionKind::Keyword => Some("keyword".to_string()),
