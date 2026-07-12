@@ -757,17 +757,30 @@ impl<'a> InferenceContext<'a> {
                 if lhs_ty.is_numeric() && rhs_ty.is_numeric() {
                     return lhs_ty.join(&rhs_ty);
                 }
-                if lhs_ty == Ty::BOOL
+                // Emit InvalidBinary when one side is clearly incompatible
+                // (BOOL/UNIT/String with arithmetic, etc.)
+                let incompatible = lhs_ty == Ty::BOOL
                     || lhs_ty == Ty::UNIT
                     || rhs_ty == Ty::BOOL
                     || rhs_ty == Ty::UNIT
-                {
-                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
-                        expr: expr_id,
-                        lhs: lhs_ty,
-                        rhs: rhs_ty,
-                        op,
-                    });
+                    || (lhs_ty == Ty::STRING && op != BinaryOp::Add)
+                    || (rhs_ty == Ty::STRING && op != BinaryOp::Add)
+                    || (lhs_ty == Ty::STRING
+                        && !rhs_ty.is_unknown()
+                        && !rhs_ty.is_never()
+                        && rhs_ty != Ty::STRING)
+                    || (rhs_ty == Ty::STRING
+                        && !lhs_ty.is_unknown()
+                        && !lhs_ty.is_never()
+                        && lhs_ty != Ty::STRING);
+                if incompatible {
+                    self.diagnostics
+                        .push(InferenceDiagnostic::InvalidBinary {
+                            expr: expr_id,
+                            lhs: lhs_ty.clone(),
+                            rhs: rhs_ty.clone(),
+                            op,
+                        });
                 }
                 Ty::Unknown
             }
