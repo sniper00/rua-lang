@@ -40,8 +40,6 @@ Person.__index = Person
 ---@field value integer
 local Counter = {}
 Counter.__index = Counter
-local log = log or function(...) end
-local format = format or function(...) end
 
 ---@generic T
 ---@param value T
@@ -367,61 +365,58 @@ function demo_iterators()
     local function __t26(v)
         return v
     end
-    local __t27 = __t19
-    if __t27 ~= nil then
-    end
-    local found = __t27
+    local found = __t19:map(__t26)
     local has_big
-    local __t28 = values
-    local __t29 = false
-    for __t31 = 0, __t28.n - 1 do
-        local __t30 = __t28[__t31]
-        local __t32 = true
-        if __t32 then
-            local __t33
+    local __t27 = values
+    local __t28 = false
+    for __t30 = 0, __t27.n - 1 do
+        local __t29 = __t27[__t30]
+        local __t31 = true
+        if __t31 then
+            local __t32
             do
-                local x = __t30
-                __t33 = (x > 10)
+                local x = __t29
+                __t32 = (x > 10)
             end
-            if __t33 then __t29 = true; break end
+            if __t32 then __t28 = true; break end
         end
     end
-    has_big = __t29
+    has_big = __t28
     local all_small
-    local __t34 = values
-    local __t35 = true
-    for __t37 = 0, __t34.n - 1 do
-        local __t36 = __t34[__t37]
-        local __t38 = true
-        if __t38 then
-            local __t39
+    local __t33 = values
+    local __t34 = true
+    for __t36 = 0, __t33.n - 1 do
+        local __t35 = __t33[__t36]
+        local __t37 = true
+        if __t37 then
+            local __t38
             do
-                local x = __t36
-                __t39 = (x < 100)
+                local x = __t35
+                __t38 = (x < 100)
             end
-            if not __t39 then __t35 = false; break end
+            if not __t38 then __t34 = false; break end
         end
     end
-    all_small = __t35
+    all_small = __t34
     local count
-    local __t40 = values
-    local __t41 = 0
-    for __t43 = 0, __t40.n - 1 do
-        local __t42 = __t40[__t43]
-        local __t44 = true
-        if __t44 then
-            local __t45
+    local __t39 = values
+    local __t40 = 0
+    for __t42 = 0, __t39.n - 1 do
+        local __t41 = __t39[__t42]
+        local __t43 = true
+        if __t43 then
+            local __t44
             do
-                local x = __t42
-                __t45 = (rt.irem(x, 2) == 0)
+                local x = __t41
+                __t44 = (rt.irem(x, 2) == 0)
             end
-            if not __t45 then __t44 = false end
+            if not __t44 then __t43 = false end
         end
-        if __t44 then
-            __t41 = __t41 + 1
+        if __t43 then
+            __t40 = __t40 + 1
         end
     end
-    count = __t41
+    count = __t40
     return total
 end
 

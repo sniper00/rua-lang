@@ -328,3 +328,59 @@ fn parse_error_includes_location() {
     assert!(diags.iter().any(|d| d.message().contains("parse error")),
         "parse error should include 'parse error' in message, got: {diags:?}");
 }
+
+// ---------------------------------------------------------------------------
+// W0304 — infinite loop lint
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lint_infinite_loop_while_let_never_updated() {
+    // while-let where the scrutinee variable is truly never assigned in the body.
+    let uri = uri("/test/w0304_whilelet.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri,
+        "enum Maybe { Some(i64), None }\nfn main() { let mut opt = Maybe::Some(1); while let Maybe::Some(v) = opt { let x = v + 1; } }");
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0304 = diags.iter().any(|d| d.code() == Some(DiagnosticCode::LintInfiniteLoop));
+    assert!(has_w0304, "W0304 should fire for while-let with never-updated variable, got: {diags:?}");
+}
+
+#[test]
+fn lint_infinite_loop_loop_without_break() {
+    let uri = uri("/test/w0304_loop.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { loop { let x = 1; } }");
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0304 = diags.iter().any(|d| d.code() == Some(DiagnosticCode::LintInfiniteLoop));
+    assert!(has_w0304, "W0304 should fire for loop without break, got: {diags:?}");
+}
+
+#[test]
+fn lint_no_w0304_for_loop_with_break() {
+    let uri = uri("/test/w0304_break.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { loop { break; } }");
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0304 = diags.iter().any(|d| d.code() == Some(DiagnosticCode::LintInfiniteLoop));
+    assert!(!has_w0304, "W0304 should NOT fire for loop with break, got: {diags:?}");
+}
+
+#[test]
+fn lint_no_w0304_for_while_let_with_update() {
+    // while-let where the scrutinee IS updated in the body.
+    let uri = uri("/test/w0304_ok.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri,
+        "enum Maybe { Some(i64), None }\nfn main() { let mut opt = Maybe::Some(1); while let Maybe::Some(v) = opt { opt = Maybe::None; } }");
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0304 = diags.iter().any(|d| d.code() == Some(DiagnosticCode::LintInfiniteLoop));
+    assert!(!has_w0304, "W0304 should NOT fire when scrutinee IS updated, got: {diags:?}");
+}

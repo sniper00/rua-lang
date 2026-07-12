@@ -53,6 +53,8 @@ pub enum DiagnosticCode {
     LintRedundantMut = 301,
     LintUnreachableCode = 302,
     LintUnusedFunction = 303,
+    /// Suspicious infinite loop: condition may never change.
+    LintInfiniteLoop = 304,
 }
 
 impl DiagnosticCode {
@@ -84,6 +86,7 @@ impl DiagnosticCode {
             Self::LintRedundantMut => "W0301",
             Self::LintUnreachableCode => "W0302",
             Self::LintUnusedFunction => "W0303",
+            Self::LintInfiniteLoop => "W0304",
         }
     }
 
@@ -92,7 +95,8 @@ impl DiagnosticCode {
             Self::LintUnusedVariable
             | Self::LintRedundantMut
             | Self::LintUnreachableCode
-            | Self::LintUnusedFunction => DiagnosticSeverity::Warning,
+            | Self::LintUnusedFunction
+            | Self::LintInfiniteLoop => DiagnosticSeverity::Warning,
             Self::ParseUnexpectedToken
             | Self::ParseUnterminatedString
             | Self::ParseUnterminatedComment
@@ -268,7 +272,115 @@ impl Diagnostic {
 }
 
 // ---------------------------------------------------------------------------
+// Infinite loop lint (W0304) — source-based heuristic
+// ---------------------------------------------------------------------------
+
+/// Emit W0304 for suspicious loop patterns detectable from source text:
+///  - `loop { ... }` blocks that contain no `break` statement.
+///  - `while let Pat = var { ... }` where `var` never appears as the
+///    left-hand side of an assignment inside the loop body.
+fn add_infinite_loop_lint(file_id: FileId, text: &str, diagnostics: &mut Vec<Diagnostic>) {
+    // Find `loop {` blocks with no `break`.
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(lp) = trimmed.find("loop {") {
+            // Scan forward from the `loop {` opening brace.
+            let brace_col = lp + "loop ".len();
+            let block_start = line_offset(text, line_idx) + brace_col;
+            if !scan_block_from(text, block_start, "break") {
+                let offset = line_offset(text, line_idx) + lp;
+                diagnostics.push(
+                    Diagnostic::new(
+                        file_id,
+                        TextRange::new(offset as u32, (offset + 4) as u32),
+                        "`loop` without `break` may run forever".to_string(),
+                        DiagnosticOrigin::FastAnalysis,
+                    )
+                    .with_code(DiagnosticCode::LintInfiniteLoop),
+                );
+                return;
+            }
+        }
+    }
+
+    // Find `while let Pat = var` where var is never assigned in the body.
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(wl) = trimmed.find("while let ") {
+            let rest = &trimmed[wl + "while let ".len()..];
+            if let Some(eq_pos) = rest.find('=') {
+                let rhs = rest[eq_pos + 1..].trim();
+                let scrutinee = rhs.strip_prefix("mut ").unwrap_or(rhs)
+                    .split(|c: char| c == ' ' || c == '{')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !scrutinee.is_empty() {
+                    let brace_off = rest[eq_pos..].find('{').map(|p| eq_pos + p);
+                    if let Some(bp) = brace_off {
+                        let block_start = line_offset(text, line_idx) + wl + bp;
+                        if !scan_block_from(text, block_start, scrutinee) {
+                            let offset = line_offset(text, line_idx) + wl;
+                            diagnostics.push(
+                                Diagnostic::new(
+                                    file_id,
+                                    TextRange::new(offset as u32, (offset + 9) as u32),
+                                    format!(
+                                        "`while let` loop: `{scrutinee}` is never updated in the body, loop may run forever"
+                                    ),
+                                    DiagnosticOrigin::FastAnalysis,
+                                )
+                                .with_code(DiagnosticCode::LintInfiniteLoop),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Scan from byte offset `open_brace` (pointing at `{`) through balanced
+/// braces looking for `needle` as a standalone word. Returns true if found
+/// before the matching `}`.
+fn scan_block_from(text: &str, open_brace: usize, needle: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth = 0u32;
+    let mut block_start = open_brace;
+    let mut i = open_brace;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                if depth == 0 { block_start = i; }
+                depth += 1;
+            }
+            b'}' => {
+                if depth == 0 { return false; }
+                depth -= 1;
+                if depth == 0 {
+                    // Check the block body between `{` and `}`.
+                    let body = &text[block_start + 1..i];
+                    return body.lines().any(|line| {
+                        rua_syntax::text::word_boundary_find(line.trim(), needle).is_some()
+                    });
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Byte offset of line N in source text.
+fn line_offset(text: &str, target: usize) -> usize {
+    text.lines().take(target).map(|l| l.len() + 1).sum()
+}
+
+// ---------------------------------------------------------------------------
 // Normalization and suppression
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 pub fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
@@ -618,6 +730,11 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                 }
             }
         }
+    }
+
+    // Per-file lint: suspicious infinite loops (W0304).
+    if let Some(ref text) = db.file_text(file_id) {
+        add_infinite_loop_lint(file_id, text, &mut diagnostics);
     }
 
     normalize_diagnostics(&mut diagnostics);
