@@ -3153,7 +3153,8 @@ impl Server {
                 .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
         });
         self.file_ids
-            .insert(path.to_path_buf(), (uri, id));
+            .insert(path.to_path_buf(), (uri.clone(), id));
+        self.file_to_uri.insert(id, uri);
         id
     }
 
