@@ -3,7 +3,7 @@
 ---@param value integer
 ---@return integer
 local function classify(value)
-    local __t1, __t2 = value
+    local __t1 = value
     if __t1 == 0 then
         return 10
     elseif (__t1 == 1) or (__t1 == 2) then

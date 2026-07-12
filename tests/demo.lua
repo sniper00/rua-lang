@@ -166,7 +166,7 @@ end
 ---@param c Color
 ---@return string
 local function describe_color(c)
-    local __t1, __t2 = c
+    local __t1 = c
     if __t1.tag == "Red" then
         return "red"
     elseif __t1.tag == "Green" then
@@ -186,20 +186,20 @@ end
 ---@param msg Message
 ---@return integer
 local function classify_message(msg)
-    local __t3, __t4 = msg
-    if __t3.tag == "Quit" then
+    local __t2 = msg
+    if __t2.tag == "Quit" then
         return 0
-    elseif __t3.tag == "Move" then
-        local x = __t3.x
-        local y = __t3.y
+    elseif __t2.tag == "Move" then
+        local x = __t2.x
+        local y = __t2.y
         return x + y
-    elseif __t3.tag == "Write" then
-        local text = __t3[1]
+    elseif __t2.tag == "Write" then
+        local text = __t2[1]
         return rt.str["len"](text)
-    elseif __t3.tag == "ChangeColor" then
-        local r = __t3[1]
-        local g = __t3[2]
-        local b = __t3[3]
+    elseif __t2.tag == "ChangeColor" then
+        local r = __t2[1]
+        local g = __t2[2]
+        local b = __t2[3]
         return r + g + b
     else
         error("non-exhaustive match")
@@ -209,11 +209,11 @@ end
 ---@param x integer|nil
 ---@return integer
 local function match_with_wildcard(x)
-    local __t5, __t6 = x
-    if __t5 ~= nil then
-        local v = __t5
+    local __t3 = x
+    if __t3 ~= nil then
+        local v = __t3
         return v
-    elseif __t5.tag == "None" then
+    elseif __t3.tag == "None" then
         return 0
     else
         error("non-exhaustive match")
@@ -223,18 +223,18 @@ end
 ---@param maybe Point|nil
 ---@return integer
 local function demo_patterns(maybe)
-    local __t7 = maybe
-    if __t7 ~= nil then
-        local p = __t7
+    local __t4 = maybe
+    if __t4 ~= nil then
+        local p = __t4
         do
             return p.x + p.y
         end
     end
     local opt = 1
     while true do
-        local __t8 = opt
-        if __t8 ~= nil then
-            local v = __t8
+        local __t5 = opt
+        if __t5 ~= nil then
+            local v = __t5
             if v > 10 then
                 opt = nil
             else
@@ -298,125 +298,125 @@ local function demo_iterators()
     local values = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
     ---@type integer[]
     local doubled
-    local __t9 = values
-    local __t10 = rt.vec({ n = 0 })
-    for __t12 = 0, __t9.n - 1 do
-        local __t11 = __t9[__t12]
-        local __t13 = true
-        if __t13 then
-            local __t14
+    local __t6 = values
+    local __t7 = rt.vec({ n = 0 })
+    for __t9 = 0, __t6.n - 1 do
+        local __t8 = __t6[__t9]
+        local __t10 = true
+        if __t10 then
+            local __t11
             do
-                local x = __t11
-                __t14 = x * 2
+                local x = __t8
+                __t11 = x * 2
             end
-            __t11 = __t14
+            __t8 = __t11
         end
-        if __t13 then
-            local __t15
+        if __t10 then
+            local __t12
             do
-                local x = __t11
-                __t15 = x > 5
+                local x = __t8
+                __t12 = x > 5
             end
-            if not __t15 then __t13 = false end
+            if not __t12 then __t10 = false end
         end
-        if __t13 then
-            __t10[__t10.n] = __t11
-            __t10.n = __t10.n + 1
+        if __t10 then
+            __t7[__t7.n] = __t8
+            __t7.n = __t7.n + 1
         end
     end
-    doubled = __t10
+    doubled = __t7
     local total
-    local __t16 = values
-    local __t17 = 0
-    for __t19 = 0, __t16.n - 1 do
-        local __t18 = __t16[__t19]
-        local __t20 = true
-        if __t20 then
-            local __t21
+    local __t13 = values
+    local __t14 = 0
+    for __t16 = 0, __t13.n - 1 do
+        local __t15 = __t13[__t16]
+        local __t17 = true
+        if __t17 then
+            local __t18
             do
-                local acc = __t17
-                local x = __t18
-                __t21 = acc + x
+                local acc = __t14
+                local x = __t15
+                __t18 = acc + x
             end
-            __t17 = __t21
+            __t14 = __t18
         end
     end
-    total = __t17
+    total = __t14
     ---@type integer|nil
-    local __t22
-    local __t23 = values
-    local __t24 = nil
-    for __t26 = 0, __t23.n - 1 do
-        local __t25 = __t23[__t26]
-        local __t27 = true
-        if __t27 then
-            local __t28
+    local __t19
+    local __t20 = values
+    local __t21 = nil
+    for __t23 = 0, __t20.n - 1 do
+        local __t22 = __t20[__t23]
+        local __t24 = true
+        if __t24 then
+            local __t25
             do
-                local x = __t25
-                __t28 = x > 3
+                local x = __t22
+                __t25 = x > 3
             end
-            if __t28 then __t24 = __t25; break end
+            if __t25 then __t21 = __t22; break end
         end
     end
-    __t22 = __t24
-    local function __t29(v)
+    __t19 = __t21
+    local function __t26(v)
         return v
     end
-    local __t30 = __t22
-    if __t30 ~= nil then
+    local __t27 = __t19
+    if __t27 ~= nil then
     end
-    local found = __t30
+    local found = __t27
     local has_big
-    local __t31 = values
-    local __t32 = false
-    for __t34 = 0, __t31.n - 1 do
-        local __t33 = __t31[__t34]
-        local __t35 = true
-        if __t35 then
-            local __t36
+    local __t28 = values
+    local __t29 = false
+    for __t31 = 0, __t28.n - 1 do
+        local __t30 = __t28[__t31]
+        local __t32 = true
+        if __t32 then
+            local __t33
             do
-                local x = __t33
-                __t36 = x > 10
+                local x = __t30
+                __t33 = x > 10
             end
-            if __t36 then __t32 = true; break end
+            if __t33 then __t29 = true; break end
         end
     end
-    has_big = __t32
+    has_big = __t29
     local all_small
-    local __t37 = values
-    local __t38 = true
-    for __t40 = 0, __t37.n - 1 do
-        local __t39 = __t37[__t40]
-        local __t41 = true
-        if __t41 then
-            local __t42
+    local __t34 = values
+    local __t35 = true
+    for __t37 = 0, __t34.n - 1 do
+        local __t36 = __t34[__t37]
+        local __t38 = true
+        if __t38 then
+            local __t39
             do
-                local x = __t39
-                __t42 = x < 100
+                local x = __t36
+                __t39 = x < 100
             end
-            if not __t42 then __t38 = false; break end
+            if not __t39 then __t35 = false; break end
         end
     end
-    all_small = __t38
+    all_small = __t35
     local count
-    local __t43 = values
-    local __t44 = 0
-    for __t46 = 0, __t43.n - 1 do
-        local __t45 = __t43[__t46]
-        local __t47 = true
-        if __t47 then
-            local __t48
+    local __t40 = values
+    local __t41 = 0
+    for __t43 = 0, __t40.n - 1 do
+        local __t42 = __t40[__t43]
+        local __t44 = true
+        if __t44 then
+            local __t45
             do
-                local x = __t45
-                __t48 = rt.irem(x, 2) == 0
+                local x = __t42
+                __t45 = rt.irem(x, 2) == 0
             end
-            if not __t48 then __t47 = false end
+            if not __t45 then __t44 = false end
         end
-        if __t47 then
-            __t44 = __t44 + 1
+        if __t44 then
+            __t41 = __t41 + 1
         end
     end
-    count = __t44
+    count = __t41
     return total
 end
 
@@ -483,24 +483,24 @@ end
 ---@param path string
 ---@return integer|nil, string|nil
 local function load_and_parse(path)
-    local __t49, __t50 = load_config(path)
-    if __t50 ~= nil then return nil, __t50 end
-    if __t49 == nil then return nil end
-    local config = __t49
-    local __t51, __t52 = parse_int(config)
-    if __t52 ~= nil then return nil, __t52 end
-    if __t51 == nil then return nil end
-    local value = __t51
+    local __t46, __t47 = load_config(path)
+    if __t47 ~= nil then return nil, __t47 end
+    if __t46 == nil then return nil end
+    local config = __t46
+    local __t48, __t49 = parse_int(config)
+    if __t49 ~= nil then return nil, __t49 end
+    if __t48 == nil then return nil end
+    local value = __t48
     return value + 1
 end
 
 ---@param x integer|nil
 ---@return integer|nil
 local function maybe_double(x)
-    local __t53, __t54 = x
-    if __t54 ~= nil then return nil, __t54 end
-    if __t53 == nil then return nil end
-    local v = __t53
+    local __t50, __t51 = x
+    if __t51 ~= nil then return nil, __t51 end
+    if __t50 == nil then return nil end
+    local v = __t50
     return v * 2
 end
 
@@ -508,14 +508,14 @@ end
 ---@param b integer|nil
 ---@return integer|nil
 local function chain_option(a, b)
-    local __t55, __t56 = a
-    if __t56 ~= nil then return nil, __t56 end
-    if __t55 == nil then return nil end
-    local va = __t55
-    local __t57, __t58 = b
-    if __t58 ~= nil then return nil, __t58 end
-    if __t57 == nil then return nil end
-    local vb = __t57
+    local __t52, __t53 = a
+    if __t53 ~= nil then return nil, __t53 end
+    if __t52 == nil then return nil end
+    local va = __t52
+    local __t54, __t55 = b
+    if __t55 ~= nil then return nil, __t55 end
+    if __t54 == nil then return nil end
+    local vb = __t54
     return va + vb
 end
 

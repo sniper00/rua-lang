@@ -1336,9 +1336,18 @@ impl Codegen<'_> {
 
     fn gen_match(&mut self, scrut: &Expr, arms: &[MatchArm], dest: &Dest) {
         let m = self.fresh_tmp();
-        let me = self.fresh_tmp(); // error companion for Result::Err
         let s = self.gen_inline(scrut);
-        self.line(&format!("local {}, {} = {}", m, me, s));
+        // Only capture a second return value (the error companion) when the
+        // scrutinee is a call that could produce `nil, err` (Result::Err).
+        let may_multi = matches!(&scrut.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+        let me = if may_multi {
+            let tmp = self.fresh_tmp();
+            self.line(&format!("local {}, {} = {}", m, tmp, s));
+            tmp
+        } else {
+            self.line(&format!("local {} = {}", m, s));
+            String::from("\"\"")
+        };
 
         let mut last_is_wildcard = false;
         for (i, arm) in arms.iter().enumerate() {
