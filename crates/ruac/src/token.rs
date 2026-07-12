@@ -79,6 +79,7 @@ pub enum RuaTokenKind {
     KwMatch,
     KwSelf,
     KwExtern,
+    KwDyn,
 
     // Literals / identifiers
     Ident,
@@ -155,6 +156,7 @@ impl RuaTokenKind {
             KwMatch => "match",
             KwSelf => "self",
             KwExtern => "extern",
+            KwDyn => "dyn",
             Ident => "<ident>",
             Int => "<int>",
             Float => "<float>",
@@ -228,6 +230,7 @@ pub fn keyword_kind(name: &str) -> RuaTokenKind {
         "match" => KwMatch,
         "self" => KwSelf,
         "extern" => KwExtern,
+        "dyn" => KwDyn,
         _ => Ident,
     }
 }

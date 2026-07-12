@@ -589,6 +589,8 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> Result<Type, String> {
         if self.accept(T::Amp)? {
             let mutable = self.accept(T::KwMut)?;
+            // `&dyn Trait` — consume `dyn` keyword before the trait name
+            let _dyn = self.accept(T::KwDyn)?;
             let inner = Box::new(self.parse_type()?);
             return Ok(Type::Ref { mutable, inner });
         }

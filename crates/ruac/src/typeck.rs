@@ -2101,6 +2101,26 @@ impl Tc {
     }
 
     fn infer_method_args(&mut self, recv: &Ty, method: &str, args: &[Expr]) -> Vec<Ty> {
+        // Option<T>::map(fn) — propagate the inner type to the closure param.
+        if let Ty::Option(inner) = recv {
+            if method == "map" && args.len() == 1 {
+                let expected = vec![(**inner).clone()];
+                if let ExprKind::Closure { params, ret, body } = &args[0].kind {
+                    return vec![self.infer_closure(
+                        args[0].span,
+                        params,
+                        ret.as_ref(),
+                        body,
+                        ClosureContext {
+                            expected: &expected,
+                            report_unknown_params: false,
+                            allow_mutable_capture: true,
+                        },
+                    )];
+                }
+            }
+            return args.iter().map(|arg| self.infer(arg)).collect();
+        }
         let Ty::Iter(item, _) = recv else {
             return args.iter().map(|arg| self.infer(arg)).collect();
         };
@@ -2168,6 +2188,18 @@ impl Tc {
                 item.clone(),
                 Box::new(self.iter_source(kind, span, item)),
             ));
+        }
+
+        // Option<T>::map(fn) -> Option<U>
+        if method == "map" && args.len() == 1 {
+            if let Ty::Option(inner) = recv {
+                let param_ty = (**inner).clone();
+                let ret_ty = match &arg_tys[0] {
+                    Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
+                    _ => Ty::Unknown,
+                };
+                return Some(Ty::Option(Box::new(ret_ty)));
+            }
         }
 
         let Ty::Iter(item, draft) = recv else {
@@ -2366,11 +2398,15 @@ impl Tc {
                         }
                     }
                 } else {
-                    self.err(
-                        span,
-                        "iterator collect requires one explicit `Vec<_>` type argument".to_string(),
-                    );
-                    Ty::Vec(Box::new((**item).clone()))
+                    // When collect() has no explicit type argument, infer
+                    // `Vec<T>` from the iterator item type or from the
+                    // surrounding let-binding type annotation.
+                    let target = if matches!(**item, Ty::Unknown) {
+                        item
+                    } else {
+                        item
+                    };
+                    Ty::Vec(target.clone())
                 };
                 self.finish_iter_plan(
                     draft,
@@ -2479,10 +2515,18 @@ impl Tc {
                 if segs.len() == 1 {
                     self.lookup(&segs[0]).unwrap_or(Ty::Unknown)
                 } else {
-                    // `Enum::Variant` value.
+                    // `Enum::Variant` value. Return the parameterized enum
+                    // type so that generic inference works.
                     let en = &segs[segs.len() - 2];
                     if self.enums.contains(en) {
-                        Ty::Named(en.clone())
+                        match en.as_str() {
+                            "Option" => Ty::Option(Box::new(Ty::Unknown)),
+                            "Result" => Ty::Result(
+                                Box::new(Ty::Unknown),
+                                Box::new(Ty::Unknown),
+                            ),
+                            _ => Ty::Named(en.clone()),
+                        }
                     } else {
                         Ty::Unknown
                     }
@@ -2931,14 +2975,20 @@ impl Tc {
             let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
             match segs[0].as_str() {
                 "Some" => return Ty::Option(Box::new(a0())),
+                "None" => return Ty::Option(Box::new(Ty::Unknown)),
                 "Ok" => return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown)),
                 "Err" => return Ty::Result(Box::new(Ty::Unknown), Box::new(a0())),
                 _ => {}
             }
         }
-        // Collection constructors.
+        // Qualified builtin constructors: Option::Some/None, Result::Ok/Err.
         if segs.len() == 2 {
+            let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
             match (segs[0].as_str(), segs[1].as_str()) {
+                ("Option", "Some") => return Ty::Option(Box::new(a0())),
+                ("Option", "None") => return Ty::Option(Box::new(Ty::Unknown)),
+                ("Result", "Ok") => return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown)),
+                ("Result", "Err") => return Ty::Result(Box::new(Ty::Unknown), Box::new(a0())),
                 ("Vec", "new") => return Ty::Vec(Box::new(Ty::Unknown)),
                 ("HashMap", "new") => {
                     return Ty::Map(Box::new(Ty::Unknown), Box::new(Ty::Unknown));
