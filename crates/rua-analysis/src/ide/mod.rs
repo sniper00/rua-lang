@@ -170,10 +170,11 @@ impl Analysis {
         let text = self.db.file_text(position.position.file_id)?;
         let offset = position.position.offset.min(text.len() as u32);
         let def_map = self.db.def_map(position.position.file_id);
+        let member_index = self.db.member_index(position.position.file_id);
         let (body, source_map, inference) =
             completion::find_containing_body_data(&self.db, &def_map, position.position, offset)?;
 
-        // Find a Call or MethodCall expression containing the cursor.
+        // Find the innermost Call or MethodCall containing the cursor.
         let mut best_expr_id: Option<crate::hir::ExprId> = None;
         let mut best_len = u32::MAX;
         for (expr_id, expr) in body.exprs() {
@@ -194,34 +195,113 @@ impl Analysis {
 
         let expr_id = best_expr_id?;
         let expr = body.expr(expr_id)?;
+
+        // Resolve the callable type.  For direct calls we query the callee
+        // expression type (type_of_expr on the *call* returns the result).
+        // For method calls we go through member_index.
+        let (callable, param_names): (crate::hir::CallableTy, Vec<Option<String>>) = match expr {
+            crate::hir::Expr::Call { callee, .. } => {
+                let callee_ty = inference.type_of_expr(*callee)?.clone();
+                match &callee_ty {
+                    Ty::Function(c) | Ty::Closure(c) => {
+                        // Try to get param names from the callee path's definition.
+                        let names = if let Some(crate::hir::Expr::Path(path)) =
+                            body.expr(*callee)
+                            && let [nr] = &path[..]
+                            && let Some(nr_name) = body.name_ref(*nr)?.name()
+                        {
+                            def_map
+                                .resolve_name(def_map.root(), nr_name)
+                                .and_then(|def| {
+                                    if let crate::hir::ItemSignature::Callable(sig) =
+                                        def.signature()
+                                    {
+                                        Some(
+                                            sig.params()
+                                                .iter()
+                                                .map(|p| p.name().map(|n| n.to_string()))
+                                                .collect(),
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
+                        (c.clone(), names)
+                    }
+                    _ => return None,
+                }
+            }
+            crate::hir::Expr::MethodCall {
+                receiver, method, ..
+            } => {
+                let receiver_ty = inference.type_of_expr(*receiver)?;
+                let method_name = body.name_ref(*method)?.name()?.to_string();
+                let resolution =
+                    member_index.resolve_method(receiver_ty, &method_name)?;
+                let callable = resolution.callable()?.clone();
+                let names = match resolution.target() {
+                    crate::hir::MemberTarget::Definition(def_id) => def_map
+                        .definition(def_id)
+                        .and_then(|def| {
+                            if let crate::hir::ItemSignature::Callable(sig) =
+                                def.signature()
+                            {
+                                Some(
+                                    sig.params()
+                                        .iter()
+                                        .map(|p| p.name().map(|n| n.to_string()))
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default(),
+                    _ => vec![],
+                };
+                (callable, names)
+            }
+            _ => return None,
+        };
+
         let args: Vec<crate::hir::ExprId> = match expr {
             crate::hir::Expr::Call { args, .. } => args.clone(),
             crate::hir::Expr::MethodCall { args, .. } => args.clone(),
             _ => return None,
         };
 
-        // Get the callable type from inference.
-        let expr_ty = inference.type_of_expr(expr_id)?.clone();
-        let callable = match &expr_ty {
-            Ty::Function(c) | Ty::Closure(c) => c.clone(),
-            _ => return None,
-        };
-
-        let param_types: Vec<String> = callable.params().iter().map(|t| t.to_string()).collect();
+        // Build parameter display: use original names when available.
+        let param_types: Vec<String> = callable
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                match param_names.get(i).and_then(|n| n.clone()) {
+                    Some(name) => format!("{name}: {ty}"),
+                    None => ty.to_string(),
+                }
+            })
+            .collect();
         let ret = callable.return_ty().to_string();
 
-        // Determine active parameter by counting args that end before cursor.
-        let active_param = args
-            .iter()
-            .filter(|arg_id| {
-                source_map
-                    .expr_range(**arg_id)
-                    .is_some_and(|r| r.range.end() <= offset)
-            })
-            .count() as u32;
+        // Active parameter: count fully-completed args before cursor.
+        let mut active_param = 0u32;
+        for arg_id in &args {
+            if let Some(r) = source_map.expr_range(*arg_id) {
+                if r.range.end() <= offset {
+                    active_param += 1;
+                } else if r.range.contains(offset) {
+                    break; // cursor inside this arg — it is active
+                }
+            }
+        }
+        let max_param = param_types.len().saturating_sub(1) as u32;
 
         let label = format!("fn({}) -> {}", param_types.join(", "), ret);
-        let max_param = param_types.len().saturating_sub(1) as u32;
         Some(SignatureHelpInfo {
             label,
             parameters: param_types,
@@ -289,72 +369,32 @@ impl Analysis {
 
     /// Hover for `receiver.field` or `receiver.method()`.
     fn member_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
-        let text = self.db.file_text(position.position.file_id)?;
-        let parse = self.db.parse(position.position.file_id);
+        let file_id = position.position.file_id;
+        let (receiver_ty, field_name) = self.resolve_dot_access(position)?;
+        let member_index = self.db.member_index(file_id);
+
+        // Compute the token range for the hover highlight.
+        let text = self.db.file_text(file_id)?;
+        let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
         let offset = position.position.offset.min(text.len() as u32);
-        let token = completion::token_at_offset(root, offset)?;
-
-        // Only if preceded by `.`
-        if completion::previous_significant(&token).is_none_or(|t| t.kind() != rua_syntax::SyntaxKind::Dot) {
-            return None;
-        }
-
-        // Find the field name token (the current token or the one after `.`)
-        let field_name = if token.kind() == rua_syntax::SyntaxKind::Ident {
-            token.text().to_string()
-        } else {
-            return None;
-        };
-
-        // Try to infer the receiver type via HIR inference.
-        let def_map = self.db.def_map(position.position.file_id);
-        let member_index = self.db.member_index(position.position.file_id);
-        let receiver_ty = completion::infer_dot_receiver(&self.db, &def_map, position.position, offset)
-            .or_else(|| {
-                // Fallback: scan syntax tree for the receiver identifier.
-                let prev = completion::previous_significant(&token)?;
-                let before_dot = completion::previous_significant(&prev)?;
-                if before_dot.kind() != rua_syntax::SyntaxKind::Ident {
-                    return None;
-                }
-                let receiver_name = before_dot.text().to_string();
-                // Search all bodies for a local with this name.
-                for def in def_map.definitions() {
-                    if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
-                        continue;
-                    }
-                    let Some(body) = self.db.body(def.id()) else { continue };
-                    let Some(inference) = self.db.infer(def.id()) else { continue };
-                    for (bid, binding) in body.bindings() {
-                        if binding.name() == Some(&receiver_name) {
-                            return inference.type_of_binding(bid).cloned();
-                        }
-                    }
-                }
-                None
-            })?;
+        let token_range = completion::token_at_offset(root, offset)
+            .map(|t| {
+                let tr = t.text_range();
+                FileRange::new(file_id, TextRange::new(tr.start().into(), tr.end().into()))
+            })
+            .unwrap_or(FileRange::new(file_id, TextRange::new(offset, offset)));
 
         // Try field resolution
         if let Some(resolution) = member_index.resolve_field(&receiver_ty, &field_name) {
-            let tr = token.text_range();
-            let range = FileRange::new(
-                position.position.file_id,
-                TextRange::new(tr.start().into(), tr.end().into()),
-            );
             return Some(HoverResult::new(
-                range,
+                token_range,
                 format!("{}: {}", field_name, resolution.ty()),
             ));
         }
 
         // Try method resolution
         if let Some(resolution) = member_index.resolve_method(&receiver_ty, &field_name) {
-            let tr = token.text_range();
-            let range = FileRange::new(
-                position.position.file_id,
-                TextRange::new(tr.start().into(), tr.end().into()),
-            );
             let callable = resolution.callable();
             let params: Vec<String> = callable
                 .map(|c| c.params().iter().map(|t| t.to_string()).collect())
@@ -376,7 +416,7 @@ impl Analysis {
                 format!("{}, {}", receiver_str, params.join(", "))
             };
             return Some(HoverResult::new(
-                range,
+                token_range,
                 format!("fn {}({pts}) -> {ret}", field_name),
             ));
         }
@@ -415,13 +455,41 @@ impl Analysis {
         &self,
         position: ProjectPosition,
     ) -> Option<NavigationTarget> {
+        let (receiver_ty, field_name) = self.resolve_dot_access(position)?;
+        let file_id = position.position.file_id;
+        let def_map = self.db.def_map(file_id);
+        let member_index = self.db.member_index(file_id);
+
+        // Resolve field or method to its definition.
+        let field = member_index.resolve_field(&receiver_ty, &field_name);
+        let method = member_index.resolve_method(&receiver_ty, &field_name);
+        let resolution = field.or(method)?;
+
+        let def_id = match resolution.target() {
+            crate::hir::MemberTarget::Definition(id) => id,
+            _ => return None,
+        };
+        let definition = def_map.definition(def_id)?;
+        Some(NavigationTarget::new(
+            FileRange::new(definition.file_id(), definition.name_range()),
+            None,
+        ))
+    }
+
+    /// Shared preamble for member hover and goto-def: find the token
+    /// after `.`, extract the field/method name, and infer the receiver
+    /// type.  Returns `(receiver_ty, field_name)` on success.
+    fn resolve_dot_access(
+        &self,
+        position: ProjectPosition,
+    ) -> Option<(Ty, String)> {
         let text = self.db.file_text(position.position.file_id)?;
         let parse = self.db.parse(position.position.file_id);
         let root = parse.syntax_node();
         let offset = position.position.offset.min(text.len() as u32);
         let token = completion::token_at_offset(root, offset)?;
 
-        // Only if preceded by `.`
+        // Must be preceded by `.`
         if completion::previous_significant(&token)
             .is_none_or(|t| t.kind() != rua_syntax::SyntaxKind::Dot)
         {
@@ -433,28 +501,34 @@ impl Analysis {
             return None;
         };
 
-        // Resolve receiver type (same AST-walking approach as hover).
+        // Primary path: inference-based receiver type.
         let def_map = self.db.def_map(position.position.file_id);
-        let member_index = self.db.member_index(position.position.file_id);
-        let receiver_ty =
-            completion::infer_dot_receiver(&self.db, &def_map, position.position, offset);
-        let receiver_ty = receiver_ty?;
+        let receiver_ty = completion::infer_dot_receiver(
+            &self.db, &def_map, position.position, offset,
+        )
+        .or_else(|| {
+            // Fallback: scan syntax tree for the receiver identifier,
+            // then look it up by name across all bodies that contain
+            // the cursor position.
+            let prev = completion::previous_significant(&token)?;
+            let before_dot = completion::previous_significant(&prev)?;
+            if before_dot.kind() != rua_syntax::SyntaxKind::Ident {
+                return None;
+            }
+            let receiver_name = before_dot.text().to_string();
+            // Only search the body that contains the cursor.
+            let (body, _source_map, inference) = completion::find_containing_body_data(
+                &self.db, &def_map, position.position, offset,
+            )?;
+            for (_bid, binding) in body.bindings() {
+                if binding.name() == Some(&receiver_name) {
+                    return inference.type_of_binding(_bid).cloned();
+                }
+            }
+            None
+        })?;
 
-        // Resolve field or method to its definition.
-        let field = member_index.resolve_field(&receiver_ty, &field_name);
-        let method = member_index.resolve_method(&receiver_ty, &field_name);
-        let resolution = field.or(method)?;
-
-        // Get the definition from the resolution.
-        let def_id = match resolution.target() {
-            crate::hir::MemberTarget::Definition(id) => id,
-            _ => return None,
-        };
-        let definition = def_map.definition(def_id)?;
-        Some(NavigationTarget::new(
-            FileRange::new(definition.file_id(), definition.name_range()),
-            None,
-        ))
+        Some((receiver_ty, field_name))
     }
 
     /// Go to implementation(s) of a trait method.

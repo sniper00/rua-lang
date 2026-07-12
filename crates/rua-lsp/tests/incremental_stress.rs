@@ -1080,3 +1080,47 @@ fn dot_completion_after_whitespace_finds_receiver() {
         "postfix .if should appear after dot on bool, got: {labels:?}"
     );
 }
+
+#[test]
+fn lint_self_not_flagged_as_unused() {
+    // B6 fix: a struct method that takes `&mut self` and writes to
+    // fields should NOT trigger W0300 (unused) or W0301 (redundant mut).
+    let uri = uri("/test/self_not_unused.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nimpl Point {\n    fn set_x(&mut self, v: i64) { self.x = v; }\n}",
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0300 = diags
+        .iter()
+        .any(|d| d.code() == Some(rua_analysis::DiagnosticCode::LintUnusedVariable));
+    assert!(
+        !has_w0300,
+        "W0300 should not fire for self parameter in method, got: {diags:?}"
+    );
+}
+
+#[test]
+fn lint_unreachable_ignores_keywords_in_identifiers() {
+    // B9 fix: `return_value` is an identifier, not a `return` statement
+    // followed by unreachable code. The lint should not fire.
+    let uri = uri("/test/not_unreachable.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn foo() -> i64 { let return_value = 5; return_value }",
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0302 = diags
+        .iter()
+        .any(|d| d.code() == Some(rua_analysis::DiagnosticCode::LintUnreachableCode));
+    assert!(
+        !has_w0302,
+        "W0302 should not fire for return_value identifier, got: {diags:?}"
+    );
+}

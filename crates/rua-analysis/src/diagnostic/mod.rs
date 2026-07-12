@@ -379,8 +379,13 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
             && let Some(resolution) = db.body_resolution(definition.id())
         {
             for (binding_id, binding) in body.bindings() {
-                // Skip wildcards and unnamed bindings.
-                if binding.name().is_none_or(|n| n.starts_with('_')) {
+                // Skip wildcards, unnamed bindings, and the implicit
+                // `self` receiver (which is semantically "used" by the
+                // method contract even if never read explicitly).
+                if binding
+                    .name()
+                    .is_none_or(|n| n.starts_with('_') || n == "self")
+                {
                     continue;
                 }
                 // Check if any name ref resolves to this binding.
@@ -513,35 +518,42 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
     if let Some(ref text) = db.file_text(file_id) {
         for (line_idx, line) in text.lines().enumerate() {
             let trimmed = line.trim();
-            // Find semicolons after return/break/continue on the same line.
             for keyword in &["return", "break", "continue"] {
-                if let Some(pos) = trimmed.find(keyword) {
-                    let after = trimmed[pos + keyword.len()..].trim();
-                    if let Some(semi_pos) = after.find(';') {
-                        let rest = after[semi_pos + 1..].trim();
-                        if !rest.is_empty() && !rest.starts_with("//") {
-                            let line_offset =
-                                text.lines().take(line_idx).map(|l| l.len() + 1).sum::<usize>();
-                            let byte_offset = line_offset + pos
-                                + keyword.len()
-                                + after[..semi_pos].len();
-                            let end_offset =
-                                byte_offset + 1 + rest.len() + (line.len() - trimmed.len());
-                            diagnostics.push(
-                                Diagnostic::new(
-                                    file_id,
-                                    TextRange::new(
-                                        byte_offset as u32,
-                                        end_offset.min(text.len()) as u32,
-                                    ),
-                                    format!("unreachable code after `{keyword}`"),
-                                    DiagnosticOrigin::FastAnalysis,
-                                )
-                                .with_code(DiagnosticCode::LintUnreachableCode),
-                            );
-                        }
-                        break; // one diag per line
+                // Find the keyword as a standalone word (not inside an
+                // identifier like `return_value` or a string literal).
+                let pos = match word_boundary_find(trimmed, keyword) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let after = trimmed[pos + keyword.len()..].trim();
+                if let Some(semi_pos) = after.find(';') {
+                    let rest = after[semi_pos + 1..].trim();
+                    if !rest.is_empty() && !rest.starts_with("//") {
+                        let line_offset = text
+                            .lines()
+                            .take(line_idx)
+                            .map(|l| l.len() + 1)
+                            .sum::<usize>();
+                        let byte_offset =
+                            line_offset + pos + keyword.len() + after[..semi_pos].len();
+                        let end_offset = byte_offset
+                            + 1
+                            + rest.len()
+                            + (line.len() - trimmed.len());
+                        diagnostics.push(
+                            Diagnostic::new(
+                                file_id,
+                                TextRange::new(
+                                    byte_offset as u32,
+                                    end_offset.min(text.len()) as u32,
+                                ),
+                                format!("unreachable code after `{keyword}`"),
+                                DiagnosticOrigin::FastAnalysis,
+                            )
+                            .with_code(DiagnosticCode::LintUnreachableCode),
+                        );
                     }
+                    break; // one diag per line
                 }
             }
         }
@@ -678,6 +690,38 @@ fn mismatch_context_label(context: TypeMismatchContext) -> &'static str {
         TypeMismatchContext::Branch => " in branch",
         TypeMismatchContext::RangeBound => " in range bound",
         TypeMismatchContext::Index => " in index",
+    }
+}
+
+/// Find `keyword` in `text` at a word boundary — the character before
+/// the match (if any) and the character after the match must not be
+/// alphanumeric or `_`.  This prevents matching inside identifiers
+/// (e.g. `return_value`) or string literals.
+fn word_boundary_find(text: &str, keyword: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let kw_bytes = keyword.as_bytes();
+    let mut search_from = 0;
+    loop {
+        let pos = text[search_from..].find(keyword)?;
+        let abs_pos = search_from + pos;
+        // Check left boundary.
+        if abs_pos > 0 {
+            let before = bytes[abs_pos - 1];
+            if before.is_ascii_alphanumeric() || before == b'_' {
+                search_from = abs_pos + 1;
+                continue;
+            }
+        }
+        // Check right boundary.
+        let after_idx = abs_pos + kw_bytes.len();
+        if after_idx < bytes.len() {
+            let after = bytes[after_idx];
+            if after.is_ascii_alphanumeric() || after == b'_' {
+                search_from = abs_pos + 1;
+                continue;
+            }
+        }
+        return Some(abs_pos);
     }
 }
 
