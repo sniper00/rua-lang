@@ -3638,8 +3638,27 @@ fn completion_to_lsp(
 
     // label_details: structured display — the detail part shows the type
     // signature next to the label, and description shows the origin.
+    // VS Code renders label_details.detail directly after the label with
+    // no automatic separator, so we prepend ": " for type-like details.
     let label_details = {
-        let detail = item.detail().map(|d| d.to_string());
+        let raw_detail = item.detail().map(|d| d.to_string());
+        let detail = raw_detail.map(|d| match item.kind() {
+            CompletionKind::Field
+            | CompletionKind::Variable
+            | CompletionKind::Parameter
+            | CompletionKind::Variant
+            | CompletionKind::Struct
+            | CompletionKind::Enum
+            | CompletionKind::Trait
+            | CompletionKind::BuiltinType
+            | CompletionKind::TypeAlias
+            | CompletionKind::Module => format!(": {d}"),
+            CompletionKind::Method
+            | CompletionKind::Function
+            | CompletionKind::Keyword
+            | CompletionKind::Impl
+            | CompletionKind::Macro => d,
+        });
         let description = match item.kind() {
             CompletionKind::Keyword => Some("keyword".to_string()),
             CompletionKind::Variable => Some("local".to_string()),
@@ -3682,9 +3701,7 @@ fn completion_to_lsp(
     CompletionItem {
         label: item.label().to_string(),
         kind,
-        // detail is provided via label_details below; the top-level
-        // detail field duplicates it and causes visual concatenation.
-        detail: None,
+        detail: item.detail().map(|d| d.to_string()),
         documentation: item.documentation().map(|d| {
             Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,

@@ -198,6 +198,7 @@ fn main() {
     let mut p = Point { x: 3, y: 4, label: "p".to_string() };
     p.translate(1, 2);
     p.label;
+    p.
 
 
 
