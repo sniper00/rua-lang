@@ -60,30 +60,33 @@ impl Point {
 
 fn main() {
     let p = Point::new(3, 4);
-    println!("{}", p.distance());  // 25
+    println!("{}", p.distance());
 }
 ```
 
 ⇩
 
 ```lua
+local rt = require("rua_rt")
 ---@class Point
 ---@field x integer
 ---@field y integer
 local Point = {}
 Point.__index = Point
 
-function Point.new(x, y)
-    return { x = x, y = y }
-end
-
-function Point:distance()
-    return self.x * self.x + self.y * self.y
-end
-
 local function main()
     local p = Point.new(3, 4)
-    rt.println(rt.str["to_string"](p:distance()))
+    rt.println("{}", p:distance())
+end
+
+---@return Point
+function Point.new(x, y)
+    return setmetatable({ x = x, y = y }, Point)
+end
+
+---@return integer
+function Point:distance()
+    return self.x * self.x + self.y * self.y
 end
 
 main()
@@ -110,6 +113,7 @@ fn handle(msg: Message) -> String {
 ⇩
 
 ```lua
+local rt = require("rua_rt")
 ---@class Message
 local Message = {}
 Message.__index = Message
@@ -134,14 +138,14 @@ end
 
 ### Error Handling — Lua‑idiomatic
 
-`Result<T, E>` compiles to Lua's natural `nil, err` multi‑return convention:
+`Result<T, E>` compiles to Lua's native `nil, err` multi‑return:
 
 ```rua
 fn load_config(path: String) -> Result<String, String> {
     if path == "" {
-        Err("empty path")            // → return nil, "empty path"
+        Err("empty path")
     } else {
-        Ok("config")                 // → return "config"
+        Ok("config")
     }
 }
 
@@ -177,8 +181,8 @@ end
 
 ```rua
 fn maybe_double(x: Option<i64>) -> Option<i64> {
-    let v = x?;     // unwrap Some, propagate None
-    Some(v * 2)     // bare value: no table wrapping
+    let v = x?;
+    Some(v * 2)
 }
 ```
 
@@ -200,7 +204,7 @@ end
 ```rua
 mod math {
     pub fn add(a: i64, b: i64) -> i64 { a + b }
-    fn helper() -> i64 { 0 }           // private
+    fn helper() -> i64 { 0 }
 }
 use math::add;
 
@@ -215,10 +219,12 @@ fn main() {
 ---@class math
 local math = {}
 
+---@return integer
 function math.add(a, b)
     return a + b
 end
 
+---@return integer
 function math.helper()
     return 0
 end
@@ -226,6 +232,8 @@ end
 local function main()
     local sum = math.add(3, 4)
 end
+
+main()
 ```
 
 ### Generics + Traits
@@ -249,6 +257,7 @@ fn greet<T: Greet>(value: &T) -> String {
 ⇩
 
 ```lua
+local rt = require("rua_rt")
 ---@class Person
 ---@field name string
 local Person = {}
@@ -282,6 +291,8 @@ fn main() {
 ⇩
 
 ```lua
+local rt = require("rua_rt")
+
 local function main()
     local doubled
     local __t1 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
@@ -330,11 +341,13 @@ local function main()
     end
     total = __t9
 end
+
+main()
 ```
 
 > Iterator chains (`map`, `filter`, `fold`, `any`, `all`, `find`, `count`, `collect`,
 > `enumerate`, `take`, `skip`) fuse into a single `for` loop — no intermediate
-> allocations.
+> allocations, closures inlined directly into the loop body.
 
 ### ? Operator — Error Propagation
 
@@ -349,6 +362,7 @@ fn chain(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 ⇩
 
 ```lua
+---@return integer|nil
 local function chain(a, b)
     local __t1, __t2 = a
     if __t2 ~= nil then return nil, __t2 end
