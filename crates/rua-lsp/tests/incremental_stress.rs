@@ -1016,3 +1016,67 @@ fn multi_file_workspace_does_not_panic() {
     let pp = srv.pp(&uri_main, 0, 11).unwrap();
     let _ = snap.completions(pp);
 }
+
+#[test]
+fn path_completions_after_colon_colon() {
+    // CB1 fix: after `mod::`, path completions should offer the module's
+    // public items (not return empty).
+    let uri = uri("/test/pathcomp.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "mod math { pub fn abs(x: i64) -> i64 { if x < 0 { -x } else { x } } }\nfn main() { math:: }",
+    );
+
+    // cursor on the space after `math::` (after the `::`)
+    let pp = srv.pp(&uri, 1, 21).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+    assert!(
+        labels.contains(&"abs".to_string()),
+        "path completions after :: should include module items, got: {labels:?}"
+    );
+}
+
+#[test]
+fn while_let_pattern_offers_enum_variants() {
+    // CB4 fix: inside `while let` pattern, enum variants should be offered.
+    let uri = uri("/test/whilelet.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "enum Maybe { Some(i64), None }\nfn main() {\n    let opt = Maybe::Some(42);\n    while let  }\n}",
+    );
+
+    // cursor inside `while let |` (at the pattern position, before `=`)
+    let pp = srv.pp(&uri, 3, 14).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+    // Should offer enum variants like Some, None
+    assert!(
+        labels.iter().any(|l| l == "Some"),
+        "while-let should offer enum variant Some, got: {labels:?}"
+    );
+}
+
+#[test]
+fn dot_completion_after_whitespace_finds_receiver() {
+    // Regression: cursor on whitespace right after `.` should still find
+    // the receiver type and offer member completions.
+    let uri = uri("/test/dotspace.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn main() { let x = true; x. }",
+    );
+
+    // cursor on the space after `x.`
+    let pp = srv.pp(&uri, 0, 28).unwrap();
+    let items = srv.snapshot().completions(pp);
+    // Should at least offer postfix templates (.if, .match, etc.)
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+    assert!(
+        labels.contains(&".if".to_string()),
+        "postfix .if should appear after dot on bool, got: {labels:?}"
+    );
+}

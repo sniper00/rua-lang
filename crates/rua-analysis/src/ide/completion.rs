@@ -717,7 +717,11 @@ pub(crate) fn infer_dot_receiver(
     let offset = offset.min(text.len() as u32);
     let parse = db.parse(position.file_id);
     let root = parse.syntax_node();
-    // Find the token at the cursor.
+    // Use raw rowan here (not the wrapper). The wrapper prefers `right`
+    // when `left` is Dot, which is correct for hover/goto-def (cursor
+    // on the member name). Here the cursor may be on the dot itself or
+    // on trailing whitespace — preferring the left token keeps the dot
+    // reachable for the parent-chain walk into FieldExpr/MethodCallExpr.
     let end: u32 = root.text_range().end().into();
     let token = match root.token_at_offset(offset.min(end).into()) {
         rowan::TokenAtOffset::Single(t) => Some(t),
@@ -743,9 +747,16 @@ pub(crate) fn infer_dot_receiver(
                         rua_syntax::SyntaxKind::PathExpr
                             | rua_syntax::SyntaxKind::Ident
                             | rua_syntax::SyntaxKind::CallExpr
+                            | rua_syntax::SyntaxKind::MethodCallExpr
                             | rua_syntax::SyntaxKind::FieldExpr
                             | rua_syntax::SyntaxKind::IndexExpr
                             | rua_syntax::SyntaxKind::ParenExpr
+                            | rua_syntax::SyntaxKind::Block
+                            | rua_syntax::SyntaxKind::ArrayExpr
+                            | rua_syntax::SyntaxKind::UnaryExpr
+                            | rua_syntax::SyntaxKind::BinExpr
+                            | rua_syntax::SyntaxKind::StructLitExpr
+                            | rua_syntax::SyntaxKind::ClosureExpr
                             | rua_syntax::SyntaxKind::LiteralExpr
                     )
                 })?;
@@ -857,19 +868,27 @@ fn path_completions(
 }
 
 /// Collect path segments leading up to the `::` before `token`.
+///
+/// The caller has already verified that `previous_significant(token)` is `::`,
+/// so we skip past it and walk left to collect the qualifying path segments
+/// (e.g. for `std::collections::|` this returns `["std", "collections"]`).
 fn path_segments_before(token: &SyntaxToken) -> Vec<String> {
-    let mut segments = Vec::new();
-
-    let before_colons = previous_significant(token);
-    let Some(ref prev) = before_colons else {
-        return segments;
+    // Step past the `::` that the caller already found.
+    let Some(colon) = previous_significant(token) else {
+        return vec![];
     };
-    if !is_path_identifier(prev) {
-        return segments;
-    }
-    segments.push(prev.text().to_string());
-    let mut current = prev.clone();
+    debug_assert_eq!(colon.kind(), SyntaxKind::ColonColon);
 
+    // The segment immediately left of `::` is the last path segment.
+    let Some(mut current) = previous_significant(&colon) else {
+        return vec![];
+    };
+    if !is_path_identifier(&current) {
+        return vec![];
+    }
+    let mut segments = vec![current.text().to_string()];
+
+    // Walk further left over `::segment` pairs.
     loop {
         let sep = previous_significant(&current);
         let Some(sep) = sep else { break };
@@ -1354,6 +1373,9 @@ fn pattern_scrutinee_enum(
 ) -> Option<(Ty, Ty)> {
     let (body, source_map, inference) =
         find_containing_body_data(db, def_map, position, offset)?;
+
+    // 1. if-let: the entire `if` is an expression; check whether the cursor
+    //    falls inside one whose condition is `Condition::Let`.
     for (expr_id, expr) in body.exprs() {
         let scrutinee = match expr {
             crate::hir::Expr::If {
@@ -1376,6 +1398,47 @@ fn pattern_scrutinee_enum(
             }
         }
     }
+
+    // 2. while-let: `While` is a Statement, not an Expr, so it doesn't
+    //    appear in body.exprs(). Walk the blocks to find one whose
+    //    body expression range contains the cursor (the cursor is inside
+    //    the while body), then check whether the enclosing statement is a
+    //    `While` with `Condition::Let`.
+    for (_expr_id, expr) in body.exprs() {
+        let block = match expr {
+            crate::hir::Expr::Block(b) => b,
+            _ => continue,
+        };
+        for stmt in block.statements() {
+            let (scrutinee, body_expr) = match stmt {
+                crate::hir::Statement::While {
+                    condition: crate::hir::Condition::Let { scrutinee, .. },
+                    body,
+                } => (scrutinee, body),
+                _ => continue,
+            };
+            let Some(body_range) = source_map.expr_range(*body_expr) else {
+                continue;
+            };
+            // The pattern sits to the left of the body's opening brace.
+            // Accept any offset from a generous left margin up to the
+            // body start so we cover `while let |` and `while let Some(|`.
+            let left = body_range.range.start().saturating_sub(100);
+            if offset >= left && offset <= body_range.range.start() {
+                let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
+                if let Ty::Named(named) = &scrutinee_ty {
+                    let def = def_map.definition(named.definition())?;
+                    if def.kind() == DefKind::Enum {
+                        let member_index = db.member_index(position.file_id);
+                        let template =
+                            member_index.type_template(def.id())?.clone();
+                        return Some((scrutinee_ty, template));
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
