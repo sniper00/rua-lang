@@ -1,6 +1,6 @@
 # Rua
 
-Rua 是一门采用 Rust 风格语法、编译到可读 Lua 源码的静态类型脚本语言。它保留 `struct`、`enum`、`trait`、泛型、模式匹配、闭包和 iterator，但不实现所有权、借用检查或生命周期。
+Rua 是一门采用 Rust 风格语法、编译到可读 Lua 5.5 源码的静态类型脚本语言。它保留 `struct`、`enum`、`trait`、泛型、模式匹配、闭包和 iterator，但不实现所有权、借用检查或生命周期。
 
 ```bash
 cargo build --release -p ruac -p rua-lsp --features lsp
