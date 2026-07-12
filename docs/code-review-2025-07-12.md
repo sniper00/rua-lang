@@ -550,36 +550,595 @@ pub fn module_for_file(&self, file_id: FileId) -> Option<ModuleId> {
 
 ---
 
-## 八、实施优先级排序
+## 八、重构方案（允许重构级别修改）
 
-按影响 × 成本排序：
-
-| 优先级 | 问题 | 成本 | 影响 |
-|--------|------|------|------|
-| 🔴 P0 | Handler boilerplate → macro（问题 1） | 低 | 消除 30× 重复 |
-| 🔴 P0 | 跨模块重复函数 → canonical 位置（问题 6） | 低 | 消除 4 对重复 |
-| 🔴 P0 | Completion relevance → 结构体（问题 3） | 低 | 可扩展性 |
-| 🔴 P1 | Completion context → AST 推导（问题 5） | 中 | 补全质量 |
-| 🔴 P1 | Hover/goto-def 统一 → 共享 dispatch（问题 30） | 低 | 一致性 |
-| 🟡 P2 | `infer_expr` 拆分（问题 7） | 中 | 可维护性 |
-| 🟡 P2 | "diverges" 模式 → helper（问题 37） | 低 | 可读性 |
-| 🟡 P2 | `def_map` O(n²) → 索引（问题 12） | 中 | 性能 |
-| 🟡 P2 | `unreachable` lint → HIR 级（问题 11） | 高 | 正确性 |
-| 🟡 P2 | `infer_iterator_adapter` → 元数据驱动（问题 8） | 中 | 清理技术债务 |
-| 🟡 P3 | 未使用函数 lint 字符串名 → 决议（问题 10） | 中 | 正确性 |
-| 🟡 P3 | `resolve_path` 4 方法合并（问题 64） | 低 | 可维护性 |
-| 🟢 P4 | 缓存失效 → 细粒度 | 高 | 扩展性 |
-| 🟢 P4 | 测试 fixture `$0` 系统 | 中 | 开发体验 |
-| 🟢 P4 | 清理未使用 enum variants（问题 48） | 低 | 代码卫生 |
-| 🟢 P4 | `invalidate_generics`/`refine_generic_bindings` visitor（问题 39） | 中 | 可维护性 |
-| 🟢 P4 | handler 模式统一（问题 18） | 低 | 一致性 |
+> 以下方案分三个梯队：**最佳回报**（低投入高收益）、**中等回报**（中投入中收益）、**架构级**（高投入长期收益）。每个方案含可落地的代码草案。
 
 ---
 
-## 九、建议的短期行动（2-3 小时，可获取最大回报）
+### 第一梯队：最佳回报重构（低投入，高收益）
 
-1. **LSP handler macro**（~400 行消除）：编写 `lsp_request_handler!` macro，逐 handler 迁移
-2. **去重 4 对跨模块函数**（~50 行消除）：删 semantic/mod.rs 中的重复，导入 completion.rs 版本
-3. **Notification 解析 macro**（~60 行消除）：编写 `extract_notification!` macro
-4. **`register_watchers` 循环提取**（~15 行消除）
-5. **`close_document` 不必要 clone + `handle_completion` 双重查找**（局部优化）
+#### 重构 R1 · LSP Handler Macro — 消除 ~400 行重复
+
+当前每个 handler 复制 15 行相同的 extract/error/send 模板。用两个 macro 覆盖所有场景：
+
+```rust
+// === 位置请求（hover, goto-def, references, prepare-rename 等） ===
+macro_rules! handle_position_request {
+    ($self:ident, $req:ident, $Params:ty, |$pp:ident| $body:expr) => {{
+        let id = $req.id.clone();
+        let (id, params) = match $req.extract::<$Params>(
+            <$Params as lsp_types::request::Request>::METHOD
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid params: {e:?}"),
+                );
+                let _ = $self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
+        let $pp = $self.project_position(
+            &params.text_document_position_params.text_document.uri,
+            params.text_document_position_params.position,
+        );
+        let result = $pp.and_then(|pp| {
+            let analysis = $self.host.analysis();
+            $body(analysis, pp)
+        });
+        let resp = Response::new_ok(id, result);
+        let _ = $self.connection.sender.send(Message::Response(resp));
+    }};
+}
+
+// === 文档请求（completion, inlay-hint, semantic-tokens, folding 等） ===
+macro_rules! handle_doc_request {
+    ($self:ident, $req:ident, $Params:ty, $empty:expr, |$file_id:ident, $analysis:ident| $body:expr) => {{
+        let id = $req.id.clone();
+        let (id, params) = match $req.extract::<$Params>(
+            <$Params as lsp_types::request::Request>::METHOD
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid params: {e:?}"),
+                );
+                let _ = $self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
+        let Some($file_id) = $self.file_id_for_uri(params.uri()) else {
+            let resp = Response::new_ok(id, $empty);
+            let _ = $self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let $analysis = $self.host.analysis();
+        let result = $body;
+        let resp = Response::new_ok(id, result);
+        let _ = $self.connection.sender.send(Message::Response(resp));
+    }};
+}
+```
+
+**迁移示例** — `handle_hover` 从 30 行变为：
+
+```rust
+fn handle_hover(&mut self, req: Request) {
+    handle_position_request!(self, req, lsp_types::HoverParams, |pp| {
+        analysis.hover(pp).map(|hover| to_lsp_hover(&hover))
+    });
+}
+```
+
+`handle_completion` 从 55 行变为：
+
+```rust
+fn handle_completion(&mut self, req: Request) {
+    handle_doc_request!(
+        self, req, lsp_types::CompletionParams,
+        CompletionResponse::Array(Vec::new()),
+        |file_id, analysis| {
+            let source = analysis.parse(file_id).syntax_node().text().to_string();
+            let line_index = LineIndex::new(&source);
+            let pp = self.project_position(uri, pos)?;
+            let native_items = analysis.completions(pp);
+            let items: Vec<_> = native_items
+                .into_iter()
+                .map(|item| completion_to_lsp(&item, &line_index, &source, file_id))
+                .collect();
+            if items.len() > 100 {
+                CompletionResponse::List(CompletionList { is_incomplete: true, items })
+            } else {
+                CompletionResponse::Array(items)
+            }
+        }
+    );
+}
+```
+
+**覆盖范围**: 28 个 handler 可简化为 2-8 行宏调用每个。
+
+---
+
+#### 重构 R2 · CompletionRelevance 结构体 — 替换 14 个 magic number
+
+```rust
+/// 补全相关度评分，参照 rust-analyzer 的 CompletionRelevance。
+/// 各子分数通过 score() 组合，而非硬编码整数。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompletionRelevance {
+    /// 基础类别分数（0-100）
+    pub base: u8,
+    /// 类型精确匹配时的加分
+    pub exact_type_match: bool,
+    /// 类型名匹配时的加分（较弱的信号）
+    pub type_name_match: bool,
+    /// 来自当前模块/作用域
+    pub is_local: bool,
+    /// 来自当前 crate
+    pub is_from_this_crate: bool,
+    /// 是 deprecated 的符号
+    pub is_deprecated: bool,
+}
+
+impl CompletionRelevance {
+    // ── 类别构造器（集中管理所有基准分）──
+
+    pub const fn keyword()          -> Self { Self { base: 50, ..Self::default() } }
+    pub const fn snippet()          -> Self { Self { base: 51, ..Self::default() } }
+    pub const fn builtin_type()     -> Self { Self { base: 40, ..Self::default() } }
+    pub const fn builtin_type_pos() -> Self { Self { base: 90, ..Self::default() } }
+    pub const fn local(usage: u8)   -> Self { Self { base: 95 + usage.min(5), is_local: true, ..Self::default() } }
+    pub const fn self_keyword()     -> Self { Self { base: 96, is_local: true, ..Self::default() } }
+    pub const fn member()           -> Self { Self { base: 90, ..Self::default() } }
+    pub const fn same_module()      -> Self { Self { base: 85, is_from_this_crate: true, ..Self::default() } }
+    pub const fn cross_module()     -> Self { Self { base: 75, ..Self::default() } }
+    pub const fn postfix()          -> Self { Self { base: 85, ..Self::default() } }
+    pub const fn match_variant()    -> Self { Self { base: 93, ..Self::default() } }
+    pub const fn iflet_variant()    -> Self { Self { base: 94, ..Self::default() } }
+    pub const fn path_member()      -> Self { Self { base: 80, ..Self::default() } }
+    pub const fn path_variant()     -> Self { Self { base: 85, ..Self::default() } }
+    pub const fn builtin_const()    -> Self { Self { base: 35, ..Self::default() } }
+    pub const fn builtin_macro()    -> Self { Self { base: 20, ..Self::default() } }
+    pub const fn arithmetic_num()   -> Self { Self { base: 88, ..Self::default() } }
+
+    /// 链式修饰：如果期望类型匹配，提升相关度
+    pub fn with_exact_type_match(mut self, matches: bool) -> Self {
+        self.exact_type_match = matches;
+        self
+    }
+
+    pub fn with_type_name_match(mut self, matches: bool) -> Self {
+        self.type_name_match = matches;
+        self
+    }
+
+    pub fn with_deprecated(mut self, deprecated: bool) -> Self {
+        self.is_deprecated = deprecated;
+        self
+    }
+
+    /// 解析为可比较的分数值
+    pub fn score(&self) -> u16 {
+        let mut s = self.base as u16;
+        if self.exact_type_match   { s += 10; }
+        if self.type_name_match    { s += 5;  }
+        if self.is_local           { s += 2;  }
+        if self.is_from_this_crate { s += 3;  }
+        if self.is_deprecated      { s = s.saturating_sub(20); }
+        s
+    }
+}
+```
+
+**迁移**: 在 `scope_completions()` 中搜索 `relevance: 50` 替换为 `relevance: CompletionRelevance::keyword()`，全部 14 个分数集中到构造器。`CompletionItem.relevance` 字段类型从 `u16` 改为 `CompletionRelevance`。
+
+---
+
+#### 重构 R3 · 去重 4 对跨模块函数 — 选 canonical 位置
+
+```rust
+// completion.rs 中保留（已经是 pub(crate)）
+pub(crate) fn previous_significant(token: &SyntaxToken) -> Option<SyntaxToken> { ... }
+pub(crate) fn is_path_identifier(kind: SyntaxKind) -> bool { ... }
+pub(crate) fn module_at_position(db: &dyn BaseDb, def_map: &DefMap, file_id: FileId, offset: usize) -> Option<ModuleId> { ... }
+
+// semantic/mod.rs 中删除重复实现，改为 re-export
+use crate::ide::completion::{previous_significant, is_path_identifier, module_at_position};
+```
+
+---
+
+#### 重构 R4 · CompletionContext 结构体 — 替代 token-based 检测
+
+```rust
+/// 一次性在入口处构建的补全上下文，后续传给各 complete_* 函数。
+/// 参照 rust-analyzer 的 CompletionContext。
+pub(crate) struct CompletionContext<'a> {
+    pub db: &'a dyn BaseDb,
+    pub position: ProjectPosition,
+    pub file_id: FileId,
+    pub offset: usize,
+    pub def_map: &'a DefMap,
+    pub token: SyntaxToken,
+
+    // ── 从 AST 推导的上下文标记（替代 token 检测）──
+    pub in_type_position: bool,
+    pub in_expression_position: bool,
+    pub in_pattern_position: bool,
+    pub in_method_body: bool,
+    pub in_impl_block: bool,
+    pub in_loop: bool,
+
+    // ── 从 inference 推导 ──
+    pub expected_type: Option<Ty>,
+    pub self_receiver_ty: Option<Ty>,
+}
+
+impl<'a> CompletionContext<'a> {
+    /// 从光标位置一次性构建上下文。
+    /// 从光标 AST 节点向上遍历确定 enclosing 上下文，而非 token 检测。
+    pub fn new(db: &'a dyn BaseDb, position: ProjectPosition) -> Option<Self> {
+        let parse = db.parse(position.position.file_id);
+        let root = parse.syntax_node();
+        let offset = position.position.offset as u32;
+        let token = token_at_offset(&root, offset)?;
+
+        let mut in_type_position = false;
+        let mut in_expression_position = false;
+        let mut in_pattern_position = false;
+        let mut in_method_body = false;
+        let mut in_impl_block = false;
+        let mut in_loop = false;
+
+        // 从 token 向上遍历 AST，确定上下文
+        let mut node = token.parent();
+        while let Some(current) = node {
+            match current.kind() {
+                SyntaxKind::TypeClause   => in_type_position = true,
+                SyntaxKind::ParamList    => in_type_position = true,  // fn foo(x: |)
+                SyntaxKind::FieldDecl    => in_type_position = true,  // struct S { f: | }
+                SyntaxKind::FnBody | SyntaxKind::BlockExpr => in_expression_position = true,
+                SyntaxKind::LetPat       => in_pattern_position = true,
+                SyntaxKind::MatchArmPat  => in_pattern_position = true,
+                SyntaxKind::FnDecl       => { /* 检查是否是方法 */ }
+                SyntaxKind::ImplBlock    => in_impl_block = true,
+                SyntaxKind::WhileExpr |
+                SyntaxKind::LoopExpr  |
+                SyntaxKind::ForExpr      => in_loop = true,
+                _ => {}
+            }
+            node = current.parent();
+        }
+
+        // 获取期望类型（如果光标在表达式位置）
+        let expected_type = if in_expression_position {
+            expected_type_at_cursor(db, position)
+        } else {
+            None
+        };
+
+        Some(CompletionContext {
+            db, position,
+            file_id: position.position.file_id,
+            offset: offset as usize,
+            def_map: db.def_map(position.position.file_id),
+            token,
+            in_type_position,
+            in_expression_position,
+            in_pattern_position,
+            in_method_body,
+            in_impl_block,
+            in_loop,
+            expected_type,
+            self_receiver_ty: None, // 从 innermost_body_owner 推导
+        })
+    }
+}
+```
+
+**迁移**: `scope_completions()` / `member_completions()` / `path_completions()` 的签名从 5+ 个参数改为接收 `&CompletionContext`。`is_type_position()` 和 `is_expression_context()` 可删除。
+
+---
+
+### 第二梯队：中等回报重构（中投入，中收益）
+
+#### 重构 R5 · 拆分 `scope_completions()` — 310 行 → 独立 `complete_*` 函数
+
+```rust
+/// 补全函数的统一签名
+type CompleteFn = fn(&CompletionContext, &mut Vec<CompletionItem>, &mut HashSet<String>);
+
+/// 注册所有补全类别（参照 rust-analyzer 的 completions 数组）
+const COMPLETIONS: &[CompleteFn] = &[
+    complete_keywords,
+    complete_snippets,
+    complete_locals,
+    complete_module_items,
+    complete_cross_module_items,
+    complete_builtin_types,
+    complete_builtin_constructors,
+    complete_builtin_macros,
+];
+
+fn scope_completions(ctx: &CompletionContext) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+
+    // 上下文相关的专项补全
+    if let Some(enum_ty) = match_scrutinee_enum(ctx) {
+        complete_match_variants(ctx, &enum_ty, &mut items, &mut seen);
+    }
+    if let Some(struct_ty) = struct_literal_type(ctx) {
+        complete_struct_fields(ctx, &struct_ty, &mut items, &mut seen);
+    }
+    if let Some(enum_ty) = pattern_scrutinee_enum(ctx) {
+        complete_iflet_variants(ctx, &enum_ty, &mut items, &mut seen);
+    }
+
+    // 通用补全（批量调用）
+    for complete_fn in COMPLETIONS {
+        complete_fn(ctx, &mut items, &mut seen);
+    }
+
+    // 后处理
+    apply_type_compatibility_boost(&mut items, ctx);
+    apply_replacement_ranges(&mut items, ctx);
+    CompletionItem::normalize(items)
+}
+```
+
+**收益**: 每种补全类型可独立测试，新增补全类别只需写一个函数 + 注册到数组。
+
+---
+
+#### 重构 R6 · `infer_expr` 拆分 — 162 行 → arm 提取
+
+```rust
+impl InferenceContext {
+    fn infer_expr(&mut self, expr_id: ExprId, expected: Option<&Ty>) -> Ty {
+        match &self.body.expr(expr_id) {
+            // 已委托的 arms
+            Expr::Block(body)            => self.infer_block(*body, expected),
+            Expr::Match(scrutinee, arms) => self.infer_match(expr_id, *scrutinee, arms, expected),
+            Expr::Call(call)             => self.infer_call(expr_id, call, expected),
+            Expr::MethodCall(call)       => self.infer_method_call(expr_id, call, expected),
+            Expr::Closure(closure)       => self.infer_closure(expr_id, closure, expected),
+            Expr::StructLiteral(lit)     => self.infer_struct_literal(expr_id, lit, expected),
+            Expr::MacroCall(mac)         => self.infer_macro(expr_id, mac, expected),
+            Expr::Unary(op, inner)       => self.infer_unary(expr_id, *op, *inner),
+            Expr::Binary(lhs, op, rhs)   => self.infer_binary(expr_id, *lhs, *op, *rhs),
+
+            // 新提取的 methods
+            Expr::If(cond, then_b, else_b) => self.infer_if_expr(expr_id, *cond, *then_b, else_b.as_ref(), expected),
+            Expr::Assign(target, value)    => self.infer_assign_expr(expr_id, *target, *value),
+            Expr::Range(start, end)        => self.infer_range_expr(expr_id, *start, *end, expected),
+            Expr::Try(inner)               => self.infer_try_expr(expr_id, *inner, expected),
+            Expr::Index(base, index)       => self.infer_index_expr(expr_id, *base, *index, expected),
+            Expr::Path(path)               => self.infer_path(expr_id, path, expected),
+            Expr::Literal(lit)             => self.infer_literal(lit),
+            // ... rest
+        }
+    }
+
+    fn infer_if_expr(
+        &mut self, expr_id: ExprId, cond: ExprId,
+        then_b: ExprId, else_b: Option<&ExprId>, expected: Option<&Ty>,
+    ) -> Ty {
+        // 40 行从原 infer_expr 的 If arm 移入
+        // ...
+    }
+}
+```
+
+---
+
+#### 重构 R7 · "diverges" 模式统一 — 15+ 处 → 1 个 helper
+
+```rust
+/// 如果表达式分支发散（返回 Never），则整个表达式类型为 Never。
+/// 否则返回实际类型。
+fn diverge_or(diverges: bool, ty: Ty) -> Ty {
+    if diverges { Ty::Never } else { ty }
+}
+
+// 迁移前：
+let diverges = /* check */;
+if diverges { Ty::Never } else { actual_ty }
+
+// 迁移后：
+diverge_or(diverges, actual_ty)
+```
+
+---
+
+#### 重构 R8 · `resolve_path` 4 方法合并 — 4 → 1
+
+```rust
+#[derive(Clone, Copy)]
+pub enum ResolveStrategy {
+    /// 返回第一个匹配（用于 hover）
+    First,
+    /// 要求唯一匹配（用于 goto-def）
+    Unique,
+    /// 词法作用域查找（用于 completion scope）
+    Lexical,
+    /// 词法作用域 + 唯一匹配
+    LexicalUnique,
+}
+
+impl DefMap {
+    pub fn resolve_path(
+        &self,
+        module_id: ModuleId,
+        segments: &[String],
+        strategy: ResolveStrategy,
+    ) -> Option<PathResolution> {
+        // 合并原 resolve_path / resolve_path_unique /
+        //     resolve_path_lexical / resolve_path_lexical_unique 的公共逻辑
+        // strategy.unique → 调用 resolve_name vs resolve_name_unique
+        // strategy.lexical → 决定遍历逻辑
+        // ...
+    }
+}
+```
+
+---
+
+### 第三梯队：架构级重构（高投入，长期收益）
+
+#### 重构 R9 · LSP Server 模块拆分
+
+当前 `lsp.rs` 4,319 行。参照 rust-analyzer 的 `handlers/` 目录：
+
+```
+crates/rua-lsp/src/
+├── lsp.rs              # ~200 行: Server struct, main_loop, file identity
+├── handlers/
+│   ├── mod.rs          # handle_request dispatch
+│   ├── hover.rs        # handle_hover, handle_definition, handle_goto_implementation
+│   ├── completion.rs   # handle_completion, handle_resolve_completion
+│   ├── signature.rs    # handle_signature_help
+│   ├── inlay_hint.rs   # handle_inlay_hint
+│   ├── code_action.rs  # handle_code_action, handle_execute_command
+│   ├── symbol.rs       # handle_document_symbol, handle_workspace_symbol
+│   ├── reference.rs    # handle_references, handle_rename, handle_prepare_rename
+│   ├── highlight.rs    # handle_document_highlight
+│   ├── semantic.rs     # handle_semantic_tokens(_range)
+│   ├── folding.rs      # handle_folding_range, handle_selection_range
+│   ├── link.rs         # handle_document_link
+│   ├── hierarchy.rs    # handle_call_hierarchy_*, handle_type_hierarchy_*
+│   ├── formatting.rs   # handle_formatting, handle_range_formatting, handle_on_type_formatting
+│   └── lens.rs         # handle_code_lens
+├── notification.rs     # handle_notification + 6 notification 类型
+├── convert.rs          # LSP ↔ analysis 类型转换
+└── config.rs           # library config, watchers, file discovery
+```
+
+**收益**: 每个 handler 独立测试，新人可快速定位代码，模块职责清晰。
+
+---
+
+#### 重构 R10 · 缓存失效粒度
+
+当前修改任何一个文件清除所有 `def_map` + `member_index`。概念方案：
+
+```rust
+/// 为每个 def_map entry 记录它依赖的文件
+struct DefMapDeps {
+    /// def_id → 定义所在的 file_id
+    definition_files: HashMap<DefId, FileId>,
+    /// file_id → 哪些 DefId 的定义写在这个文件中
+    file_to_defs: HashMap<FileId, Vec<DefId>>,
+}
+
+impl BaseDb {
+    fn invalidate_file(&mut self, file_id: FileId) {
+        self.parse_cache.remove(&file_id);
+        self.item_tree_cache.remove(&file_id);
+
+        // 精确失效：只移除这个文件产生的 def，其他文件的 def 保留
+        if let Some(defs) = self.def_map_deps.file_to_defs.get(&file_id) {
+            for def_id in defs {
+                self.def_map_cache.remove(def_id);
+            }
+        }
+        // member_index: 只失效引用这些 def 的 member 缓存
+    }
+}
+```
+
+**适用时机**: 当项目有 20+ 文件时再来做。
+
+---
+
+#### 重构 R11 · 测试 Fixture 系统
+
+```rust
+/// 参照 rust-analyzer 的 fixture 标记。
+/// `$0` 标记光标位置，取代手动计算 column 偏移量。
+#[test]
+fn hover_shows_type() {
+    check_hover(
+        r#"
+        fn main() {
+            let x$0 = 42;
+        }
+        "#,
+        "let x: i64",
+    );
+}
+
+#[test]
+fn completion_after_dot() {
+    check_completion(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn main() {
+            let p = Point { x: 1, y: 2 };
+            p.$0
+        }
+        "#,
+        &["x: i64", "y: i64"],
+    );
+}
+
+// fixture 解析器（~100 行）
+fn parse_fixture(source: &str) -> (String, Vec<FixturePosition>) {
+    // 解析 $0（光标）, $1, $2...（选区）等标记
+    // 返回纯净源码 + 位置映射
+}
+```
+
+---
+
+#### 重构 R12 · Notification 解析 macro
+
+```rust
+macro_rules! extract_notification {
+    ($not:expr, $T:ty, $label:literal, |$params:ident| $body:expr) => {{
+        match serde_json::from_value::<$T>($not.params) {
+            Ok($params) => $body,
+            Err(e) => {
+                eprintln!("rua-lsp: bad {} params: {e}", $label);
+                return;
+            }
+        }
+    }};
+}
+
+// 使用：
+DidOpenTextDocument::METHOD => {
+    extract_notification!(not, lsp_types::DidOpenTextDocumentParams, "didOpen", |p| {
+        self.open_document(p.text_document.uri, p.text_document.text);
+    });
+}
+```
+
+**消除**: 6 个 notification arm 各 7 行重复 → 各 3 行。
+
+---
+
+## 九、重构执行路线图
+
+| 阶段 | 重构项 | 预计工时 | 风险 | 收益 |
+|------|--------|---------|------|------|
+| **第1周** | R1 Handler macro | 3h | 低 | 消除 400 行重复 |
+| **第1周** | R3 跨模块函数去重 | 0.5h | 低 | 消除 4 对重复 |
+| **第1周** | R2 Relevance 结构体 | 2h | 低 | 可扩展性 |
+| **第1周** | R7 "diverges" helper | 0.5h | 低 | 可读性 |
+| **第1周** | R12 Notification macro | 0.5h | 低 | 消除 60 行重复 |
+| **第2周** | R4 CompletionContext 结构体 | 4h | 中 | 补全质量 |
+| **第2周** | R5 `scope_completions` 拆分 | 3h | 中 | 可测试性 |
+| **第3周** | R6 `infer_expr` 拆分 | 2h | 低 | 可维护性 |
+| **第3周** | R8 `resolve_path` 合并 | 1h | 低 | DRY |
+| **第4周+** | R9 LSP 模块拆分 | 6h | 中 | 长期架构 |
+| **以后** | R10 缓存细粒度 | 8h | 高 | 扩展性 |
+| **以后** | R11 Fixture 系统 | 4h | 中 | 测试体验 |
+
+**第1周五项可在一个工作日内完成**，净减少 ~500 行重复代码，同时建立可扩展的 completion relevance 体系。建议先做 R1（最直观的收益）和 R2（消除 magic number），再做 R4（改动较多但影响最大）。

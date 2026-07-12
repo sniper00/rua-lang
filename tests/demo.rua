@@ -199,8 +199,6 @@ fn main() {
     p.translate(1, 2);
     p.label;
 
-    p.
-
 
 
     let c = Color::Rgb(255, 128, 0);

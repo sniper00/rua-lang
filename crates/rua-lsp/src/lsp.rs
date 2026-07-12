@@ -4329,14 +4329,85 @@ mod tests {
     }
 
     #[test]
-    fn label_details_set_for_item() {
-        let item = rua_analysis::CompletionItem::new("greet", rua_analysis::CompletionKind::Function)
-            .with_detail("fn greet(name: String) -> String");
+    fn label_details_type_like_kinds_have_colon_prefix() {
+        // Fields, variables, variants etc. get ": " prefix for visual separation.
+        for kind in [
+            rua_analysis::CompletionKind::Field,
+            rua_analysis::CompletionKind::Variable,
+            rua_analysis::CompletionKind::Parameter,
+            rua_analysis::CompletionKind::Variant,
+        ] {
+            let item =
+                rua_analysis::CompletionItem::new("x", kind).with_detail("i64");
+            let li = empty_line_index();
+            let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
+            let ld = lsp
+                .label_details
+                .as_ref()
+                .expect("label_details should be set");
+            assert_eq!(
+                ld.detail,
+                Some(": i64".to_string()),
+                "kind={kind:?}: detail should have ': ' prefix"
+            );
+        }
+    }
 
+    #[test]
+    fn label_details_signature_kinds_have_space_prefix() {
+        // Methods, functions, keywords get " " prefix for visual separation.
+        for kind in [
+            rua_analysis::CompletionKind::Function,
+            rua_analysis::CompletionKind::Method,
+            rua_analysis::CompletionKind::Keyword,
+            rua_analysis::CompletionKind::Macro,
+        ] {
+            let item = rua_analysis::CompletionItem::new("greet", kind)
+                .with_detail("fn greet(name: String) -> String");
+            let li = empty_line_index();
+            let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
+            let ld = lsp
+                .label_details
+                .as_ref()
+                .expect("label_details should be set");
+            assert_eq!(
+                ld.detail,
+                Some(" fn greet(name: String) -> String".to_string()),
+                "kind={kind:?}: detail should have ' ' prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn label_details_top_level_detail_is_none() {
+        // label_details.detail supersedes the top-level detail field.
+        let item = rua_analysis::CompletionItem::new("x", rua_analysis::CompletionKind::Field)
+            .with_detail("i64");
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
-        let ld = lsp.label_details.as_ref().expect("label_details should be set");
-        assert_eq!(ld.detail, Some("fn greet(name: String) -> String".to_string()));
-        assert_eq!(ld.description, Some("fn".to_string()));
+        assert!(
+            lsp.detail.is_none(),
+            "top-level detail should be None when label_details is present"
+        );
+    }
+
+    #[test]
+    fn label_details_postfix_template_has_space_prefix() {
+        // Postfix completions (.if, .match, etc.) use Keyword kind.
+        let item = rua_analysis::CompletionItem::new(".if", rua_analysis::CompletionKind::Keyword)
+            .with_detail("if expr { … }");
+        let li = empty_line_index();
+        let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
+        let ld = lsp
+            .label_details
+            .as_ref()
+            .expect("label_details should be set");
+        assert_eq!(
+            ld.detail,
+            Some(" if expr { … }".to_string()),
+            "postfix detail should have ' ' prefix, got {:?}",
+            ld.detail
+        );
+        assert_eq!(ld.description, Some("keyword".to_string()));
     }
 }
