@@ -9,8 +9,8 @@ use crate::{
     BaseDb,
     base::TextRange,
     hir::{
-        Body, BodyScopes, BodySourceMap, DefKind, DefMap, Definition, ExprId, InferenceResult,
-        ModuleId, ScopeKind, Ty,
+        Body, BodyScopes, BodySourceMap, DefKind, DefMap, Definition, Expr, ExprId,
+        InferenceResult, ModuleId, ScopeKind, Ty,
     },
     vfs::FileId,
 };
@@ -41,19 +41,60 @@ pub(crate) fn completions(
 
     // Member access: cursor right after `.` (token IS the dot) or after `.x`
     let after_dot = token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
-        || token.as_ref().and_then(|t| previous_significant(t)).is_some_and(|t| t.kind() == SyntaxKind::Dot);
-    if after_dot {
-        return member_completions(db, position, token.as_ref(), offset);
+        || token.as_ref().and_then(previous_significant).is_some_and(|t| t.kind() == SyntaxKind::Dot);
+    let mut items = if after_dot {
+        member_completions(db, position, token.as_ref(), offset)
+    } else if let Some(ref tok) = token
+        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon)
+    {
+        path_completions(db, position, tok, partial_range)
+    } else {
+        scope_completions(db, position, offset, partial_range, token.as_ref())
+    };
+
+    // Filter by the typed prefix so the client only sees relevant matches.
+    // Only filter when the prefix contains at least one letter or underscore
+    // (pure-digit prefixes like `42` shouldn't filter out everything).
+    if !partial_range.is_empty() {
+        let start = partial_range.start() as usize;
+        let end = partial_range.end() as usize;
+        if start <= end && end <= text.len() {
+            let prefix = &text[start..end];
+            // Skip filtering if prefix is purely numeric (e.g. cursor at `42`).
+            let is_pure_numeric = !prefix.is_empty()
+                && prefix.bytes().all(|b| b.is_ascii_digit());
+            if !is_pure_numeric {
+                let prefix_lower = prefix.to_lowercase();
+                items.retain(|item| {
+                    let label_lower = item.label().to_lowercase();
+                    let matches = is_subsequence(&prefix_lower, &label_lower);
+                    matches
+                        || item.lookup().is_some_and(|l| {
+                            is_subsequence(&prefix_lower, &l.to_lowercase())
+                        })
+                });
+            }
+        }
     }
 
-    // Path context: cursor is after `::`
-    if let Some(ref tok) = token
-        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon) {
-            return path_completions(db, position, tok, partial_range);
-        }
+    items
+}
 
-    // Default: scope completion
-    scope_completions(db, position, offset, partial_range)
+/// Check if `prefix` chars appear in order within `target` (case-insensitive
+/// ASCII subsequence match). Used for fuzzy completion filtering.
+fn is_subsequence(prefix: &str, target: &str) -> bool {
+    let mut target_bytes = target.as_bytes().iter();
+    for &pb in prefix.as_bytes() {
+        let pb_lower = pb.to_ascii_lowercase();
+        loop {
+            match target_bytes.next() {
+                Some(&tb) if tb.to_ascii_lowercase() == pb_lower => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 /// Walk backwards from `offset` to find the start of a partial identifier.
@@ -85,6 +126,38 @@ const RUA_KEYWORDS: &[&str] = &[
     "return", "break", "continue", "match", "struct", "enum", "trait",
     "impl", "mod", "pub", "use", "as", "extern", "where", "type",
     "move", "self", "true", "false",
+];
+
+/// Keyword → snippet template for statement-level keywords that generate
+/// common code patterns.
+fn keyword_snippet(kw: &str) -> Option<&'static str> {
+    match kw {
+        "for" => Some("for ${1:item} in ${2:iter} {\n    $0\n}"),
+        "match" => Some("match ${1:expr} {\n    $0\n}"),
+        "if" => Some("if ${1:cond} {\n    $0\n}"),
+        "while" => Some("while ${1:cond} {\n    $0\n}"),
+        "loop" => Some("loop {\n    $0\n}"),
+        "fn" => Some("fn ${1:name}(${2:params}) -> ${3:Ret} {\n    $0\n}"),
+        "struct" => Some("struct ${1:Name} {\n    ${2:fields}\n}"),
+        "enum" => Some("enum ${1:Name} {\n    ${2:variants}\n}"),
+        "impl" => Some("impl ${1:Type} {\n    $0\n}"),
+        "mod" => Some("mod ${1:name} {\n    $0\n}"),
+        "trait" => Some("trait ${1:Name} {\n    $0\n}"),
+        "let" => Some("let ${1:name} = ${2:expr};"),
+        _ => None,
+    }
+}
+
+/// Additional snippet-only completions for patterns not in RUA_KEYWORDS.
+const SNIPPET_PATTERNS: &[(&str, &str)] = &[
+    ("if let", "if let ${1:pattern} = ${2:expr} {\n    $0\n}"),
+    ("while let", "while let ${1:pattern} = ${2:expr} {\n    $0\n}"),
+];
+
+/// Keywords that only make sense at the start of a statement/item, not in
+/// expression position (e.g. after `=`, `return`, `(`).
+const DECLARATION_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "impl", "mod", "pub", "extern", "use", "type",
 ];
 
 const BUILTIN_TYPES: &[&str] = &[
@@ -120,43 +193,209 @@ fn scope_completions(
     position: FilePosition,
     offset: u32,
     partial_range: TextRange,
+    token: Option<&SyntaxToken>,
 ) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
-    // 1. Keywords
-    for kw in RUA_KEYWORDS {
-        if seen.insert(kw.to_string()) {
-            items.push(
-                CompletionItem::new(*kw, CompletionKind::Keyword)
-                    .with_detail(format!("keyword {kw}"))
-                    .with_relevance(100),
-            );
-        }
-    }
+    let in_expr_context = token.is_some_and(is_expression_context);
+    let in_type_pos = token.is_some_and(is_type_position);
 
-    // 2. Locals in scope
+    // 0. Match context — offer enum variants when inside a match expression.
     let def_map = db.def_map(position.file_id);
-    for local in visible_locals(db, &def_map, position, offset) {
-        if seen.insert(local.name.clone()) {
+    let in_method = innermost_body_owner(&def_map, position, offset)
+        .is_some_and(|d| d.kind() == DefKind::Method);
+    if let Some((_enum_ty, enum_template)) =
+        match_scrutinee_enum(db, &def_map, position, offset)
+    {
+        for candidate in db
+            .member_index(position.file_id)
+            .associated_candidates(&enum_template)
+        {
+            if seen.insert(candidate.name().to_string()) {
+                let name = candidate.name().to_string();
+                let detail = candidate.ty().to_string();
+                // Build a snippet with placeholders for tuple variants.
+                let insert = CompletionInsert::Call {
+                    callee: name.clone(),
+                    params: vec![], // variant constructors don't have named params
+                };
+                items.push(
+                    CompletionItem::new(name, CompletionKind::Variant)
+                        .with_detail(detail)
+                        .with_insert(insert)
+                        .with_relevance(93), // highest — above locals
+                );
+            }
+        }
+    }
+
+    // 0b. Struct literal context — offer field names when inside `Type { | }`.
+    if let Some(struct_ty) = struct_literal_type(db, &def_map, position, offset) {
+        for candidate in db
+            .member_index(position.file_id)
+            .field_candidates(&struct_ty)
+        {
+            if seen.insert(candidate.name().to_string()) {
+                let n = candidate.name().to_string();
+                let ty = candidate.ty().to_string();
+                items.push(
+                    CompletionItem::new(n.clone(), CompletionKind::Field)
+                        .with_detail(format!("{n}: {ty}"))
+                        .with_relevance(93),
+                );
+            }
+        }
+    }
+
+    // 0c. if-let / while-let pattern position — offer enum variants.
+    if let Some((_ty, template)) = pattern_scrutinee_enum(db, &def_map, position, offset) {
+        for candidate in db.member_index(position.file_id).associated_candidates(&template) {
+            if seen.insert(candidate.name().to_string()) {
+                let name = candidate.name().to_string();
+                items.push(
+                    CompletionItem::new(name, CompletionKind::Variant)
+                        .with_detail(candidate.ty().to_string())
+                        .with_relevance(94), // above match scrutinee variants
+                );
+            }
+        }
+    }
+
+    // 1. Keywords — suppress declaration keywords in expression context;
+    //    in type positions, suppress all keywords. Use snippet templates
+    //    for statement-level keywords.
+    for kw in RUA_KEYWORDS {
+        if in_type_pos {
+            continue;
+        }
+        if in_expr_context && DECLARATION_KEYWORDS.contains(kw) {
+            continue;
+        }
+        if seen.insert(kw.to_string()) {
+            let mut item =
+                CompletionItem::new(*kw, CompletionKind::Keyword)
+                    .with_relevance(50);
+            if let Some(snippet) = keyword_snippet(kw) {
+                item = item
+                    .with_detail(format!("{kw} … (snippet)"))
+                    .with_insert(CompletionInsert::Snippet(snippet.to_string()));
+            } else {
+                item = item.with_detail(format!("keyword {kw}"));
+            }
+            // Boost `self` inside method bodies.
+            if *kw == "self" && in_method {
+                item = item.with_relevance(96); // above locals
+            }
+            items.push(item);
+        }
+    }
+
+    // 1b. Additional snippet patterns (if-let, while-let).
+    for (label, snippet) in SNIPPET_PATTERNS {
+        if seen.insert(label.to_string()) {
             items.push(
-                CompletionItem::new(local.name.clone(), CompletionKind::Variable)
-                    .with_detail(local.ty)
-                    .with_relevance(90),
+                CompletionItem::new(*label, CompletionKind::Keyword)
+                    .with_detail(format!("{label} … (snippet)"))
+                    .with_insert(CompletionInsert::Snippet(snippet.to_string()))
+                    .with_relevance(51),
             );
         }
     }
 
-    // 3. Module-level definitions
+    // 2. Locals in scope — skip in type position. Boost frequently-used locals.
+    if !in_type_pos {
+        let usage_counts = local_usage_counts(db, &def_map, position, offset);
+        for local in visible_locals(db, &def_map, position, offset) {
+            if seen.insert(local.name.clone()) {
+                let extra = usage_counts
+                    .get(&local.name)
+                    .map(|c| (*c).min(5))
+                    .unwrap_or(0);
+                items.push(
+                    CompletionItem::new(local.name.clone(), CompletionKind::Variable)
+                        .with_detail(local.ty)
+                        .with_relevance(95 + extra as u16),
+                );
+            }
+        }
+    }
+
+    // 3. Module-level definitions — in type position, only include types.
     if let Some(module_id) = module_at_position(&def_map, position.file_id, offset) {
         for definition in def_map.definitions() {
             if definition.module_id() != module_id {
                 continue;
             }
+            // Fields and variants are not bare names in scope.
+            if matches!(definition.kind(), DefKind::Field | DefKind::Variant) {
+                continue;
+            }
+            // In type position, only struct/enum/trait/type alias.
+            if in_type_pos
+                && !matches!(
+                    definition.kind(),
+                    DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
+                )
+            {
+                continue;
+            }
             if seen.insert(definition.name().to_string()) {
                 let kind = def_kind_to_completion_kind(definition.kind());
                 let mut item =
-                    CompletionItem::new(definition.name(), kind).with_relevance(80);
+                    CompletionItem::new(definition.name(), kind).with_relevance(85);
+                if let Some(sig) = definition_signature(db, &def_map, definition) {
+                    item = item.with_detail(sig);
+                }
+                if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
+                    item = item.with_documentation(doc);
+                }
+                items.push(item);
+            }
+        }
+    }
+
+    // 3b. Cross-module pub symbols (auto-import candidates).
+    if let Some(current_module) =
+        module_at_position(&def_map, position.file_id, offset)
+    {
+        for definition in def_map.definitions() {
+            if definition.module_id() == current_module {
+                continue; // already shown
+            }
+            if !matches!(
+                definition.visibility(),
+                crate::hir::Visibility::Public
+            ) {
+                continue;
+            }
+            if !matches!(
+                definition.kind(),
+                DefKind::Function
+                    | DefKind::Struct
+                    | DefKind::Enum
+                    | DefKind::Trait
+                    | DefKind::TypeAlias
+                    | DefKind::Module
+            ) {
+                continue;
+            }
+            if seen.insert(definition.name().to_string()) {
+                let module = def_map.module(definition.module_id());
+                let module_path = module
+                    .and_then(|m| m.name())
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let import_path =
+                    format!("use {module_path}::{};", definition.name());
+                let kind = def_kind_to_completion_kind(definition.kind());
+                let mut item = CompletionItem::new(definition.name(), kind)
+                    .with_detail(format!(
+                        "{} (from {module_path})",
+                        definition.name()
+                    ))
+                    .with_import_path(import_path)
+                    .with_relevance(75);
                 if let Some(sig) = definition_signature(db, &def_map, definition) {
                     item = item.with_detail(sig);
                 }
@@ -165,41 +404,85 @@ fn scope_completions(
         }
     }
 
-    // 4. Built-in types
+    // 4. Built-in types — boost numeric types in arithmetic context.
+    let in_arithmetic = token.is_some_and(|t| {
+        previous_significant(t)
+            .is_some_and(|prev| {
+                matches!(
+                    prev.kind(),
+                    SyntaxKind::Plus
+                        | SyntaxKind::Minus
+                        | SyntaxKind::Star
+                        | SyntaxKind::Slash
+                )
+            })
+    });
+    let numeric_types: &[&str] = &["i64", "f64"];
     for ty in BUILTIN_TYPES {
         if seen.insert(ty.to_string()) {
+            let relevance = if in_arithmetic && numeric_types.contains(ty) {
+                88 // just below locals
+            } else if in_type_pos {
+                90
+            } else {
+                40
+            };
             items.push(
                 CompletionItem::new(*ty, CompletionKind::BuiltinType)
                     .with_detail(format!("{ty}  (built-in type)"))
-                    .with_relevance(70),
+                    .with_relevance(relevance),
             );
         }
     }
 
-    // 5. Built-in constructors
-    for (name, detail) in BUILTIN_VALUES {
-        if seen.insert(name.to_string()) {
-            items.push(
-                CompletionItem::new(*name, CompletionKind::Variant)
-                    .with_detail(*detail)
-                    .with_relevance(70),
-            );
+    // 5. Built-in constructors — skip in type position.
+    if !in_type_pos {
+        for (name, detail) in BUILTIN_VALUES {
+            if seen.insert(name.to_string()) {
+                items.push(
+                    CompletionItem::new(*name, CompletionKind::Variant)
+                        .with_detail(*detail)
+                        .with_relevance(35),
+                );
+            }
         }
     }
 
-    // 6. Built-in macros
-    for (name, delimiter) in BUILTIN_MACROS {
-        if seen.insert(name.to_string()) {
-            let label = format!("{name}!");
-            items.push(
-                CompletionItem::new(label, CompletionKind::Macro)
-                    .with_detail(format!("{name}!(...)  (built-in macro)"))
-                    .with_insert(CompletionInsert::MacroCall {
-                        name: name.to_string(),
-                        delimiter: *delimiter,
-                    })
-                    .with_relevance(60),
-            );
+    // 6. Built-in macros — skip in type position.
+    if !in_type_pos {
+        for (name, delimiter) in BUILTIN_MACROS {
+            if seen.insert(name.to_string()) {
+                let label = format!("{name}!");
+                items.push(
+                    CompletionItem::new(label, CompletionKind::Macro)
+                        .with_detail(format!("{name}!(...)  (built-in macro)"))
+                        .with_lookup(name.to_string())
+                        .with_insert(CompletionInsert::MacroCall {
+                            name: name.to_string(),
+                            delimiter: *delimiter,
+                        })
+                        .with_relevance(20),
+                );
+            }
+        }
+    }
+
+    // Boost items whose type matches the expected type at the cursor.
+    if let Some(expected) = expected_type_at_cursor(db, &def_map, position, offset) {
+        let expected_str = expected.to_string();
+        for item in &mut items {
+            if let Some(detail) = item.detail() {
+                let boost = type_compatibility_score(
+                    detail,
+                    &expected_str,
+                    &expected,
+                );
+                if boost > 0 {
+                    *item = item
+                        .clone()
+                        .with_relevance(item.relevance() + boost);
+                }
+            }
         }
     }
 
@@ -233,6 +516,10 @@ fn member_completions(
         return Vec::new();
     };
 
+    // Get the receiver expression text for postfix template generation.
+    let receiver_text = receiver_expr_text(db, &def_map, position, offset)
+        .unwrap_or_else(|| "_".to_string());
+
     let member_index = db.member_index(position.file_id);
     let candidates = member_index.instance_candidates(&receiver_ty);
 
@@ -256,31 +543,142 @@ fn member_completions(
             .with_relevance(90);
 
         if candidate.kind() == crate::hir::MemberKind::Method {
-            item = item.with_insert(CompletionInsert::Call {
-                callee: name,
-                has_arguments: false,
-            });
+            // Look up the method resolution; HIR params already exclude
+            // `self` (it's stored as the receiver), so snippet params are
+            // correct as-is. We prepend the receiver to the detail display.
+            let method_res = member_index.resolve_method(&receiver_ty, &name);
+            let callable = method_res.as_ref().and_then(|r| r.callable().cloned());
+
+            let params: Vec<String> = {
+                let types: Vec<String> = callable
+                    .as_ref()
+                    .map(|c| c.params().iter().map(|ty| ty.to_string()).collect())
+                    .unwrap_or_default();
+                // Try to get original parameter names from the definition's
+                // CallableSignature so snippets show names, not just types.
+                let names: Vec<Option<String>> = method_res
+                    .as_ref()
+                    .and_then(|res| match res.target() {
+                        crate::hir::MemberTarget::Definition(def_id) => {
+                            let def = def_map.definition(def_id)?;
+                            if let crate::hir::ItemSignature::Callable(sig) = def.signature() {
+                                // sig.params() already excludes self (it's in
+                                // sig.receiver()), so params align 1:1 with
+                                // callable.params().
+                                Some(
+                                    sig.params()
+                                        .iter()
+                                        .map(|p| p.name().map(|n| n.to_string()))
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| vec![None; types.len()]);
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| match names.get(i).and_then(|n| n.clone()) {
+                        Some(name) => format!("{name}: {ty}"),
+                        None => ty.clone(),
+                    })
+                    .collect()
+            };
+
+            let sig_detail = match method_res.as_ref().and_then(|r| r.receiver()) {
+                Some(receiver) => {
+                    let self_str = match receiver {
+                        crate::hir::ReceiverKind::Value => "self".to_string(),
+                        crate::hir::ReceiverKind::SharedRef => "&self".to_string(),
+                        crate::hir::ReceiverKind::MutRef => "&mut self".to_string(),
+                    };
+                    let mut pts = vec![self_str];
+                    pts.extend(params.iter().cloned());
+                    let ret = callable
+                        .as_ref()
+                        .map(|c| c.return_ty().to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!("fn {name}({}) -> {ret}", pts.join(", "))
+                }
+                None => {
+                    // Associated function — just use the type string.
+                    candidate.ty().to_string()
+                }
+            };
+
+            item = item
+                .with_detail(sig_detail)
+                .with_insert(CompletionInsert::Call {
+                    callee: name,
+                    params,
+                });
         }
         items.push(item);
+    }
+
+    // Postfix completions — template expansions like `.if`, `.match` that
+    // wrap the receiver expression.
+    for (suffix, label, insert_text) in postfix_templates(&receiver_text) {
+        if seen.insert(suffix.to_string()) {
+            items.push(
+                CompletionItem::new(suffix, CompletionKind::Keyword)
+                    .with_detail(label)
+                    .with_insert(CompletionInsert::Snippet(insert_text))
+                    .with_relevance(85), // below fields/methods, above keywords
+            );
+        }
     }
 
     CompletionItem::normalize(&mut items);
     items
 }
 
-/// Try to infer the type of the expression immediately left of `.`.
-pub(crate) fn infer_dot_receiver(
-    db: &Rc<BaseDb>,
+/// Return postfix template completions for a receiver expression.
+/// Each tuple: (completion_label, detail_text, snippet_insert_text).
+fn postfix_templates(receiver: &str) -> Vec<(&'static str, &'static str, String)> {
+    vec![
+        (
+            ".if",
+            "if expr { … }",
+            format!("if {receiver} {{ $0 }}"),
+        ),
+        (
+            ".match",
+            "match expr { … }",
+            format!("match {receiver} {{ $0 }}"),
+        ),
+        (
+            ".not",
+            "!expr",
+            format!("!{receiver}"),
+        ),
+        (
+            ".ref",
+            "&expr",
+            format!("&{receiver}"),
+        ),
+        (
+            ".while",
+            "while expr { … }",
+            format!("while {receiver} {{ $0 }}"),
+        ),
+    ]
+}
+
+/// Get the text of the expression immediately left of `.`.
+fn receiver_expr_text(
+    db: &BaseDb,
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
-) -> Option<Ty> {
-    let (body, source_map, inference) =
+) -> Option<String> {
+    let (body, source_map, _inference) =
         find_containing_body_data(db, def_map, position, offset)?;
     let dot_pos = offset.saturating_sub(1);
 
-    // Find the expression whose range contains the dot position.
-    // Look for expressions that end at or contain the position before dot.
     let mut candidates: Vec<(u32, ExprId)> = body
         .exprs()
         .filter_map(|(expr_id, _expr)| {
@@ -293,12 +691,96 @@ pub(crate) fn infer_dot_receiver(
             }
         })
         .collect();
-
-    // Prefer the innermost expression (smallest range)
     candidates.sort_by_key(|(len, _)| *len);
     let expr_id = candidates.first().map(|(_, id)| *id)?;
+    let range = source_map.expr_range(expr_id)?;
+    let text = db.file_text(position.file_id)?;
+    let start = range.range.start() as usize;
+    let end = range.range.end() as usize;
+    if start <= end && end <= text.len() {
+        Some(text[start..end].to_string())
+    } else {
+        None
+    }
+}
 
-    inference.type_of_expr(expr_id).cloned()
+/// Try to infer the type of the expression immediately left of `.`.
+/// Walks UP the syntax tree from the cursor token to find a
+/// MethodCallExpr or FieldExpr, then resolves the receiver via HIR.
+pub(crate) fn infer_dot_receiver(
+    db: &Rc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let text = db.file_text(position.file_id)?;
+    let offset = offset.min(text.len() as u32);
+    let parse = db.parse(position.file_id);
+    let root = parse.syntax_node();
+    // Find the token at the cursor.
+    let end: u32 = root.text_range().end().into();
+    let token = match root.token_at_offset(offset.min(end).into()) {
+        rowan::TokenAtOffset::Single(t) => Some(t),
+        rowan::TokenAtOffset::Between(l, _) => Some(l),
+        _ => None,
+    }?;
+
+    // Walk up the syntax tree to find an enclosing field access or
+    // method call. This is how rust-analyzer does it.
+    let mut node = token.parent()?;
+    let receiver_range: TextRange;
+    loop {
+        let kind = node.kind();
+            if kind == rua_syntax::SyntaxKind::FieldExpr
+            || kind == rua_syntax::SyntaxKind::MethodCallExpr
+        {
+            // Found the member access node. Get the receiver expression.
+            let receiver = node
+                .children()
+                .find(|c| {
+                    matches!(
+                        c.kind(),
+                        rua_syntax::SyntaxKind::PathExpr
+                            | rua_syntax::SyntaxKind::Ident
+                            | rua_syntax::SyntaxKind::CallExpr
+                            | rua_syntax::SyntaxKind::FieldExpr
+                            | rua_syntax::SyntaxKind::IndexExpr
+                            | rua_syntax::SyntaxKind::ParenExpr
+                            | rua_syntax::SyntaxKind::LiteralExpr
+                    )
+                })?;
+            receiver_range = {
+                let start: u32 = receiver.text_range().start().into();
+                let end: u32 = receiver.text_range().end().into();
+                TextRange::new(start, end)
+            };
+            break;
+        }
+        node = node.parent()?;
+    }
+
+    // Find the HIR expression whose range matches the receiver's range.
+    let (body, _source_map, inference) =
+        find_containing_body_data(db, def_map, position, offset)?;
+    for (expr_id, _expr) in body.exprs() {
+        let fr = _source_map.expr_range(expr_id)?;
+        if fr.range == receiver_range {
+            return inference.type_of_expr(expr_id).cloned();
+        }
+    }
+    // Fallback: try to find by containing the receiver range.
+    for (expr_id, _expr) in body.exprs() {
+        let fr = _source_map.expr_range(expr_id)?;
+        if fr.range.contains(receiver_range.start())
+            || fr.range.start() == receiver_range.start()
+        {
+            let ty = inference.type_of_expr(expr_id).cloned()?;
+            if !matches!(&ty, Ty::Primitive(crate::hir::PrimitiveTy::Unit)) {
+                return Some(ty);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +815,9 @@ fn path_completions(
                         CompletionItem::new(definition.name(), kind).with_relevance(80);
                     if let Some(sig) = definition_signature(db, &def_map, definition) {
                         item = item.with_detail(sig);
+                    }
+                    if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
+                        item = item.with_documentation(doc);
                     }
                     items.push(item);
                 }
@@ -434,6 +919,104 @@ fn resolve_path_prefix_module(
 struct LocalInfo {
     name: String,
     ty: String,
+}
+
+/// Score how well a candidate type string matches an expected type.
+/// Returns 0-10, where 10 = exact match, 5 = coercible, 0 = no match.
+fn type_compatibility_score(detail: &str, expected_str: &str, _expected: &Ty) -> u16 {
+    if detail.contains(expected_str) {
+        return 10; // exact match
+    }
+    // Coercible numeric types
+    if (expected_str == "i64" || expected_str == "f64")
+        && (detail.contains("i64") || detail.contains("f64"))
+    {
+        return 5;
+    }
+    // Option/Result compatibility (simplified)
+    if (expected_str.starts_with("Option") && detail.contains("Some"))
+        || (expected_str.starts_with("Result") && (detail.contains("Ok") || detail.contains("Err")))
+    {
+        return 5;
+    }
+    0
+}
+
+/// Try to infer the expected type at the cursor position from surrounding
+/// code patterns (call arguments, return position).
+fn expected_type_at_cursor(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let (body, source_map, inference) =
+        find_containing_body_data(db, def_map, position, offset)?;
+
+    for (expr_id, expr) in body.exprs() {
+        // Cursor inside a function call argument list.
+        let args: &[ExprId] = match expr {
+            Expr::Call { args, .. } => args.as_slice(),
+            Expr::MethodCall { args, .. } => args.as_slice(),
+            _ => continue,
+        };
+        let Some(expr_range) = source_map.expr_range(expr_id) else {
+            continue;
+        };
+        if !expr_range.range.contains(offset) {
+            continue;
+        }
+        // Find which argument the cursor is in.
+        let callable_ty = inference.type_of_expr(expr_id)?.clone();
+        let params = match &callable_ty {
+            Ty::Function(c) | Ty::Closure(c) => c.params().to_vec(),
+            _ => return None,
+        };
+        for (i, arg_id) in args.iter().enumerate() {
+            let Some(arg_range) = source_map.expr_range(*arg_id) else {
+                continue;
+            };
+            if arg_range.range.contains(offset) {
+                return params.get(i).cloned();
+            }
+        }
+        // Cursor between arguments or after `(` but before first arg.
+        if params.len() == 1 {
+            return params.first().cloned();
+        }
+    }
+    None
+}
+
+/// Count how many times each local name is referenced in scope (for ranking).
+fn local_usage_counts(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let Some((body, _source_map, _scopes, _inference)) =
+        find_containing_body_full(db, def_map, position, offset)
+    else {
+        return counts;
+    };
+    let owner_id = match innermost_body_owner(def_map, position, offset) {
+        Some(d) => d.id(),
+        None => return counts,
+    };
+    let Some(resolution) = db.body_resolution(owner_id) else {
+        return counts;
+    };
+    for (name_ref_id, nr) in body.name_refs() {
+        if let Some(name) = nr.name()
+            && let Some(crate::hir::LocalResolveResult::Resolved(_)) =
+                resolution.resolve(name_ref_id)
+        {
+            *counts.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 /// Collect all local bindings visible at `offset` by walking up the scope chain.
@@ -560,14 +1143,14 @@ fn find_innermost_scope(
 // Common helpers
 // ---------------------------------------------------------------------------
 
-type BodyData =
+pub(crate) type BodyData =
     (Arc<Body>, Arc<BodySourceMap>, Arc<InferenceResult>);
 
 type BodyFullData =
     (Arc<Body>, Arc<BodySourceMap>, Arc<BodyScopes>, Option<Arc<InferenceResult>>);
 
 /// Find the innermost function/method body containing `offset`.
-fn find_containing_body_data(
+pub(crate) fn find_containing_body_data(
     db: &BaseDb,
     def_map: &DefMap,
     position: FilePosition,
@@ -698,7 +1281,16 @@ pub(crate) fn token_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Opt
     let end: u32 = node.text_range().end().into();
     match node.token_at_offset(offset.min(end).into()) {
         rowan::TokenAtOffset::Single(token) => Some(token),
-        rowan::TokenAtOffset::Between(left, _right) => Some(left),
+        rowan::TokenAtOffset::Between(left, right) => {
+            // If exactly at the boundary between `.` and the field/method name,
+            // prefer the name token (right). This makes hover and goto-def
+            // work when the cursor lands on the first character of the member.
+            if left.kind() == SyntaxKind::Dot {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
         _ => None,
     }
 }
@@ -713,4 +1305,219 @@ pub(crate) fn previous_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
         token = token.and_then(|token| token.prev_token());
     }
     token
+}
+
+fn next_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+    let mut token = token.next_token();
+    while token.as_ref().is_some_and(|token| token.kind().is_trivia()) {
+        token = token.and_then(|token| token.next_token());
+    }
+    token
+}
+
+/// If the cursor is inside a struct literal `Type { | }`, return the struct
+/// type so we can enumerate fields.
+fn struct_literal_type(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let (body, source_map, inference) =
+        find_containing_body_data(db, def_map, position, offset)?;
+    for (expr_id, expr) in body.exprs() {
+        let Expr::StructLiteral { path: _, .. } = expr else { continue };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        // Get the struct type from inference.
+        let ty = inference.type_of_expr(expr_id)?.clone();
+        // Verify it's a struct (Named type with struct definition).
+        if let Ty::Named(named) = &ty {
+            let def = def_map.definition(named.definition())?;
+            if def.kind() == DefKind::Struct {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+/// If the cursor is inside an if-let or while-let pattern with an enum
+/// scrutinee, return the scrutinee type and its enum template.
+fn pattern_scrutinee_enum(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<(Ty, Ty)> {
+    let (body, source_map, inference) =
+        find_containing_body_data(db, def_map, position, offset)?;
+    for (expr_id, expr) in body.exprs() {
+        let scrutinee = match expr {
+            crate::hir::Expr::If {
+                condition: crate::hir::Condition::Let { scrutinee, .. },
+                ..
+            } => scrutinee,
+            _ => continue,
+        };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
+        if let Ty::Named(named) = &scrutinee_ty {
+            let def = def_map.definition(named.definition())?;
+            if def.kind() == DefKind::Enum {
+                let member_index = db.member_index(position.file_id);
+                let template = member_index.type_template(def.id())?.clone();
+                return Some((scrutinee_ty, template));
+            }
+        }
+    }
+    None
+}
+
+/// If the cursor is inside a match expression body, return the scrutinee
+/// enum type and its type template so we can enumerate variants.
+fn match_scrutinee_enum(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<(Ty, Ty)> {
+    let (body, source_map, inference) =
+        find_containing_body_data(db, def_map, position, offset)?;
+    for (expr_id, expr) in body.exprs() {
+        let Expr::Match { scrutinee, .. } = expr else {
+            continue;
+        };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        let scrutinee_ty = inference.type_of_expr(*scrutinee)?.clone();
+        // Check if the scrutinee is a named enum type.
+        if let Ty::Named(named) = &scrutinee_ty {
+            let enum_def = def_map.definition(named.definition())?;
+            if enum_def.kind() == DefKind::Enum {
+                let member_index = db.member_index(position.file_id);
+                let template = member_index.type_template(enum_def.id())?.clone();
+                return Some((scrutinee_ty, template));
+            }
+        }
+    }
+    None
+}
+
+/// Extract `///` doc comments immediately preceding a definition in the CST.
+fn extract_doc_comment(
+    db: &BaseDb,
+    file_id: FileId,
+    definition: &Definition,
+) -> Option<String> {
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    // Start from the definition keyword (e.g. `fn`, `struct`).
+    let range_start: u32 = definition.range().start();
+    let token = token_at_offset(root, range_start)?;
+
+    let mut doc_lines: Vec<String> = Vec::new();
+    let mut current = Some(token);
+
+    // Walk backwards through trivia to collect consecutive /// comments.
+    loop {
+        let prev = current.as_ref().and_then(|t| t.prev_token());
+        match prev {
+            None => break,
+            Some(ref pt) if pt.kind() == SyntaxKind::LineComment && pt.text().starts_with("///") =>
+            {
+                let text = pt.text();
+                let doc = text.strip_prefix("///").unwrap_or(text).trim();
+                doc_lines.push(doc.to_string());
+                current = prev;
+            }
+            Some(ref pt) if pt.kind().is_trivia() => {
+                current = prev; // skip whitespace between doc comment and keyword
+            }
+            Some(_) => break, // hit a non-trivia token — stop
+        }
+    }
+
+    if doc_lines.is_empty() {
+        return None;
+    }
+    doc_lines.reverse();
+    Some(doc_lines.join("\n"))
+}
+
+/// Token kinds that indicate the cursor is in expression context.
+const EXPR_CONTEXT_TOKENS: &[SyntaxKind] = &[
+    SyntaxKind::Eq,
+    SyntaxKind::KwReturn,
+    SyntaxKind::LParen,
+    SyntaxKind::LBracket,
+    SyntaxKind::Comma,
+    SyntaxKind::Plus,
+    SyntaxKind::Minus,
+    SyntaxKind::Star,
+    SyntaxKind::Slash,
+    SyntaxKind::Amp,
+    SyntaxKind::Pipe,
+    SyntaxKind::Colon,
+    SyntaxKind::FatArrow,
+    SyntaxKind::KwIf,
+    SyntaxKind::KwWhile,
+    SyntaxKind::KwFor,
+    SyntaxKind::KwMatch,
+    SyntaxKind::KwIn,
+    SyntaxKind::Dot,
+];
+
+/// Check whether the cursor is in a type position (after `:` in a type
+/// annotation, not after `::`).
+fn is_type_position(token: &SyntaxToken) -> bool {
+    // Cursor on `:` itself (e.g. `let x:|`)
+    if token.kind() == SyntaxKind::Colon {
+        let before = previous_significant(token);
+        return before.is_none_or(|t| t.kind() != SyntaxKind::Colon);
+    }
+    // Cursor on whitespace after `:` (e.g. `let x: |`)
+    let Some(prev) = previous_significant(token) else {
+        return false;
+    };
+    if prev.kind() != SyntaxKind::Colon {
+        return false;
+    }
+    // Exclude `::` — the colon before another colon is a path separator.
+    let before_colon = previous_significant(&prev);
+    before_colon.is_none_or(|t| t.kind() != SyntaxKind::Colon)
+}
+
+/// Check whether the cursor is in an expression context (e.g. after `=`,
+/// `return`, `(`, `[`, `,`, operators) where declaration keywords like `fn`,
+/// `struct` shouldn't appear.
+//
+/// We check the token under the cursor, the preceding significant token,
+/// and the next significant token (for boundary cases where the cursor
+/// sits between whitespace and `=`).
+fn is_expression_context(token: &SyntaxToken) -> bool {
+    if EXPR_CONTEXT_TOKENS.contains(&token.kind()) {
+        return true;
+    }
+    if let Some(prev) = previous_significant(token)
+        && EXPR_CONTEXT_TOKENS.contains(&prev.kind())
+    {
+        return true;
+    }
+    // Boundary case: cursor is in trivia just before a context token
+    // (e.g. the space between `x` and `=`).
+    if token.kind().is_trivia()
+        && let Some(next) = next_significant(token)
+        && EXPR_CONTEXT_TOKENS.contains(&next.kind())
+    {
+        return true;
+    }
+    false
 }

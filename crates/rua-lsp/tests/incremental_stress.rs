@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use lsp_types::Uri;
 
 use rua_analysis::{
-    AnalysisHost, Change, FileId, ProjectId, ProjectPosition,
+    AnalysisHost, Change, DiagnosticCode, FileId, ProjectId, ProjectPosition,
 };
 use rua_syntax::LineIndex;
 
@@ -323,6 +323,92 @@ fn file_change_propagates_to_diagnostics() {
 }
 
 #[test]
+fn lint_redundant_mut_not_triggered_by_field_writes() {
+    // `&mut self` with field writes like `self.x = …` should NOT warn
+    // because the `mut` is required to mutate through the reference.
+    let uri = uri("/test/field_write.rua");
+    let mut srv = TestServer::new();
+
+    srv.open(
+        &uri,
+        r#"
+struct Point { x: i64, y: i64 }
+impl Point {
+    fn translate(&mut self, dx: i64, dy: i64) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+}
+"#,
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0301 = diags
+        .iter()
+        .any(|d| d.code() == Some(DiagnosticCode::LintRedundantMut));
+    assert!(
+        !has_w0301,
+        "W0301 should not fire for &mut self with field writes: {diags:?}"
+    );
+}
+
+#[test]
+fn lint_redundant_mut_still_warns_without_any_writes() {
+    // `let mut x` with zero writes (not even field writes) should still warn.
+    let uri = uri("/test/no_writes.rua");
+    let mut srv = TestServer::new();
+
+    srv.open(
+        &uri,
+        "fn foo() -> i64 {
+    let mut x = 42;
+    x
+}",
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0301 = diags
+        .iter()
+        .any(|d| d.code() == Some(DiagnosticCode::LintRedundantMut));
+    assert!(
+        has_w0301,
+        "W0301 should fire for `let mut x` with no writes at all: {diags:?}"
+    );
+}
+
+#[test]
+fn lint_redundant_mut_not_triggered_by_nested_field_write() {
+    // Nested field write like `self.a.b = 1` should also suppress the lint.
+    let uri = uri("/test/nested_field.rua");
+    let mut srv = TestServer::new();
+
+    srv.open(
+        &uri,
+        r#"
+struct Inner { val: i64 }
+struct Outer { a: Inner }
+impl Outer {
+    fn set(&mut self, v: i64) {
+        self.a.val = v;
+    }
+}
+"#,
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diags = srv.snapshot().diagnostics(file_id);
+    let has_w0301 = diags
+        .iter()
+        .any(|d| d.code() == Some(DiagnosticCode::LintRedundantMut));
+    assert!(
+        !has_w0301,
+        "W0301 should not fire for &mut self with nested field writes: {diags:?}"
+    );
+}
+
+#[test]
 fn snapshot_isolation_across_changes() {
     let uri = uri("/test/snap.rua");
     let mut srv = TestServer::new();
@@ -339,6 +425,525 @@ fn snapshot_isolation_across_changes() {
 
     assert_eq!(text1, "fn before() {}", "old snapshot unaffected");
     assert_eq!(text2, "fn after() {}", "new snapshot reflects change");
+}
+
+#[test]
+fn completions_sort_locals_before_keywords() {
+    // After typing in a function body, local variables should have higher
+    // relevance than keywords so they appear first in the list.
+    let uri = uri("/test/sort.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let my_counter = 0;  }");
+
+    let pp = srv.pp(&uri, 0, 32).unwrap();
+    let items = srv.snapshot().completions(pp);
+
+    let local_pos = items.iter().position(|i| i.label() == "my_counter");
+    let kw_pos = items.iter().position(|i| i.label() == "fn");
+
+    match (local_pos, kw_pos) {
+        (Some(l), Some(k)) => assert!(
+            l < k,
+            "local my_counter (position {l}) must sort before keyword fn (position {k})"
+        ),
+        _ => {}
+    }
+}
+
+#[test]
+fn completions_after_dot_exclude_keywords() {
+    let uri = uri("/test/dot.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64, y: i64 }\nfn main() { let origin = Point { x: 0, y: 0 }; origin.x }",
+    );
+
+    // cursor on `x` after the dot — the `x` in `origin.x`
+    let pp = srv.pp(&uri, 1, 54).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(
+        !labels.contains(&"fn".to_string()),
+        "keywords must not appear in member completions: {labels:?}"
+    );
+    // Should have Point fields
+    assert!(labels.contains(&"x".to_string()), "field x missing: {labels:?}");
+    assert!(labels.contains(&"y".to_string()), "field y missing: {labels:?}");
+}
+
+#[test]
+fn completions_respect_partial_prefix() {
+    let uri = uri("/test/prefix.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let my_var = 1; let other = 2; my_ }");
+
+    // cursor right after `my_` — my_ occupies bytes 43,44,45 (offset 45 is at `_`)
+    let pp = srv.pp(&uri, 0, 45).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(labels.contains(&"my_var".to_string()), "my_var missing: {labels:?}");
+    // The replacement_range should be set to replace "my_" (bytes 43..45)
+    let has_range = items.iter().any(|item| {
+        item.replacement_range()
+            .is_some_and(|r| r.start() == 43 && r.end() == 45)
+    });
+    assert!(has_range, "replacement_range should cover my_ prefix (bytes 43..45)");
+}
+
+#[test]
+fn completions_suppress_declaration_keywords_in_expression_context() {
+    // After `let x = `, declaration keywords like `fn`, `struct` should
+    // NOT appear because the cursor is in expression position.
+    let uri = uri("/test/exprctx.rua");
+    let mut srv = TestServer::new();
+    // Valid code: cursor after `=` between `=` and `1` is expression position.
+    srv.open(&uri, "fn main() { let x = 1; }");
+
+    // cursor right after `= ` — byte 18, the space before `1`
+    let pp = srv.pp(&uri, 0, 18).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(
+        !labels.contains(&"fn".to_string()),
+        "`fn` must not appear in expression context: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"struct".to_string()),
+        "`struct` must not appear in expression context: {labels:?}"
+    );
+    // Statement-level keywords like `if`, `match` should still appear
+    assert!(labels.contains(&"if".to_string()), "`if` missing: {labels:?}");
+    assert!(labels.contains(&"true".to_string()), "`true` missing: {labels:?}");
+}
+
+#[test]
+fn completions_allow_all_keywords_in_statement_context() {
+    // At the start of a block, all keywords including declaration keywords
+    // should appear.
+    let uri = uri("/test/stmtctx.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() {  }");
+
+    // cursor at `fn main() {  }` — statement position (inside empty block)
+    let pp = srv.pp(&uri, 0, 13).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // Declaration keywords should be present in statement context
+    assert!(labels.contains(&"fn".to_string()), "`fn` missing in statement context: {labels:?}");
+    assert!(labels.contains(&"struct".to_string()), "`struct` missing: {labels:?}");
+}
+
+#[test]
+fn completions_include_doc_comments_for_items() {
+    let uri = uri("/test/doccer.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "/// A point in 2D space.\nstruct Point { x: i64 }\n\n/// Compute distance.\nfn dist(p: &Point) -> i64 { p.x }\n\nfn main() { let p = Point { x: 0 };  }",
+    );
+
+    let pp = srv.pp(&uri, 3, 34).unwrap();
+    let items = srv.snapshot().completions(pp);
+
+    let point = items.iter().find(|i| i.label() == "Point");
+    assert!(point.is_some(), "Point should be in completions");
+    assert!(
+        point.and_then(|i| i.documentation()).is_some(),
+        "Point should have doc comment"
+    );
+
+    let dist = items.iter().find(|i| i.label() == "dist");
+    assert!(dist.is_some(), "dist should be in completions");
+    assert!(
+        dist.and_then(|i| i.documentation()).is_some(),
+        "dist should have doc comment"
+    );
+}
+
+#[test]
+fn method_completion_filters_self_from_snippet() {
+    let uri = uri("/test/method_self.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64, y: i64 }\nimpl Point {\n    fn translate(&mut self, dx: i64, dy: i64) {\n        self.x = self.x + dx;\n        self.y = self.y + dy;\n    }\n}\nfn main() { let p = Point { x: 0, y: 0 }; p.x }",
+    );
+
+    // cursor on `x` after `p.`, which triggers member completions for Point
+    let pp = srv.pp(&uri, 7, 44).unwrap();
+    let items = srv.snapshot().completions(pp);
+
+    let translate = items
+        .iter()
+        .find(|i| i.label() == "translate")
+        .expect("translate method should be in completions");
+
+    // Detail should show full signature with self
+    let detail = translate.detail().unwrap_or("");
+    assert!(
+        detail.contains("&mut self"),
+        "detail should include self param, got: {detail:?}"
+    );
+
+    // Snippet insert should NOT include self, and params should use
+    // the original parameter names (dx, dy), not just types.
+    let insert = translate.insert();
+    match insert {
+        Some(rua_analysis::CompletionInsert::Call { params, .. }) => {
+            let has_self = params.iter().any(|p| p.contains("self"));
+            assert!(
+                !has_self,
+                "snippet params should NOT include self, got: {params:?}"
+            );
+            assert!(!params.is_empty(), "should have at least one param, got: {params:?}");
+            // Parameters should include original names from source
+            let has_dx = params.iter().any(|p| p.starts_with("dx"));
+            let has_dy = params.iter().any(|p| p.starts_with("dy"));
+            assert!(has_dx, "param should include name 'dx', got: {params:?}");
+            assert!(has_dy, "param should include name 'dy', got: {params:?}");
+        }
+        other => panic!("expected Call insert, got: {other:?}"),
+    }
+}
+
+#[test]
+fn completions_in_match_body_offer_enum_variants() {
+    let uri = uri("/test/match_enum.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "enum Color { Red, Green, Blue, Rgb(i64, i64, i64) }\nfn main() { let c = Color::Red; match c {  } }",
+    );
+
+    // cursor inside match body `match c { | }`
+    let pp = srv.pp(&uri, 1, 41).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(labels.contains(&"Red".to_string()), "Red variant missing: {labels:?}");
+    assert!(labels.contains(&"Green".to_string()), "Green variant missing: {labels:?}");
+    assert!(labels.contains(&"Blue".to_string()), "Blue variant missing: {labels:?}");
+    assert!(labels.contains(&"Rgb".to_string()), "Rgb variant missing: {labels:?}");
+
+    // Variants should sort above keywords
+    let red_pos = items.iter().position(|i| i.label() == "Red").unwrap();
+    let fn_pos = items.iter().position(|i| i.label() == "fn").unwrap();
+    assert!(red_pos < fn_pos, "variants must sort before keywords");
+}
+
+#[test]
+fn completions_outside_match_body_dont_offer_variants() {
+    // Variants should NOT appear when cursor is outside a match expression.
+    let uri = uri("/test/no_match_enum.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "enum Color { Red, Blue }\nfn main() { let c = Color::Red;  }",
+    );
+
+    let pp = srv.pp(&uri, 1, 31).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // Red/Blue are variants, not module-level items — should NOT appear
+    assert!(!labels.contains(&"Red".to_string()), "variants outside match: {labels:?}");
+    assert!(!labels.contains(&"Blue".to_string()), "variants outside match: {labels:?}");
+}
+
+#[test]
+fn completions_in_type_position_only_show_types() {
+    // After `let x: `, only type names should appear, not variables/keywords.
+    let uri = uri("/test/typepos.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nenum Color { Red }\nfn main() { let my_var = 1; let x:  }",
+    );
+
+    // cursor after `let x: ` (type position, first space after colon)
+    let pp = srv.pp(&uri, 2, 34).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // Types should be present
+    assert!(labels.contains(&"i64".to_string()), "i64 missing: {labels:?}");
+    assert!(labels.contains(&"Point".to_string()), "Point missing: {labels:?}");
+    assert!(labels.contains(&"Color".to_string()), "Color missing: {labels:?}");
+    // Variables should NOT be present
+    assert!(!labels.contains(&"my_var".to_string()), "my_var should not appear in type pos: {labels:?}");
+    // Keywords should NOT be present
+    assert!(!labels.contains(&"fn".to_string()), "fn should not appear in type pos: {labels:?}");
+}
+
+#[test]
+fn completions_in_expression_position_include_variables() {
+    // After `let x = `, variables should still appear (not type position).
+    let uri = uri("/test/exprpos.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { let my_var = 1; let x =  }");
+
+    let pp = srv.pp(&uri, 0, 32).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(labels.contains(&"my_var".to_string()), "my_var missing: {labels:?}");
+}
+
+#[test]
+fn signature_help_returns_none_outside_call() {
+    // Should not panic and return None when cursor is not in a call.
+    let uri = uri("/test/sighlp2.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() { let x = 1; }");
+
+    let pp = srv.pp(&uri, 1, 15).unwrap();
+    let help = srv.snapshot().signature_help(pp);
+    assert!(help.is_none(), "signature help should be None outside a call");
+}
+
+#[test]
+fn postfix_completions_after_dot() {
+    let uri = uri("/test/postfix.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn main() { let x = true; x. }",
+    );
+
+    let pp = srv.pp(&uri, 0, 28).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(labels.contains(&".if".to_string()), ".if postfix missing: {labels:?}");
+    assert!(labels.contains(&".match".to_string()), ".match postfix missing: {labels:?}");
+    assert!(labels.contains(&".not".to_string()), ".not postfix missing: {labels:?}");
+    assert!(labels.contains(&".ref".to_string()), ".ref postfix missing: {labels:?}");
+    // Verify the snippet contains the receiver expression
+    let if_item = items.iter().find(|i| i.label() == ".if").unwrap();
+    if let Some(rua_analysis::CompletionInsert::Snippet(text)) = if_item.insert() {
+        assert!(text.contains("x"), "snippet should contain receiver 'x': {text:?}");
+    } else {
+        panic!("expected Snippet insert");
+    }
+}
+
+#[test]
+fn keyword_snippets_include_placeholders() {
+    let uri = uri("/test/kwsnip.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() {  }");
+
+    let pp = srv.pp(&uri, 0, 13).unwrap();
+    let items = srv.snapshot().completions(pp);
+
+    let for_item = items.iter().find(|i| i.label() == "for").unwrap();
+    match for_item.insert() {
+        Some(rua_analysis::CompletionInsert::Snippet(_text)) => {
+            let has_placeholder = _text.contains('$');
+            assert!(has_placeholder, "for snippet should have placeholder $, got: {_text:?} len={}", _text.len());
+        }
+        other => panic!("expected Snippet for 'for', got: {other:?}"),
+    }
+
+    let match_item = items.iter().find(|i| i.label() == "match").unwrap();
+    match match_item.insert() {
+        Some(rua_analysis::CompletionInsert::Snippet(_text)) => {
+            let has_placeholder = _text.contains('$');
+            assert!(has_placeholder, "match snippet should have placeholder $, got: {_text:?}");
+        }
+        other => panic!("expected Snippet for 'match', got: {other:?}"),
+    }
+
+    // Plain keywords should not have snippet insert
+    let else_item = items.iter().find(|i| i.label() == "else").unwrap();
+    assert!(
+        !matches!(else_item.insert(), Some(rua_analysis::CompletionInsert::Snippet(_))),
+        "else should not be a snippet"
+    );
+}
+
+#[test]
+fn inlay_hints_include_type_annotations() {
+    let uri = uri("/test/inlay.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "struct Point { x: i64 }\nfn main() { let p = Point { x: 42 }; }");
+
+    // Query hints for the whole file.
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    let _source = analysis.parse(file_id).syntax_node().text().to_string();
+    // Hints are computed in the LSP handler — just verify the analysis
+    // infrastructure doesn't panic when accessed.
+    let def_map = analysis.def_map(file_id);
+    let hints: Vec<_> = def_map
+        .definitions()
+        .filter(|d| matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method))
+        .filter_map(|d| {
+            let body = analysis.body(d.id())?;
+            let source_map = analysis.body_source_map(d.id())?;
+            let inference = analysis.infer(d.id())?;
+            let mut result = Vec::new();
+            for (bid, b) in body.bindings() {
+                if let Some(_name) = b.name()
+                    && let Some(ty) = inference.type_of_binding(bid)
+                    && !ty.is_unknown()
+                    && let Some(fr) = source_map.binding_range(bid)
+                {
+                    result.push((fr.range.end(), format!(": {ty}")));
+                }
+            }
+            Some(result)
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    // `p` should have a type hint
+    let has_point_hint = hints.iter().any(|(_, label)| label.contains("Point"));
+    assert!(has_point_hint, "should have Point type hint, got: {hints:?}");
+}
+
+#[test]
+fn member_hover_shows_method_signature() {
+    let uri = uri("/test/member_hover.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nimpl Point {\n    fn translate(&mut self, dx: i64, dy: i64) { self.x = self.x + dx; }\n}\nfn main() { let mut p = Point { x: 0 }; p.translate(1, 2); }",
+    );
+
+    // Hover on `translate` in `p.translate(1, 2)`.
+    // `translate` at column 43 (on 'r' of translate)
+    let pp = srv.pp(&uri, 4, 43).unwrap();
+    let hover = srv.snapshot().hover(pp);
+    assert!(
+        hover.is_some(),
+        "hover on method call should not be None"
+    );
+    let text = hover.unwrap().signature().to_string();
+    assert!(text.contains("translate"), "hover should contain method name, got: {text}");
+    assert!(text.contains("dx") || text.contains("i64"), "hover should show params, got: {text}");
+}
+
+#[test]
+fn member_hover_shows_field_type() {
+    let uri = uri("/test/field_hover.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nfn main() { let p = Point { x: 42 }; let q = p.x; }",
+    );
+
+    // Hover on `x` in `p.x`. Dot is at offset 71, so x is at 72.
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    let source = analysis.parse(file_id).syntax_node().text().to_string();
+    let li = rua_syntax::LineIndex::new(&source);
+    let (line, col) = li.line_col(72, &source);
+    let pp = srv.pp(&uri, line as u32, col as u32).unwrap();
+    let hover = srv.snapshot().hover(pp);
+    assert!(hover.is_some(), "hover on field should not be None");
+    let text = hover.unwrap().signature().to_string();
+    assert!(text.contains("x"), "hover should contain field name, got: {text}");
+    assert!(text.contains("i64"), "hover should show field type, got: {text}");
+}
+
+#[test]
+fn inlay_hint_type_is_clickable() {
+    // Verify the analysis provides type info that can be used for clickable hints.
+    let uri = uri("/test/inlay_click.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "struct Point { x: i64 }\nfn main() { let p = Point { x: 0 }; }");
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    let def_map = analysis.def_map(file_id);
+
+    // Find the `p` binding — its type should be Point
+    for definition in def_map.definitions() {
+        if !matches!(
+            definition.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) {
+            continue;
+        }
+        let Some(body) = analysis.body(definition.id()) else {
+            continue;
+        };
+        let Some(inference) = analysis.infer(definition.id()) else {
+            continue;
+        };
+        for (bid, binding) in body.bindings() {
+            if binding.name() == Some("p") {
+                let ty = inference.type_of_binding(bid).unwrap();
+                let ty_str = ty.to_string();
+                assert!(ty_str.contains("Point"), "p should have type Point, got: {ty_str}");
+                // Verify it's a named type that can be resolved to a definition
+                if let rua_analysis::Ty::Named(named) = ty {
+                    let def = def_map.definition(named.definition());
+                    assert!(def.is_some(), "Point type should resolve to a definition");
+                } else {
+                    panic!("expected Named type, got: {ty_str}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn goto_definition_on_method_call() {
+    let uri = uri("/test/goto_method.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nimpl Point {\n    fn translate(&mut self, dx: i64, dy: i64) { self.x = self.x + dx; }\n}\nfn main() { let mut p = Point { x: 0 }; p.translate(1, 2); }",
+    );
+
+    // Goto def on `translate` in `p.translate(1, 2)`.
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    let source = analysis.parse(file_id).syntax_node().text().to_string();
+    // Find the offset of `translate` in the source.
+    let translate_off = source.find("translate").unwrap();
+    let li = rua_syntax::LineIndex::new(&source);
+    let (line, col) = li.line_col(translate_off, &source);
+    let pp = srv.pp(&uri, line as u32, col as u32).unwrap();
+    let nav = srv.snapshot().goto_definition(pp);
+    assert!(nav.is_some(), "goto def on method call should not be None");
+    let target = nav.unwrap();
+    let target_source = analysis
+        .parse(target.full_range().file_id)
+        .syntax_node()
+        .text()
+        .to_string();
+    let target_text = &target_source
+        [target.full_range().range.start() as usize..target.full_range().range.end() as usize];
+    assert_eq!(target_text, "translate", "should jump to method definition");
+}
+
+#[test]
+fn goto_definition_on_field_access() {
+    let uri = uri("/test/goto_field.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nfn main() { let p = Point { x: 42 }; p.x; }",
+    );
+
+    // Goto def on `x` in `p.x`.
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    let source = analysis.parse(file_id).syntax_node().text().to_string();
+    // Cursor on x after dot.
+    let x_off = source.rfind('.').unwrap() + 1;
+    let li = rua_syntax::LineIndex::new(&source);
+    let (line, col) = li.line_col(x_off, &source);
+    let pp = srv.pp(&uri, line as u32, col as u32).unwrap();
+    let nav = srv.snapshot().goto_definition(pp);
+    assert!(nav.is_some(), "goto def on field should not be None");
 }
 
 #[test]

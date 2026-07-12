@@ -174,9 +174,12 @@ pub enum CompletionKind {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompletionInsert {
     Plain(String),
+    /// Snippet with placeholders (`$1`, `$0`, etc.).
+    Snippet(String),
     Call {
         callee: String,
-        has_arguments: bool,
+        /// Parameter names/types for snippet placeholders (e.g. `["x: i64", "y: i64"]`).
+        params: Vec<String>,
     },
     MacroCall {
         name: String,
@@ -203,6 +206,8 @@ pub struct CompletionItem {
     target: Option<FileRange>,
     relevance: u16,
     deprecated: bool,
+    /// If set, the LSP client should add this import statement.
+    import_path: Option<String>,
 }
 
 impl CompletionItem {
@@ -218,6 +223,7 @@ impl CompletionItem {
             target: None,
             relevance: 0,
             deprecated: false,
+            import_path: None,
         }
     }
 
@@ -299,6 +305,15 @@ impl CompletionItem {
 
     pub const fn is_deprecated(&self) -> bool {
         self.deprecated
+    }
+
+    pub fn import_path(&self) -> Option<&str> {
+        self.import_path.as_deref()
+    }
+
+    pub fn with_import_path(mut self, path: impl Into<String>) -> Self {
+        self.import_path = Some(path.into());
+        self
     }
 
     pub fn normalize(items: &mut Vec<Self>) {
@@ -533,6 +548,35 @@ impl fmt::Display for RenameError {
 
 impl std::error::Error for RenameError {}
 
+/// Protocol-neutral item for call hierarchy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallHierarchyItem {
+    pub name: String,
+    pub kind: crate::hir::DefKind,
+    pub file_id: crate::vfs::FileId,
+    pub range: TextRange,
+}
+
+/// Protocol-neutral item for type hierarchy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeHierarchyItem {
+    pub name: String,
+    pub kind: crate::hir::DefKind,
+    pub file_id: crate::vfs::FileId,
+    pub range: TextRange,
+}
+
+/// Protocol-neutral result for the `textDocument/signatureHelp` query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignatureHelpInfo {
+    /// Full signature label, e.g. "fn(dx: i64, dy: i64) -> ()"
+    pub label: String,
+    /// Individual parameter type strings, e.g. ["i64", "i64"]
+    pub parameters: Vec<String>,
+    /// 0-based index of the active parameter.
+    pub active_parameter: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SemanticTokenModifiers(u8);
 
@@ -542,6 +586,8 @@ impl SemanticTokenModifiers {
     pub const READ_ONLY: Self = Self(1 << 1);
     pub const STATIC: Self = Self(1 << 2);
     pub const DEFAULT_LIBRARY: Self = Self(1 << 3);
+    pub const UNUSED: Self = Self(1 << 4);
+    pub const MUTABLE: Self = Self(1 << 5);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)

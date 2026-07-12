@@ -15,7 +15,7 @@ use crate::{
     BaseDb,
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceMap, CallableTy, DefId, DefKind, DefMap,
-        Definition, InferenceResult, ItemTree, MemberIndex,
+        Definition, InferenceResult, ItemTree, MemberIndex, Ty,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
@@ -27,10 +27,11 @@ pub use crate::diagnostic::{
 };
 pub use closure_iterator::ClosureParameterInfo;
 pub use contract::{
-    CompletionInsert, CompletionItem, CompletionKind, FileEdit, FilePosition, FileRange,
-    HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId, ProjectPosition,
-    QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget, SemanticToken,
-    SemanticTokenKind, SemanticTokenModifiers, SourceChange, TextEdit, TextRange,
+    CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind, FileEdit, FilePosition,
+    FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId,
+    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget,
+    SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange,
+    TextEdit, TextRange, TypeHierarchyItem,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
@@ -164,6 +165,70 @@ impl Analysis {
         closure_iterator::semantic_tokens(&self.db, file_id)
     }
 
+    /// Signature help at a cursor position (inside a call expression).
+    pub fn signature_help(&self, position: ProjectPosition) -> Option<SignatureHelpInfo> {
+        let text = self.db.file_text(position.position.file_id)?;
+        let offset = position.position.offset.min(text.len() as u32);
+        let def_map = self.db.def_map(position.position.file_id);
+        let (body, source_map, inference) =
+            completion::find_containing_body_data(&self.db, &def_map, position.position, offset)?;
+
+        // Find a Call or MethodCall expression containing the cursor.
+        let mut best_expr_id: Option<crate::hir::ExprId> = None;
+        let mut best_len = u32::MAX;
+        for (expr_id, expr) in body.exprs() {
+            let range = source_map.expr_range(expr_id)?;
+            if range.range.contains(offset)
+                && matches!(
+                    expr,
+                    crate::hir::Expr::Call { .. } | crate::hir::Expr::MethodCall { .. }
+                )
+            {
+                let len = range.range.len();
+                if len < best_len {
+                    best_len = len;
+                    best_expr_id = Some(expr_id);
+                }
+            }
+        }
+
+        let expr_id = best_expr_id?;
+        let expr = body.expr(expr_id)?;
+        let args: Vec<crate::hir::ExprId> = match expr {
+            crate::hir::Expr::Call { args, .. } => args.clone(),
+            crate::hir::Expr::MethodCall { args, .. } => args.clone(),
+            _ => return None,
+        };
+
+        // Get the callable type from inference.
+        let expr_ty = inference.type_of_expr(expr_id)?.clone();
+        let callable = match &expr_ty {
+            Ty::Function(c) | Ty::Closure(c) => c.clone(),
+            _ => return None,
+        };
+
+        let param_types: Vec<String> = callable.params().iter().map(|t| t.to_string()).collect();
+        let ret = callable.return_ty().to_string();
+
+        // Determine active parameter by counting args that end before cursor.
+        let active_param = args
+            .iter()
+            .filter(|arg_id| {
+                source_map
+                    .expr_range(**arg_id)
+                    .is_some_and(|r| r.range.end() <= offset)
+            })
+            .count() as u32;
+
+        let label = format!("fn({}) -> {}", param_types.join(", "), ret);
+        let max_param = param_types.len().saturating_sub(1) as u32;
+        Some(SignatureHelpInfo {
+            label,
+            parameters: param_types,
+            active_parameter: active_param.min(max_param),
+        })
+    }
+
     /// Completion candidates at a cursor position.
     pub fn completions(&self, position: ProjectPosition) -> Vec<CompletionItem> {
         completion::completions(&self.db, position.position)
@@ -178,8 +243,15 @@ impl Analysis {
         let def_map = self.db.def_map(position.position.file_id);
         let semantics = Semantics::new(Rc::clone(&self.db), def_map);
 
-        // 1. Try item/definition hover.
-        if let Some(definition) = semantics.find_def_at(position.position) {
+        // 1. Try member access hover first (field/method after `.`).
+        let member = self.member_hover(position);
+        if let Some(hover) = member {
+            return Some(hover);
+        }
+
+        // 2. Try item/definition hover.
+        let def = semantics.find_def_at(position.position);
+        if let Some(definition) = def {
             let root_file = position.position.file_id;
             let signature = item_hover_text(&definition, &self.db, root_file);
             return Some(HoverResult::new(
@@ -188,9 +260,8 @@ impl Analysis {
             ));
         }
 
-        // 2. Try local binding hover.
-        let local = semantics.resolve_local_at(position.position);
-        if let crate::hir::LocalResolveResult::Resolved(target) = local {
+        // 3. Try local binding hover.
+        if let crate::hir::LocalResolveResult::Resolved(target) = semantics.resolve_local_at(position.position) {
             let owner_def = target.owner().owner();
             if let Some(inference) = self.db.infer(owner_def) {
                 let ty = inference
@@ -213,26 +284,19 @@ impl Analysis {
             }
         }
 
-        // 3. Try member access hover (field/method after `.`).
-        if let Some(hover) = self.member_hover(position) {
-            return Some(hover);
-        }
-
         None
     }
 
     /// Hover for `receiver.field` or `receiver.method()`.
     fn member_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
-        let Some(text) = self.db.file_text(position.position.file_id) else {
-            return None;
-        };
+        let text = self.db.file_text(position.position.file_id)?;
         let parse = self.db.parse(position.position.file_id);
         let root = parse.syntax_node();
         let offset = position.position.offset.min(text.len() as u32);
         let token = completion::token_at_offset(root, offset)?;
 
         // Only if preceded by `.`
-        if !completion::previous_significant(&token).is_some_and(|t| t.kind() == rua_syntax::SyntaxKind::Dot) {
+        if completion::previous_significant(&token).is_none_or(|t| t.kind() != rua_syntax::SyntaxKind::Dot) {
             return None;
         }
 
@@ -243,10 +307,33 @@ impl Analysis {
             return None;
         };
 
-        // Try to infer the receiver type
+        // Try to infer the receiver type via HIR inference.
         let def_map = self.db.def_map(position.position.file_id);
         let member_index = self.db.member_index(position.position.file_id);
-        let receiver_ty = completion::infer_dot_receiver(&self.db, &def_map, position.position, offset)?;
+        let receiver_ty = completion::infer_dot_receiver(&self.db, &def_map, position.position, offset)
+            .or_else(|| {
+                // Fallback: scan syntax tree for the receiver identifier.
+                let prev = completion::previous_significant(&token)?;
+                let before_dot = completion::previous_significant(&prev)?;
+                if before_dot.kind() != rua_syntax::SyntaxKind::Ident {
+                    return None;
+                }
+                let receiver_name = before_dot.text().to_string();
+                // Search all bodies for a local with this name.
+                for def in def_map.definitions() {
+                    if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
+                        continue;
+                    }
+                    let Some(body) = self.db.body(def.id()) else { continue };
+                    let Some(inference) = self.db.infer(def.id()) else { continue };
+                    for (bid, binding) in body.bindings() {
+                        if binding.name() == Some(&receiver_name) {
+                            return inference.type_of_binding(bid).cloned();
+                        }
+                    }
+                }
+                None
+            })?;
 
         // Try field resolution
         if let Some(resolution) = member_index.resolve_field(&receiver_ty, &field_name) {
@@ -268,14 +355,29 @@ impl Analysis {
                 position.position.file_id,
                 TextRange::new(tr.start().into(), tr.end().into()),
             );
-            let params: Vec<String> = resolution
-                .generic_params()
-                .iter()
-                .map(|_| "?".to_string())
-                .collect();
+            let callable = resolution.callable();
+            let params: Vec<String> = callable
+                .map(|c| c.params().iter().map(|t| t.to_string()).collect())
+                .unwrap_or_default();
+            let ret = callable
+                .map(|c| c.return_ty().to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let receiver_str = match resolution.receiver() {
+                Some(crate::hir::ReceiverKind::Value) => "self",
+                Some(crate::hir::ReceiverKind::SharedRef) => "&self",
+                Some(crate::hir::ReceiverKind::MutRef) => "&mut self",
+                None => "",
+            };
+            let pts = if receiver_str.is_empty() {
+                params.join(", ")
+            } else if params.is_empty() {
+                receiver_str.to_string()
+            } else {
+                format!("{}, {}", receiver_str, params.join(", "))
+            };
             return Some(HoverResult::new(
                 range,
-                format!("fn {}({}) -> {}", field_name, params.join(", "), resolution.ty()),
+                format!("fn {}({pts}) -> {ret}", field_name),
             ));
         }
 
@@ -287,7 +389,12 @@ impl Analysis {
         let def_map = self.db.def_map(position.position.file_id);
         let semantics = Semantics::new(Rc::clone(&self.db), def_map);
 
-        // 1. Try item definition.
+        // 1. Try member access — resolve field/method to its definition.
+        if let Some(target) = self.member_goto_definition(position) {
+            return Some(target);
+        }
+
+        // 2. Try item definition.
         if let Some(definition) = semantics.find_def_at(position.position) {
             return Some(NavigationTarget::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
@@ -295,12 +402,116 @@ impl Analysis {
             ));
         }
 
-        // 2. Try local definition.
+        // 3. Try local definition.
         if let Some(local_range) = semantics.local_definition_at(position.position) {
             return Some(NavigationTarget::new(local_range, None));
         }
 
         None
+    }
+
+    /// Goto definition for `receiver.field` or `receiver.method()`.
+    fn member_goto_definition(
+        &self,
+        position: ProjectPosition,
+    ) -> Option<NavigationTarget> {
+        let text = self.db.file_text(position.position.file_id)?;
+        let parse = self.db.parse(position.position.file_id);
+        let root = parse.syntax_node();
+        let offset = position.position.offset.min(text.len() as u32);
+        let token = completion::token_at_offset(root, offset)?;
+
+        // Only if preceded by `.`
+        if completion::previous_significant(&token)
+            .is_none_or(|t| t.kind() != rua_syntax::SyntaxKind::Dot)
+        {
+            return None;
+        }
+        let field_name = if token.kind() == rua_syntax::SyntaxKind::Ident {
+            token.text().to_string()
+        } else {
+            return None;
+        };
+
+        // Resolve receiver type (same AST-walking approach as hover).
+        let def_map = self.db.def_map(position.position.file_id);
+        let member_index = self.db.member_index(position.position.file_id);
+        let receiver_ty =
+            completion::infer_dot_receiver(&self.db, &def_map, position.position, offset);
+        let receiver_ty = receiver_ty?;
+
+        // Resolve field or method to its definition.
+        let field = member_index.resolve_field(&receiver_ty, &field_name);
+        let method = member_index.resolve_method(&receiver_ty, &field_name);
+        let resolution = field.or(method)?;
+
+        // Get the definition from the resolution.
+        let def_id = match resolution.target() {
+            crate::hir::MemberTarget::Definition(id) => id,
+            _ => return None,
+        };
+        let definition = def_map.definition(def_id)?;
+        Some(NavigationTarget::new(
+            FileRange::new(definition.file_id(), definition.name_range()),
+            None,
+        ))
+    }
+
+    /// Go to implementation(s) of a trait method.
+    pub fn goto_implementation(
+        &self,
+        position: ProjectPosition,
+    ) -> Vec<NavigationTarget> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map.clone());
+        let Some(definition) = semantics.find_def_at(position.position) else {
+            return Vec::new();
+        };
+        // Only for methods owned by a trait.
+        if definition.kind() != DefKind::Method {
+            return Vec::new();
+        }
+        let Some(owner_id) = definition.owner() else {
+            return Vec::new();
+        };
+        let Some(owner_def) = def_map.definition(owner_id) else {
+            return Vec::new();
+        };
+        if owner_def.kind() != DefKind::Trait {
+            return Vec::new();
+        }
+        let method_name = definition.name();
+        let trait_name = owner_def.name();
+
+        let mut targets = Vec::new();
+        for def in def_map.definitions() {
+            if def.kind() != DefKind::Impl {
+                continue;
+            }
+            // Check if this impl is for our trait (by matching trait_ref name).
+            let sig = def.signature();
+            let trait_match = match sig {
+                crate::hir::ItemSignature::Impl(s) => s
+                    .trait_ref()
+                    .as_ref()
+                    .is_some_and(|tr| tr.syntax().is_some_and(|s| s.contains(trait_name))),
+                _ => false,
+            };
+            if !trait_match {
+                continue;
+            }
+            // Look for a method with the same name in this impl's children.
+            for method_def in def_map.members(def.id()) {
+                if method_def.name() == method_name {
+                    targets.push(NavigationTarget::new(
+                        FileRange::new(method_def.file_id(), method_def.name_range()),
+                        None,
+                    ));
+                }
+            }
+        }
+        NavigationTarget::normalize(&mut targets);
+        targets
     }
 
     /// Find all references to the symbol at a cursor position.
@@ -330,6 +541,77 @@ impl Analysis {
                 .collect();
             ReferenceResult::normalize(&mut results);
             return results;
+        }
+
+        // 2. Try item-level references (cross-file).
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map.clone());
+        if let Some(definition) = semantics.find_def_at(position.position) {
+            let target_name = definition.name().to_string();
+            let target_id = definition.id();
+            let target_file = definition.file_id();
+            let mut results: Vec<ReferenceResult> = Vec::new();
+
+            // Scan all function/method bodies across the project.
+            for def in def_map.definitions() {
+                if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
+                    continue;
+                }
+                let Some(body) = self.db.body(def.id()) else { continue };
+                let Some(source_map) = self.db.body_source_map(def.id()) else {
+                    continue;
+                };
+                let Some(resolution) = self.db.body_resolution(def.id()) else {
+                    continue;
+                };
+                // Check name refs for matching text.
+                for (nrid, nr) in body.name_refs() {
+                    if nr.name() != Some(&target_name) {
+                        continue;
+                    }
+                    // Try to resolve this name ref to an item.
+                    let is_item_ref = matches!(
+                        resolution.resolve(nrid),
+                        Some(crate::hir::LocalResolveResult::NonLocal)
+                    );
+                    if !is_item_ref {
+                        continue;
+                    }
+                    // Verify it points to our target by checking the definition
+                    // at the name ref's position in its file.
+                    let Some(fr) = source_map.name_ref_range(nrid) else {
+                        continue;
+                    };
+                    let ref_file = def.file_id();
+                    let ref_def_map = if ref_file == target_file {
+                        def_map.clone()
+                    } else {
+                        self.db.def_map(ref_file)
+                    };
+                    let ref_semantics =
+                        Semantics::new(Rc::clone(&self.db), ref_def_map);
+                    if let Some(ref_def) = ref_semantics.find_def_at(
+                        crate::FilePosition::new(ref_file, fr.range.start()),
+                    )
+                        && ref_def.id() == target_id
+                    {
+                        results.push(ReferenceResult::new(fr, ReferenceKind::Read));
+                    }
+                }
+            }
+
+            // Include the declaration.
+            if include_declaration {
+                results.push(ReferenceResult::new(
+                    FileRange::new(target_file, definition.name_range()),
+                    ReferenceKind::Declaration,
+                ));
+            }
+
+            ReferenceResult::normalize(&mut results);
+            if !results.is_empty() {
+                return results;
+            }
         }
 
         Vec::new()
@@ -391,6 +673,237 @@ impl Analysis {
             refs.iter().map(|r| (r.range().file_id, TextEdit::new(r.range().range, new_name))),
             |file_id| self.is_file_read_only(file_id),
         )
+    }
+
+    // -- call hierarchy --------------------------------------------------
+
+    /// Find the function/method definition at the cursor for call hierarchy.
+    pub fn call_hierarchy_prepare(
+        &self,
+        position: ProjectPosition,
+    ) -> Option<CallHierarchyItem> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        let definition = semantics.find_def_at(position.position)?;
+        if !matches!(
+            definition.kind(),
+            DefKind::Function | DefKind::Method
+        ) {
+            return None;
+        }
+        Some(CallHierarchyItem {
+            name: definition.name().to_string(),
+            kind: definition.kind(),
+            file_id: definition.file_id(),
+            range: definition.name_range(),
+        })
+    }
+
+    /// Find all callers of a function/method.
+    pub fn call_hierarchy_incoming(
+        &self,
+        item: &CallHierarchyItem,
+    ) -> Vec<CallHierarchyItem> {
+        let def_map = self.db.def_map(item.file_id);
+        let mut callers = Vec::new();
+        for def in def_map.definitions() {
+            if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
+                continue;
+            }
+            let Some(body) = self.db.body(def.id()) else { continue };
+            let Some(_source_map) = self.db.body_source_map(def.id()) else {
+                continue;
+            };
+            // Check if this body contains a call to the target.
+            let has_call = body.exprs().any(|(_eid, expr)| match expr {
+                crate::hir::Expr::Call { callee, .. } => {
+                    // Check if callee name matches
+                    if let crate::hir::Expr::Path(path) =
+                        body.expr(*callee).unwrap_or(&crate::hir::Expr::Missing)
+                    {
+                        path.last()
+                            .and_then(|nrid| body.name_ref(*nrid))
+                            .and_then(|nr| nr.name())
+                            == Some(&item.name)
+                    } else {
+                        false
+                    }
+                }
+                crate::hir::Expr::MethodCall { method, .. } => {
+                    body.name_ref(*method)
+                        .and_then(|nr| nr.name())
+                        == Some(&item.name)
+                }
+                _ => false,
+            });
+            if has_call {
+                callers.push(CallHierarchyItem {
+                    name: def.name().to_string(),
+                    kind: def.kind(),
+                    file_id: def.file_id(),
+                    range: def.name_range(),
+                });
+            }
+        }
+        callers
+    }
+
+    /// Find all functions/methods called by this one.
+    pub fn call_hierarchy_outgoing(
+        &self,
+        item: &CallHierarchyItem,
+    ) -> Vec<CallHierarchyItem> {
+        let def_map = self.db.def_map(item.file_id);
+        let target_id = match def_map
+            .definitions()
+            .find(|d| {
+                d.name() == item.name
+                    && d.file_id() == item.file_id
+                    && matches!(d.kind(), DefKind::Function | DefKind::Method)
+            })
+            .map(|d| d.id())
+        {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        let Some(body) = self.db.body(target_id) else {
+            return Vec::new();
+        };
+        let mut callees = Vec::new();
+        for (_eid, expr) in body.exprs() {
+            let name = match expr {
+                crate::hir::Expr::Call { callee, .. } => {
+                    if let crate::hir::Expr::Path(path) = body.expr(*callee).unwrap_or(&crate::hir::Expr::Missing) {
+                        path.last()
+                            .and_then(|nrid| body.name_ref(*nrid))
+                            .and_then(|nr| nr.name())
+                            .map(|n| n.to_string())
+                    } else {
+                        None
+                    }
+                }
+                crate::hir::Expr::MethodCall { method, .. } => {
+                    body.name_ref(*method).and_then(|nr| nr.name().map(|n| n.to_string()))
+                }
+                _ => None,
+            };
+            if let Some(name) = name
+                && let Some(target_def) = def_map
+                    .definitions()
+                    .find(|d| {
+                        d.name() == name
+                            && matches!(d.kind(), DefKind::Function | DefKind::Method)
+                    })
+            {
+                callees.push(CallHierarchyItem {
+                    name: target_def.name().to_string(),
+                    kind: target_def.kind(),
+                    file_id: target_def.file_id(),
+                    range: target_def.name_range(),
+                });
+            }
+        }
+        callees
+    }
+
+    // -- type hierarchy ---------------------------------------------------
+
+    /// Find the type definition at the cursor for type hierarchy.
+    pub fn type_hierarchy_prepare(
+        &self,
+        position: ProjectPosition,
+    ) -> Option<TypeHierarchyItem> {
+        let def_map = self.db.def_map(position.position.file_id);
+        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        let definition = semantics.find_def_at(position.position)?;
+        if !matches!(
+            definition.kind(),
+            DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::Impl
+        ) {
+            return None;
+        }
+        Some(TypeHierarchyItem {
+            name: definition.name().to_string(),
+            kind: definition.kind(),
+            file_id: definition.file_id(),
+            range: definition.name_range(),
+        })
+    }
+
+    /// Find supertypes (traits implemented) for a type.
+    pub fn type_hierarchy_supertypes(
+        &self,
+        item: &TypeHierarchyItem,
+    ) -> Vec<TypeHierarchyItem> {
+        let def_map = self.db.def_map(item.file_id);
+        let mut result = Vec::new();
+        // Find all impl blocks whose target type matches this item.
+        for def in def_map.definitions() {
+            if def.kind() != DefKind::Impl {
+                continue;
+            }
+            let sig = def.signature();
+            if let crate::hir::ItemSignature::Impl(s) = sig {
+                // Check if the impl is for our type (by matching target type name)
+                if s.target_type()
+                    .syntax()
+                    .is_some_and(|s| s.contains(&item.name))
+                {
+                    // Add the trait being implemented
+                    if let Some(trait_ref) = s.trait_ref()
+                        && let Some(trait_name) = trait_ref.syntax()
+                        && let Some(trait_def) = def_map.definitions().find(|d| {
+                            d.kind() == DefKind::Trait && d.name() == trait_name
+                        })
+                    {
+                        result.push(TypeHierarchyItem {
+                            name: trait_def.name().to_string(),
+                            kind: DefKind::Trait,
+                            file_id: trait_def.file_id(),
+                            range: trait_def.name_range(),
+                        });
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Find subtypes (implementors) of a trait.
+    pub fn type_hierarchy_subtypes(
+        &self,
+        item: &TypeHierarchyItem,
+    ) -> Vec<TypeHierarchyItem> {
+        let def_map = self.db.def_map(item.file_id);
+        let mut result = Vec::new();
+        for def in def_map.definitions() {
+            if def.kind() != DefKind::Impl {
+                continue;
+            }
+            let sig = def.signature();
+            if let crate::hir::ItemSignature::Impl(s) = sig
+                && let Some(trait_ref) = s.trait_ref()
+                    && let Some(trait_name) = trait_ref.syntax()
+                    && trait_name == item.name
+                {
+                    // Add the implementing type
+                    if let Some(type_name) = s.target_type().syntax()
+                        && let Some(type_def) = def_map.definitions().find(|d| {
+                            matches!(
+                                d.kind(),
+                                DefKind::Struct | DefKind::Enum
+                            ) && d.name() == type_name
+                        }) {
+                            result.push(TypeHierarchyItem {
+                                name: type_def.name().to_string(),
+                                kind: type_def.kind(),
+                                file_id: type_def.file_id(),
+                                range: type_def.name_range(),
+                            });
+                        }
+                }
+        }
+        result
     }
 
     pub fn file_kind(&self, file_id: FileId) -> Option<FileKind> {

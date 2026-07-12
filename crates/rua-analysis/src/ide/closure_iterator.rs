@@ -99,7 +99,7 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
     // Closure parameter declarations and references — powered by native local
     // resolution instead of rua_syntax::nameres::references_at.
     let def_map = db.def_map(file_id);
-    let semantics = Semantics::new(Rc::clone(db), def_map);
+    let semantics = Semantics::new(Rc::clone(db), def_map.clone());
 
     for closure in root.descendants().filter_map(ClosureExpr::cast) {
         for param in closure.params() {
@@ -162,6 +162,104 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
             tokens.push(SemanticToken::new(
                 FileRange::new(file_id, text_range(operator.text_range())),
                 SemanticTokenKind::Operator,
+                SemanticTokenModifiers::NONE,
+            ));
+        }
+    }
+
+    // Emit mutable keyword tokens for `mut` in let bindings.
+    for token in root.descendants_with_tokens().filter_map(|el| match el {
+        rowan::NodeOrToken::Token(tok) if tok.kind() == SyntaxKind::KwMut => Some(tok),
+        _ => None,
+    }) {
+        let range = text_range(token.text_range());
+        tokens.push(SemanticToken::new(
+            FileRange::new(file_id, range),
+            SemanticTokenKind::Keyword,
+            SemanticTokenModifiers::MUTABLE,
+        ));
+    }
+
+    // Emit builtin type tokens with defaultLibrary modifier.
+    const BUILTIN_TYPES: &[SyntaxKind] = &[
+        SyntaxKind::KwTrue,
+        SyntaxKind::KwFalse,
+        SyntaxKind::KwSelf,
+    ];
+    for token in root.descendants_with_tokens().filter_map(|el| match el {
+        rowan::NodeOrToken::Token(tok) if BUILTIN_TYPES.contains(&tok.kind()) => Some(tok),
+        _ => None,
+    }) {
+        let range = text_range(token.text_range());
+        tokens.push(SemanticToken::new(
+            FileRange::new(file_id, range),
+            SemanticTokenKind::Keyword,
+            SemanticTokenModifiers::DEFAULT_LIBRARY,
+        ));
+    }
+
+    // Emit variable/parameter declaration and reference tokens.
+    for definition in def_map.definitions() {
+        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
+            continue;
+        }
+        let Some(body) = db.body(definition.id()) else { continue };
+        let Some(source_map) = db.body_source_map(definition.id()) else {
+            continue;
+        };
+        let Some(resolution) = db.body_resolution(definition.id()) else {
+            continue;
+        };
+        for (binding_id, binding) in body.bindings() {
+            let Some(_name) = binding.name() else { continue };
+            if _name.starts_with('_') {
+                continue;
+            }
+            let Some(fr) = source_map.binding_range(binding_id) else {
+                continue;
+            };
+            let kind = match binding.kind() {
+                BindingKind::Parameter => SemanticTokenKind::Parameter,
+                _ => SemanticTokenKind::Variable,
+            };
+            // Emit declaration.
+            tokens.push(SemanticToken::new(
+                fr,
+                kind,
+                SemanticTokenModifiers::DECLARATION,
+            ));
+            // Emit references.
+            let lid = crate::hir::LocalBindingId::new(body.id(), binding_id);
+            for local_use in resolution.uses_for(lid) {
+                if let Some(use_fr) = source_map.name_ref_range(local_use.name_ref())
+                    && use_fr != fr
+                {
+                    tokens.push(SemanticToken::new(
+                        use_fr,
+                        kind,
+                        SemanticTokenModifiers::NONE,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Emit string/number/comment tokens.
+    for token in root.descendants_with_tokens().filter_map(|el| match el {
+        rowan::NodeOrToken::Token(tok) => Some(tok),
+        _ => None,
+    }) {
+        let kind = match token.kind() {
+            SyntaxKind::Str => Some(SemanticTokenKind::String),
+            SyntaxKind::Int | SyntaxKind::Float => Some(SemanticTokenKind::Number),
+            SyntaxKind::LineComment | SyntaxKind::BlockComment => Some(SemanticTokenKind::Comment),
+            _ => None,
+        };
+        if let Some(k) = kind {
+            let range = text_range(token.text_range());
+            tokens.push(SemanticToken::new(
+                FileRange::new(file_id, range),
+                k,
                 SemanticTokenModifiers::NONE,
             ));
         }

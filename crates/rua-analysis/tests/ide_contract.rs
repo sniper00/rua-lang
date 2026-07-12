@@ -120,7 +120,7 @@ fn ide_contract_navigation_hover_and_completion_are_protocol_neutral() {
         .with_lookup("area")
         .with_insert(CompletionInsert::Call {
             callee: "area".to_string(),
-            has_arguments: true,
+            params: vec!["point: Point".to_string()],
         })
         .with_replacement_range(TextRange::new(40, 42))
         .with_target(navigation.target_range())

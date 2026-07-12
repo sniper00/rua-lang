@@ -1,12 +1,20 @@
 parameter: value 44..49 type=i64
 parameter: item 79..83 type=i64
+token: Number 24..25 text="0" declaration=false
 token: Operator 25..27 text=".." declaration=false
+token: Number 27..28 text="4" declaration=false
 token: Method 39..42 text="map" declaration=false
+token: Variable 44..49 text="value" declaration=true
 token: Parameter 44..49 text="value" declaration=true
+token: Variable 51..56 text="value" declaration=false
 token: Parameter 51..56 text="value" declaration=false
+token: Number 59..60 text="1" declaration=false
 token: Method 71..77 text="filter" declaration=false
+token: Variable 79..83 text="item" declaration=true
 token: Parameter 79..83 text="item" declaration=true
+token: Variable 85..89 text="item" declaration=false
 token: Parameter 85..89 text="item" declaration=false
+token: Number 92..93 text="1" declaration=false
 token: Method 104..109 text="count" declaration=false
 query: item at 85
 completion: item "closure parameter item: i64"

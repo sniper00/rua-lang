@@ -784,6 +784,22 @@ I4 符号 ──────────────────────> C3
 - **测试**：moon-rua-syntax `analysis`/`nameres` 新增局部（let/param/for）、内建模式（`Some`/`Ok`/`Err`）、用户 enum 元组/结构体变体、以及未知降级用例；三 crate 全绿——moon-ruac 182 + moon-rua-syntax 270（+1 ignored）+ moon-rua-lsp 41（feature `lsp`）；clippy 零新增。
 - **剩余限制**：泛型 enum 变体载荷显示泛型形参名（`r: T`，不含实例化实参，typeck 未在 `Ty::Named` 上追踪 enum 泛型实参）；scrutinee 类型未知（如未定义接收者）时模式绑定降级为 `local <name>`；跨文件子缓冲不影响局部（局部恒在本文件，无关）。
 
+#### ✅ v3-e（已完成）— 全面 LSP 能力补齐
+
+参照 emmylua-analyzer-rust 和 rust-analyzer 的完整功能矩阵，系统性补齐了 S/A/B/C 四级共 12 项 LSP 功能。详见 [`docs/rua-lsp-features.md`](./rua-lsp-features.md)。
+
+**补全增强**（6 项）：模糊匹配、类型加权排序、postfix 补全（`.if`/`.match`/`.not`/`.ref`/`.while`）、关键字 snippet 模板（`for`/`match`/`fn`/`struct` 等 11 个）、服务端前缀过滤、参数名提取。
+
+**导航**（3 项）：Go to Implementation、Workspace Symbol、Document Highlight。
+
+**交互**（5 项）：Hover 增强（markdown 文档 + 导航提示）、Signature Help、Inlay Hints、On-Type Formatting、Folding Range、Document Link。
+
+**诊断**（1 项）：未使用变量警告（W0300）。
+
+**重构**（3 项）：Extract Variable、Generate impl members、Replace if-let with match。
+
+**Semantic Token**（1 项）：unused modifier。
+
 ### 风险
 - 引入 LSP 依赖会打破 moon-ruac 的零依赖属性（已接受，仅限该子轨）。
 - 注释保真是 formatter 主要难点（块/行尾注释归位）：I3 先留信息，B2 再消化。

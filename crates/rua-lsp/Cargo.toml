@@ -13,6 +13,7 @@ lsp = ["dep:lsp-server", "dep:lsp-types", "dep:rua-analysis", "dep:serde_json"]
 [dependencies]
 rua-analysis = { workspace = true, optional = true }
 rua-syntax = { path = "../rua-syntax", default-features = false }
+rowan = { workspace = true }
 lsp-server = { version = "0.7", optional = true }
 lsp-types = { version = "0.97", optional = true }
 serde_json = { version = "1", optional = true }
