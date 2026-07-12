@@ -568,7 +568,7 @@ impl Analysis {
                 crate::hir::ItemSignature::Impl(s) => s
                     .trait_ref()
                     .as_ref()
-                    .is_some_and(|tr| tr.syntax().is_some_and(|s| s.contains(trait_name))),
+                    .is_some_and(|tr| tr.syntax().is_some_and(|s| trait_name_matches(s, trait_name))),
                 _ => false,
             };
             if !trait_match {
@@ -921,7 +921,7 @@ impl Analysis {
                 // Check if the impl is for our type (by matching target type name)
                 if s.target_type()
                     .syntax()
-                    .is_some_and(|s| s.contains(&item.name))
+                    .is_some_and(|s| trait_name_matches(s, &item.name))
                 {
                     // Add the trait being implemented
                     if let Some(trait_ref) = s.trait_ref()
@@ -1210,4 +1210,15 @@ mod tests {
         assert_eq!(after_removal.file_kind(file_id), None);
         assert_eq!(after_removal.source_root_kind(file_id), None);
     }
+}
+
+/// Match a trait name against its syntax representation.  The syntax may
+/// be a plain name (`MyTrait`) or include generic arguments
+/// (`MyTrait<i64>`).  We accept exact equality or a prefix match where
+/// the name is followed by `<`.  This prevents `Foo` from matching
+/// `FooBar` (unlike `contains`).
+fn trait_name_matches(syntax: &str, name: &str) -> bool {
+    syntax == name
+        || (syntax.starts_with(name)
+            && syntax.as_bytes().get(name.len()).is_some_and(|c| *c == b'<'))
 }

@@ -2926,10 +2926,14 @@ impl Server {
         let source = analysis.parse(file_id).syntax_node().text().to_string();
         let line_index = LineIndex::new(&source);
 
+        // Resolve the actual file path from the URI so we can pass it to
+        // `ruac check` (which expects a path, not source text).
+        let file_path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri.as_str()));
+
         // Try to run ruac check as a subprocess.
         if let Ok(output) = std::process::Command::new("ruac")
             .arg("check")
-            .arg(&source)
+            .arg(&file_path)
             .output()
             && !output.status.success()
         {
