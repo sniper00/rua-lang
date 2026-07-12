@@ -529,6 +529,27 @@ impl Codegen<'_> {
         }
         self.gen_impls(&prog.items, &traits);
 
+        // Emit a return table exporting all top-level public functions so the
+        // generated Lua module can be `require()`d from Lua side.
+        let pub_fns: Vec<&str> = prog
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Fn(f) if f.is_pub => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !pub_fns.is_empty() {
+            self.blank();
+            self.line("return {");
+            self.indent += 1;
+            for name in &pub_fns {
+                self.line(&format!("{name} = {name},"));
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+
         if prog
             .items
             .iter()
