@@ -815,8 +815,7 @@ fn match_guard() {
 #[test]
 fn for_range_exclusive() {
     let lua = compile("fn f() { for i in 0..10 { print(i); } }");
-    assert!(lua.contains("for i = 0, (10) - 1 do"), "got: {lua}");
-    assert!(lua.contains("::continue::"), "got: {lua}");
+    assert!(lua.contains("for i = 0, 9 do"), "got: {lua}");
 }
 
 #[test]

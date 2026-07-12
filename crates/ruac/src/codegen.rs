@@ -262,6 +262,37 @@ impl Codegen<'_> {
         emit_return_annotation(&mut self.out, &f.ret);
     }
 
+    fn block_has_continue(block: &Block) -> bool {
+        for s in &block.stmts {
+            if matches!(s, Stmt::Continue) { return true; }
+            match s {
+                Stmt::While { body, .. } | Stmt::Loop { body } | Stmt::WhileLet { body, .. } | Stmt::For { body, .. } => {
+                    if Self::block_has_continue(body) { return true; }
+                }
+                Stmt::Expr(e) => {
+                    if Self::expr_has_continue(e) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn expr_has_continue(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Block(b) => Self::block_has_continue(b),
+            ExprKind::If { then_block, else_block, .. } => {
+                Self::block_has_continue(then_block)
+                    || else_block.as_ref().map_or(false, |eb| match eb.as_ref() {
+                        ElseBranch::Block(b) => Self::block_has_continue(b),
+                        ElseBranch::If(e) => Self::expr_has_continue(e),
+                    })
+            }
+            ExprKind::Match { arms, .. } => arms.iter().any(|a| Self::expr_has_continue(&a.body)),
+            _ => false,
+        }
+    }
+
     fn line(&mut self, s: &str) {
         for _ in 0..self.indent {
             self.out.push_str("    ");
@@ -616,7 +647,7 @@ impl Codegen<'_> {
                 self.line(&format!("while {} do", c));
                 self.indent += 1;
                 self.gen_block_to(body, &Dest::Discard);
-                self.line("::continue::");
+                if Self::block_has_continue(body) { self.line("::continue::"); }
                 self.indent -= 1;
                 self.line("end");
             }
@@ -624,7 +655,7 @@ impl Codegen<'_> {
                 self.line("while true do");
                 self.indent += 1;
                 self.gen_block_to(body, &Dest::Discard);
-                self.line("::continue::");
+                if Self::block_has_continue(body) { self.line("::continue::"); }
                 self.indent -= 1;
                 self.line("end");
             }
@@ -655,7 +686,7 @@ impl Codegen<'_> {
                 self.line("break");
                 self.indent -= 1;
                 self.line("end");
-                self.line("::continue::");
+                if Self::block_has_continue(body) { self.line("::continue::"); }
                 self.indent -= 1;
                 self.line("end");
             }
@@ -688,13 +719,16 @@ impl Codegen<'_> {
             let e = self.gen_inline(end);
             let stop = if *inclusive {
                 e
+            } else if let ExprKind::Int(n) = &end.kind {
+                // Compile-time constant: `0..5` → `0, 4`
+                n.parse::<i64>().ok().map(|v| (v - 1).to_string()).unwrap_or_else(|| format!("{} - 1", e))
             } else {
-                format!("({}) - 1", e)
+                format!("{} - 1", e)
             };
             self.line(&format!("for {} = {}, {} do", var, s, stop));
             self.indent += 1;
             self.gen_block_to(body, &Dest::Discard);
-            self.line("::continue::");
+            if Self::block_has_continue(body) { self.line("::continue::"); }
             self.indent -= 1;
             self.line("end");
         } else {
@@ -707,7 +741,7 @@ impl Codegen<'_> {
             self.indent += 1;
             self.line(&format!("local {} = {}[{}]", var, holder, idx));
             self.gen_block_to(body, &Dest::Discard);
-            self.line("::continue::");
+            if Self::block_has_continue(body) { self.line("::continue::"); }
             self.indent -= 1;
             self.line("end");
         }
@@ -1017,7 +1051,9 @@ impl Codegen<'_> {
         self.line("end");
 
         if plan.consumer == IterConsumerKind::For {
-            self.line("::continue::");
+            if let Some((_, body)) = for_body {
+                if Self::block_has_continue(body) { self.line("::continue::"); }
+            }
         }
         for (adapter, state) in chain.adapters.iter().zip(&states) {
             if adapter.kind == IterAdapterKind::Take {

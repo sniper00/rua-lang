@@ -100,22 +100,18 @@ function demo_control_flow(n)
     local count = 0
     while count < 10 do
         count = count + 1
-        ::continue::
     end
     local sum = 0
-    for i = 0, (10) - 1 do
+    for i = 0, 9 do
         sum = sum + i
-        ::continue::
     end
     for j = 1, 5 do
         sum = sum + j
-        ::continue::
     end
     local result = 0
     while count < 100 do
         count = count + 1
         result = count
-        ::continue::
     end
     if n == 0 then
         do
@@ -123,7 +119,7 @@ function demo_control_flow(n)
         end
     end
     local even_sum = 0
-    for i = 0, (20) - 1 do
+    for i = 0, 19 do
         if rt.irem(i, 2) ~= 0 then
             goto continue
         end
@@ -213,7 +209,6 @@ function demo_patterns(maybe)
         else
             break
         end
-        ::continue::
     end
     local num = 42
     local flag = true
@@ -249,8 +244,7 @@ function demo_expressions()
     local py = p.y
     local c = setmetatable({ value = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 }) }, Container)
     local origin = setmetatable({ x = 0, y = 0, label = "origin" }, Point)
-    for _ = 0, (5) - 1 do
-        ::continue::
+    for _ = 0, 4 do
     end
     local block_value
     local a = 10
