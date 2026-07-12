@@ -674,8 +674,9 @@ fn receiver_expr_text(
     position: FilePosition,
     offset: u32,
 ) -> Option<String> {
-    let (body, source_map, _inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
     let dot_pos = offset.saturating_sub(1);
 
     let mut candidates: Vec<(u32, ExprId)> = body
@@ -770,17 +771,17 @@ pub(crate) fn infer_dot_receiver(
     }
 
     // Find the HIR expression whose range matches the receiver's range.
-    let (body, _source_map, inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
-    for (expr_id, _expr) in body.exprs() {
-        let fr = _source_map.expr_range(expr_id)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let inference = ctx.inference.as_ref()?;
+    for (expr_id, _expr) in ctx.body.exprs() {
+        let fr = ctx.source_map.expr_range(expr_id)?;
         if fr.range == receiver_range {
             return inference.type_of_expr(expr_id).cloned();
         }
     }
     // Fallback: try to find by containing the receiver range.
-    for (expr_id, _expr) in body.exprs() {
-        let fr = _source_map.expr_range(expr_id)?;
+    for (expr_id, _expr) in ctx.body.exprs() {
+        let fr = ctx.source_map.expr_range(expr_id)?;
         if fr.range.contains(receiver_range.start())
             || fr.range.start() == receiver_range.start()
         {
@@ -968,8 +969,10 @@ fn expected_type_at_cursor(
     position: FilePosition,
     offset: u32,
 ) -> Option<Ty> {
-    let (body, source_map, inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
 
     for (expr_id, expr) in body.exprs() {
         // Cursor inside a function call argument list.
@@ -1014,11 +1017,10 @@ fn local_usage_counts(
     offset: u32,
 ) -> std::collections::HashMap<String, usize> {
     let mut counts = std::collections::HashMap::new();
-    let Some((body, _source_map, _scopes, _inference)) =
-        find_containing_body_full(db, def_map, position, offset)
-    else {
+    let Some(ctx) = find_containing_body_data(db, def_map, position, offset) else {
         return counts;
     };
+    let body = &ctx.body;
     let owner_id = match innermost_body_owner(def_map, position, offset) {
         Some(d) => d.id(),
         None => return counts,
@@ -1044,13 +1046,17 @@ fn visible_locals(
     position: FilePosition,
     offset: u32,
 ) -> Vec<LocalInfo> {
-    let Some((body, source_map, scopes, inference)) =
-        find_containing_body_full(db, def_map, position, offset)
-    else {
+    let Some(ctx) = find_containing_body_data(db, def_map, position, offset) else {
         return Vec::new();
     };
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let Some(scopes) = ctx.scopes.as_ref() else {
+        return Vec::new();
+    };
+    let inference = &ctx.inference;
 
-    let Some(scope) = find_innermost_scope(&body, &source_map, &scopes, offset) else {
+    let Some(scope) = find_innermost_scope(&body, &source_map, scopes, offset) else {
         return Vec::new();
     };
 
@@ -1161,11 +1167,13 @@ fn find_innermost_scope(
 // Common helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) type BodyData =
-    (Arc<Body>, Arc<BodySourceMap>, Arc<InferenceResult>);
-
-type BodyFullData =
-    (Arc<Body>, Arc<BodySourceMap>, Arc<BodyScopes>, Option<Arc<InferenceResult>>);
+/// Bundled body data for a single function / method.
+pub(crate) struct BodyContext {
+    pub body: Arc<Body>,
+    pub source_map: Arc<BodySourceMap>,
+    pub scopes: Option<Arc<BodyScopes>>,
+    pub inference: Option<Arc<InferenceResult>>,
+}
 
 /// Find the innermost function/method body containing `offset`.
 pub(crate) fn find_containing_body_data(
@@ -1173,28 +1181,14 @@ pub(crate) fn find_containing_body_data(
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
-) -> Option<BodyData> {
+) -> Option<BodyContext> {
     let owner = innermost_body_owner(def_map, position, offset)?;
-    Some((
-        db.body(owner.id())?,
-        db.body_source_map(owner.id())?,
-        db.infer(owner.id())?,
-    ))
-}
-
-fn find_containing_body_full(
-    db: &BaseDb,
-    def_map: &DefMap,
-    position: FilePosition,
-    offset: u32,
-) -> Option<BodyFullData> {
-    let owner = innermost_body_owner(def_map, position, offset)?;
-    Some((
-        db.body(owner.id())?,
-        db.body_source_map(owner.id())?,
-        db.body_scopes(owner.id())?,
-        db.infer(owner.id()),
-    ))
+    Some(BodyContext {
+        body: db.body(owner.id())?,
+        source_map: db.body_source_map(owner.id())?,
+        scopes: db.body_scopes(owner.id()),
+        inference: db.infer(owner.id()),
+    })
 }
 
 fn innermost_body_owner(
@@ -1359,8 +1353,10 @@ fn struct_literal_type(
     position: FilePosition,
     offset: u32,
 ) -> Option<Ty> {
-    let (body, source_map, inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
     for (expr_id, expr) in body.exprs() {
         let Expr::StructLiteral { path: _, .. } = expr else { continue };
         let range = source_map.expr_range(expr_id)?;
@@ -1410,8 +1406,10 @@ fn pattern_scrutinee_enum(
     position: FilePosition,
     offset: u32,
 ) -> Option<(Ty, Ty)> {
-    let (body, source_map, inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
 
     // 1. if-let: the entire `if` is an expression; check whether the cursor
     //    falls inside one whose condition is `Condition::Let`.
@@ -1480,8 +1478,10 @@ fn match_scrutinee_enum(
     position: FilePosition,
     offset: u32,
 ) -> Option<(Ty, Ty)> {
-    let (body, source_map, inference) =
-        find_containing_body_data(db, def_map, position, offset)?;
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
     for (expr_id, expr) in body.exprs() {
         let Expr::Match { scrutinee, .. } = expr else {
             continue;

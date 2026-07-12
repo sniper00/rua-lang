@@ -235,8 +235,12 @@ impl Analysis {
         let offset = position.position.offset.min(text.len() as u32);
         let def_map = self.db.def_map(position.position.file_id);
         let member_index = self.db.member_index(position.position.file_id);
-        let (body, source_map, inference) =
-            completion::find_containing_body_data(&self.db, &def_map, position.position, offset)?;
+        let ctx = completion::find_containing_body_data(
+            &self.db, &def_map, position.position, offset,
+        )?;
+        let body = &ctx.body;
+        let source_map = &ctx.source_map;
+        let inference = ctx.inference.as_ref()?;
 
         // Find the innermost Call or MethodCall containing the cursor.
         let mut best_expr_id: Option<crate::hir::ExprId> = None;
@@ -504,10 +508,11 @@ impl Analysis {
             }
             let receiver_name = before_dot.text().to_string();
             // Only search the body that contains the cursor.
-            let (body, _source_map, inference) = completion::find_containing_body_data(
+            let ctx = completion::find_containing_body_data(
                 &self.db, &def_map, position.position, offset,
             )?;
-            for (bid, binding) in body.bindings() {
+            let inference = ctx.inference.as_ref()?;
+            for (bid, binding) in ctx.body.bindings() {
                 if binding.name() == Some(&receiver_name) {
                     return inference.type_of_binding(bid).cloned();
                 }
