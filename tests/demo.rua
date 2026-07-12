@@ -486,6 +486,70 @@ fn demo_trait_object(person: &Person) -> String {
 }
 
 // ===========================================================================
+// 19. ? 运算符 — Result 和 Option 的错误传播
+// ===========================================================================
+
+/// 从文件加载配置，可能失败。
+fn load_config(path: String) -> Result<String, String> {
+    if path == "" {
+        Result::Err("empty path".to_string())
+    } else {
+        Result::Ok(format!("config from {}", path))
+    }
+}
+
+/// 解析整数，可能失败。
+fn parse_int(raw: String) -> Result<i64, String> {
+    Result::Ok(42) // 简化演示
+}
+
+/// 链式调用：使用 ? 传播错误。
+fn load_and_parse(path: String) -> Result<i64, String> {
+    let config = load_config(path)?;
+    let value = parse_int(config)?;
+    Result::Ok(value + 1)
+}
+
+/// Option 的 ? 运算符 — Some 解包，None 提前返回。
+fn maybe_double(x: Option<i64>) -> Option<i64> {
+    let v = x?;
+    Option::Some(v * 2)
+}
+
+/// Option ? 传播 None。
+fn chain_option(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    let va = a?;
+    let vb = b?;
+    Option::Some(va + vb)
+}
+
+// ===========================================================================
+// 20. 类型错误检测 — 混合类型的算术和 ? 误用
+// ===========================================================================
+
+/// 这些表达式在编译时或 IDE 中会产生类型错误：
+///   let bad1 = 1 + "hello";      // 错误：不能混合 string 和非 string
+///   let bad2 = "hello" + 1;      // 错误：同上
+///   let bad3 = 1.5 + "world";    // 错误：同上
+///   let bad4 = true + 1;         // 错误：bool 不能用于算术
+///   let bad5: i64 = 42; bad5?;  // 错误：? 只能用于 Result 或 Option
+///
+/// 字符串拼接是合法的：
+///   let ok = "hello" + " " + "world";  // 合法：String + String
+
+fn demo_arithmetic() -> i64 {
+    // 正确的算术运算
+    let int_sum = 1 + 2;
+    let float_sum = 1.5 + 2.5;
+    let mixed = 1 + 2.5; // i64 + f64 → f64
+
+    // 字符串拼接（合法）
+    let greeting = "hello" + " " + "world";
+
+    int_sum
+}
+
+// ===========================================================================
 // entry point — 综合演示
 // ===========================================================================
 
@@ -542,6 +606,15 @@ fn main() {
 
     // 字面量
     demo_literals();
+
+    // ? 运算符
+    let config_result = load_and_parse("app.rua");
+    let doubled = maybe_double(Option::Some(21));
+    let chained = chain_option(Option::Some(1), Option::Some(2));
+    let none_propagate = chain_option(Option::None, Option::Some(5));
+
+    // 类型检测
+    demo_arithmetic();
 
     // 注释
     demo_comments();
