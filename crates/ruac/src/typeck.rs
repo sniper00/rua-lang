@@ -681,6 +681,9 @@ pub struct TypeInfo {
     /// `+` expressions whose operands are both `String`, so codegen emits Lua
     /// string concatenation (`..`) instead of arithmetic.
     str_concats: std::collections::HashSet<(usize, usize)>,
+    /// Method-call expressions where the receiver is `Option<T>` and the method
+    /// is `map`, so codegen inlines the closure instead of emitting `:map()`.
+    option_maps: std::collections::HashSet<(usize, usize)>,
     /// First closure encountered during type checking. The compiler entry point
     /// uses this as a temporary backend gate until fused closure codegen lands.
     first_closure: Option<SourceRange>,
@@ -702,6 +705,10 @@ impl TypeInfo {
 
     pub fn is_str_concat(&self, start: usize, len: usize) -> bool {
         self.str_concats.contains(&(start, len))
+    }
+
+    pub fn is_option_map(&self, start: usize, len: usize) -> bool {
+        self.option_maps.contains(&(start, len))
     }
 
     pub fn first_closure(&self) -> Option<SourceRange> {
@@ -1001,6 +1008,7 @@ pub fn check(prog: &Program, files: &[String]) -> Result<TypeInfo, String> {
             int_rems: tc.int_rems,
             str_methods: tc.str_methods,
             str_concats: tc.str_concats,
+            option_maps: tc.option_maps,
             first_closure: tc.first_closure,
             iter_plans: tc.iter_plans,
         })
@@ -1093,6 +1101,8 @@ struct Tc {
     str_methods: std::collections::HashSet<(usize, usize)>,
     /// `(span.start, span.len)` of `String + String` concatenations.
     str_concats: std::collections::HashSet<(usize, usize)>,
+    /// `(span.start, span.len)` of `Option::map` calls that need inline codegen.
+    option_maps: std::collections::HashSet<(usize, usize)>,
     /// Resolved member accesses (`x.field` / `x.method()`) for the LSP.
     members: Vec<MemberTarget>,
     /// Receiver types at member-access sites (for completion `x.`).
@@ -1171,6 +1181,7 @@ impl Tc {
             int_rems: std::collections::HashSet::new(),
             str_methods: std::collections::HashSet::new(),
             str_concats: std::collections::HashSet::new(),
+            option_maps: std::collections::HashSet::new(),
             members: Vec::new(),
             receivers: Vec::new(),
             bindings: Vec::new(),
@@ -2575,6 +2586,10 @@ impl Tc {
             } => {
                 let rt = self.infer(recv);
                 self.record_receiver(recv.span, &rt); // C1
+                // Track Option::map calls for codegen inlining.
+                if method == "map" && matches!(rt, Ty::Option(_)) {
+                    self.option_maps.insert((sp.start, sp.len));
+                }
                 let arg_tys = self.infer_method_args(&rt, method, args);
                 for (arg, ty) in args.iter().zip(&arg_tys) {
                     self.reject_iter_escape(ty, arg.span);

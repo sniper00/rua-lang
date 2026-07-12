@@ -1383,6 +1383,34 @@ impl Codegen<'_> {
                     all.extend(a);
                     return format!("rt.str[\"{}\"]({})", method, all.join(", "));
                 }
+                // Option::map(f) — Some(v) compiles to v, None to nil.
+                // Inline the closure application directly on the raw value.
+                if self.info.is_option_map(e.span.start, e.span.len) && args.len() == 1 {
+                    let val = self.fresh_tmp();
+                    self.line(&format!("local {} = {}", val, r));
+                    self.line(&format!("if {} ~= nil then", val));
+                    self.indent += 1;
+                    // Identity closure `|v| v` → just return the value
+                    if let ExprKind::Closure { params, body, .. } = &args[0].kind {
+                        if params.len() == 1 {
+                            if let ClosureBody::Expr(inner) = body {
+                                if let ExprKind::Path(segs) = &inner.kind
+                                    && segs.len() == 1 && segs[0] == params[0].name
+                                {
+                                    // Identity: |v| v → value unchanged
+                                    self.indent -= 1;
+                                    self.line("end");
+                                    return val;
+                                }
+                            }
+                        }
+                        let applied = self.gen_inlined_closure(&args[0], &[val.clone()]);
+                        self.line(&format!("{} = {}", val, applied));
+                    }
+                    self.indent -= 1;
+                    self.line("end");
+                    return val;
+                }
                 format!("{}:{}({})", r, method, a.join(", "))
             }
             ExprKind::Field { base, name, .. } => {
