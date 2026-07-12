@@ -317,49 +317,14 @@ impl<'a> InferenceContext<'a> {
             }
             Expr::Unary { op, expr } => self.infer_unary(expr_id, op, expr),
             Expr::Binary { op, lhs, rhs } => self.infer_binary(expr_id, op, lhs, rhs),
-            Expr::Range { start, end, .. } => {
-                let mut diverges = false;
-                for bound in [start, end] {
-                    let bound_ty = self.infer_expr(bound, Some(&Ty::I64));
-                    diverges |= bound_ty.is_never();
-                    self.report_mismatch(
-                        InferenceSource::Expr(bound),
-                        &Ty::I64,
-                        &bound_ty,
-                        TypeMismatchContext::RangeBound,
-                    );
-                }
-                if diverges {
-                    Ty::Never
-                } else {
-                    Ty::Iterator(Box::new(Ty::I64))
-                }
-            }
+            Expr::Range { start, end, .. } => self.infer_range_expr(start, end),
             Expr::Closure {
                 params,
                 return_type,
                 body,
             } => self.infer_closure(expr_id, &params, return_type.as_ref(), body, expected),
-            Expr::Assign { target, value } => {
-                let target_ty = self.infer_expr(target, None);
-                let value_ty = self.infer_expr(value, Some(&target_ty));
-                self.report_mismatch(
-                    InferenceSource::Expr(value),
-                    &target_ty,
-                    &value_ty,
-                    TypeMismatchContext::Assignment,
-                );
-                if target_ty.is_never() || value_ty.is_never() {
-                    Ty::Never
-                } else {
-                    Ty::UNIT
-                }
-            }
-            Expr::Try { expr } => match self.infer_expr(expr, expected) {
-                Ty::Result(ok, _) => *ok,
-                Ty::Never => Ty::Never,
-                _ => Ty::Unknown,
-            },
+            Expr::Assign { target, value } => self.infer_assign_expr(target, value),
+            Expr::Try { expr } => self.infer_try_expr(expr, expected),
             Expr::Call { callee, args } => self.infer_call(expr_id, callee, &args, expected),
             Expr::MethodCall {
                 receiver,
@@ -368,68 +333,13 @@ impl<'a> InferenceContext<'a> {
                 args,
             } => self.infer_method_call(expr_id, receiver, method, &type_args, &args, expected),
             Expr::Field { base, field } => self.infer_field(base, field),
-            Expr::Index { base, index } => {
-                let base_ty = self.infer_expr(base, None);
-                let index_expected = match &base_ty {
-                    Ty::Vec(_) | Ty::Iterator(_) => Ty::I64,
-                    Ty::HashMap(key, _) => (**key).clone(),
-                    _ => Ty::Unknown,
-                };
-                let index_ty = self.infer_expr(index, Some(&index_expected));
-                self.report_mismatch(
-                    InferenceSource::Expr(index),
-                    &index_expected,
-                    &index_ty,
-                    TypeMismatchContext::Index,
-                );
-                if base_ty.is_never() || index_ty.is_never() {
-                    Ty::Never
-                } else {
-                    match base_ty {
-                        Ty::Vec(item) | Ty::Iterator(item) => *item,
-                        Ty::HashMap(_, value) => *value,
-                        _ => Ty::Unknown,
-                    }
-                }
-            }
+            Expr::Index { base, index } => self.infer_index_expr(base, index),
             Expr::Paren { expr } => self.infer_expr(expr, expected),
             Expr::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => {
-                let condition_diverges = self.infer_condition(condition);
-                let then_ty = self.infer_expr(then_branch, expected);
-                let mut else_fact = None;
-                let result = match else_branch {
-                    Some(else_branch) => {
-                        let else_ty = self.infer_expr(else_branch, expected);
-                        let result = then_ty.join(&else_ty);
-                        else_fact = Some((else_branch, else_ty));
-                        result
-                    }
-                    None => Ty::UNIT,
-                };
-                if result.is_unknown()
-                    && let Some(expected) = expected
-                {
-                    self.report_mismatch(
-                        InferenceSource::Expr(then_branch),
-                        expected,
-                        &then_ty,
-                        TypeMismatchContext::Branch,
-                    );
-                    if let Some((else_branch, else_ty)) = else_fact {
-                        self.report_mismatch(
-                            InferenceSource::Expr(else_branch),
-                            expected,
-                            &else_ty,
-                            TypeMismatchContext::Branch,
-                        );
-                    }
-                }
-                diverge_or(condition_diverges, result)
-            }
+            } => self.infer_if_expr(condition, then_branch, else_branch, expected),
             Expr::Match { scrutinee, arms } => {
                 let scrutinee_ty = self.infer_expr(scrutinee, None);
                 let result = self.infer_match(&arms, &scrutinee_ty, expected);
@@ -829,6 +739,110 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
+    fn infer_range_expr(&mut self, start: ExprId, end: ExprId) -> Ty {
+        let mut diverges = false;
+        for bound in [start, end] {
+            let bound_ty = self.infer_expr(bound, Some(&Ty::I64));
+            diverges |= bound_ty.is_never();
+            self.report_mismatch(
+                InferenceSource::Expr(bound),
+                &Ty::I64,
+                &bound_ty,
+                TypeMismatchContext::RangeBound,
+            );
+        }
+        diverge_or(diverges, Ty::Iterator(Box::new(Ty::I64)))
+    }
+
+    fn infer_assign_expr(&mut self, target: ExprId, value: ExprId) -> Ty {
+        let target_ty = self.infer_expr(target, None);
+        let value_ty = self.infer_expr(value, Some(&target_ty));
+        self.report_mismatch(
+            InferenceSource::Expr(value),
+            &target_ty,
+            &value_ty,
+            TypeMismatchContext::Assignment,
+        );
+        if target_ty.is_never() || value_ty.is_never() {
+            Ty::Never
+        } else {
+            Ty::UNIT
+        }
+    }
+
+    fn infer_try_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
+        match self.infer_expr(expr, expected) {
+            Ty::Result(ok, _) => *ok,
+            Ty::Never => Ty::Never,
+            _ => Ty::Unknown,
+        }
+    }
+
+    fn infer_index_expr(&mut self, base: ExprId, index: ExprId) -> Ty {
+        let base_ty = self.infer_expr(base, None);
+        let index_expected = match &base_ty {
+            Ty::Vec(_) | Ty::Iterator(_) => Ty::I64,
+            Ty::HashMap(key, _) => (**key).clone(),
+            _ => Ty::Unknown,
+        };
+        let index_ty = self.infer_expr(index, Some(&index_expected));
+        self.report_mismatch(
+            InferenceSource::Expr(index),
+            &index_expected,
+            &index_ty,
+            TypeMismatchContext::Index,
+        );
+        if base_ty.is_never() || index_ty.is_never() {
+            Ty::Never
+        } else {
+            match base_ty {
+                Ty::Vec(item) | Ty::Iterator(item) => *item,
+                Ty::HashMap(_, value) => *value,
+                _ => Ty::Unknown,
+            }
+        }
+    }
+
+    fn infer_if_expr(
+        &mut self,
+        condition: Condition,
+        then_branch: ExprId,
+        else_branch: Option<ExprId>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let condition_diverges = self.infer_condition(condition);
+        let then_ty = self.infer_expr(then_branch, expected);
+        let mut else_fact = None;
+        let result = match else_branch {
+            Some(else_branch) => {
+                let else_ty = self.infer_expr(else_branch, expected);
+                let result = then_ty.join(&else_ty);
+                else_fact = Some((else_branch, else_ty));
+                result
+            }
+            None => Ty::UNIT,
+        };
+        if result.is_unknown()
+            && let Some(expected) = expected
+        {
+            self.report_mismatch(
+                InferenceSource::Expr(then_branch),
+                expected,
+                &then_ty,
+                TypeMismatchContext::Branch,
+            );
+            if let Some((else_branch, else_ty)) = else_fact {
+                self.report_mismatch(
+                    InferenceSource::Expr(else_branch),
+                    expected,
+                    &else_ty,
+                    TypeMismatchContext::Branch,
+                );
+            }
+        }
+        diverge_or(condition_diverges, result)
+    }
+
     fn infer_path(&mut self, path: &[NameRefId], expected: Option<&Ty>) -> Ty {
         if let [name_ref] = path {
             match self.resolution.resolve(*name_ref) {
@@ -930,6 +944,9 @@ impl<'a> InferenceContext<'a> {
                     .map(|callable| callable.return_ty().clone())
             });
         let closure_return = expected_return.clone().unwrap_or(Ty::Unknown);
+        // Manual save/restore of return-type context.  If infer_expr panics the
+        // stack state would be corrupted, but LSP request handlers catch panics
+        // at the top level, so the process never observes the corrupted state.
         let outer_return = std::mem::replace(&mut self.return_ty, closure_return);
         self.closure_returns.push(Ty::Never);
         let actual_return = self.infer_expr(body, expected_return.as_ref());

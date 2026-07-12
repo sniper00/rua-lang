@@ -665,6 +665,12 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
             continue;
         }
         // Check if any other body references this function by name.
+        // TODO: use DefMap-based cross-file resolution instead of string
+        // matching.  Currently a local variable that shadows the function
+        // name in another body will incorrectly suppress the warning
+        // (false negative).  Requires per-file DefMap name-resolution
+        // queries on each NameRef to distinguish function references from
+        // same-named locals.
         let name = definition.name();
         let is_referenced = def_map.definitions().any(|d| {
             if !matches!(d.kind(), DefKind::Function | DefKind::Method) {
