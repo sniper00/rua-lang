@@ -54,6 +54,87 @@ use rua_analysis::{
 use rua_syntax::LineIndex;
 
 // ---------------------------------------------------------------------------
+// request-handler macros — factor out the 15-line extract→error→call→respond
+// template repeated in ~28 handlers, saving ~400 lines of boilerplate.
+// ---------------------------------------------------------------------------
+
+/// Dispatch a position-based request (hover, goto-def, references, etc.).
+/// The callback receives the resolved `ProjectPosition` and an `Analysis`
+/// snapshot; it must return `Option<T>` for some serializable `T`.
+macro_rules! handle_position_request {
+    ($self:ident, $req:ident, $Params:ty, $method:expr,
+     |$pp:ident, $analysis:ident| $body:expr) => {{
+        let id = $req.id.clone();
+        let (id, params) = match $req.extract::<$Params>($method) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid params: {e:?}"),
+                );
+                let _ = $self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
+        let $analysis = $self.host.analysis();
+        let result = $self
+            .project_position(
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+            .and_then(|$pp| $body);
+        let resp = Response::new_ok(id, result);
+        let _ = $self.connection.sender.send(Message::Response(resp));
+    }};
+}
+
+/// Dispatch a document-based request (semantic tokens, folding, symbols,
+/// etc.).  The callback receives a `FileId` and an `Analysis` snapshot.
+/// `$empty` is the empty/default response returned when the file is unknown.
+macro_rules! handle_doc_request {
+    ($self:ident, $req:ident, $Params:ty, $method:expr, $empty:expr,
+     |$file_id:ident, $analysis:ident| $body:expr) => {{
+        let id = $req.id.clone();
+        let (id, params) = match $req.extract::<$Params>($method) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid params: {e:?}"),
+                );
+                let _ = $self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
+        let Some($file_id) = $self.file_id_for_uri(&params.text_document.uri) else {
+            let resp = Response::new_ok(id, $empty);
+            let _ = $self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let $analysis = $self.host.analysis();
+        let result = $body;
+        let resp = Response::new_ok(id, result);
+        let _ = $self.connection.sender.send(Message::Response(resp));
+    }};
+}
+
+/// Shorthand for parsing a notification body.  Prints a log line and returns
+/// from the enclosing function on parse failure.
+macro_rules! extract_notification {
+    ($not:expr, $T:ty, $label:literal, |$params:ident| $body:expr) => {{
+        match serde_json::from_value::<$T>($not.params) {
+            Ok($params) => $body,
+            Err(e) => {
+                eprintln!("rua-lsp: bad {} params: {e}", $label);
+                return;
+            }
+        }
+    }};
+}
+
+// ---------------------------------------------------------------------------
 // Server state
 // ---------------------------------------------------------------------------
 
@@ -479,64 +560,19 @@ impl Server {
     // -- hover ---------------------------------------------------------------
 
     fn handle_hover(&mut self, req: Request) {
-        let id = req.id.clone();
-        let (id, params) = match req.extract::<lsp_types::HoverParams>(HoverRequest::METHOD) {
-            Ok(v) => v,
-            Err(e) => {
-                let resp = Response::new_err(
-                    id,
-                    lsp_server::ErrorCode::InvalidParams as i32,
-                    format!("invalid hover params: {e:?}"),
-                );
-                let _ = self.connection.sender.send(Message::Response(resp));
-                return;
-            }
-        };
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-
-        let result = self
-            .project_position(uri, pos)
-            .and_then(|pp| {
-                let analysis = self.host.analysis();
-                analysis.hover(pp)
-            })
-            .map(|hover| to_lsp_hover(&hover));
-
-        let resp = Response::new_ok(id, result);
-        let _ = self.connection.sender.send(Message::Response(resp));
+        handle_position_request!(self, req, lsp_types::HoverParams, HoverRequest::METHOD, |pp, analysis| {
+            analysis.hover(pp).map(|hover| to_lsp_hover(&hover))
+        });
     }
 
     // -- goto definition -----------------------------------------------------
 
     fn handle_definition(&mut self, req: Request) {
-        let id = req.id.clone();
-        let (id, params) =
-            match req.extract::<lsp_types::GotoDefinitionParams>(GotoDefinition::METHOD) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response::new_err(
-                        id,
-                        lsp_server::ErrorCode::InvalidParams as i32,
-                        format!("invalid goto-def params: {e:?}"),
-                    );
-                    let _ = self.connection.sender.send(Message::Response(resp));
-                    return;
-                }
-            };
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-
-        let result = self
-            .project_position(uri, pos)
-            .and_then(|pp| {
-                let analysis = self.host.analysis();
-                analysis.goto_definition(pp)
-            })
-            .and_then(|target| self.nav_to_location(&target));
-
-        let resp = Response::new_ok(id, result);
-        let _ = self.connection.sender.send(Message::Response(resp));
+        handle_position_request!(self, req, lsp_types::GotoDefinitionParams, GotoDefinition::METHOD, |pp, analysis| {
+            analysis
+                .goto_definition(pp)
+                .and_then(|target| self.nav_to_location(&target))
+        });
     }
 
     // -- goto implementation -------------------------------------------------
@@ -682,30 +718,8 @@ impl Server {
     // -- signature help ------------------------------------------------------
 
     fn handle_signature_help(&mut self, req: Request) {
-        let id = req.id.clone();
-        let (id, params): (_, lsp_types::SignatureHelpParams) =
-            match req.extract::<lsp_types::SignatureHelpParams>(SignatureHelpRequest::METHOD) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response::new_err(
-                        id,
-                        lsp_server::ErrorCode::InvalidParams as i32,
-                        format!("invalid signature-help params: {e:?}"),
-                    );
-                    let _ = self.connection.sender.send(Message::Response(resp));
-                    return;
-                }
-            };
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-
-        let result = self
-            .project_position(uri, pos)
-            .and_then(|pp| {
-                let analysis = self.host.analysis();
-                analysis.signature_help(pp)
-            })
-            .map(|info| {
+        handle_position_request!(self, req, lsp_types::SignatureHelpParams, SignatureHelpRequest::METHOD, |pp, analysis| {
+            analysis.signature_help(pp).map(|info| {
                 let parameters: Vec<ParameterInformation> = info
                     .parameters
                     .iter()
@@ -724,10 +738,8 @@ impl Server {
                     active_signature: Some(0),
                     active_parameter: Some(info.active_parameter),
                 }
-            });
-
-        let resp = Response::new_ok(id, result);
-        let _ = self.connection.sender.send(Message::Response(resp));
+            })
+        });
     }
 
     // -- inlay hints ---------------------------------------------------------
@@ -2765,43 +2777,20 @@ impl Server {
     // -- semantic tokens -----------------------------------------------------
 
     fn handle_semantic_tokens(&mut self, req: Request) {
-        let id = req.id.clone();
-        let (id, params) = match req.extract::<lsp_types::SemanticTokensParams>(
-            SemanticTokensFullRequest::METHOD,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                let response = Response::new_err(
-                    id,
-                    lsp_server::ErrorCode::InvalidParams as i32,
-                    format!("invalid semantic-token params: {error:?}"),
-                );
-                let _ = self.connection.sender.send(Message::Response(response));
-                return;
+        handle_doc_request!(
+            self, req, lsp_types::SemanticTokensParams, SemanticTokensFullRequest::METHOD,
+            Option::<SemanticTokensResult>::None,
+            |file_id, analysis| {
+                let source = analysis.parse(file_id).syntax_node().text().to_string();
+                let line_index = LineIndex::new(&source);
+                let tokens = analysis.semantic_tokens(file_id);
+                let data = encode_semantic_tokens(&tokens, &line_index, &source);
+                Some(SemanticTokensResult::Tokens(SemanticTokens {
+                    result_id: None,
+                    data,
+                }))
             }
-        };
-        let uri = &params.text_document.uri;
-        let Some(file_id) = self.file_id_for_uri(uri) else {
-            let resp = Response::new_ok(
-                id,
-                Option::<SemanticTokensResult>::None,
-            );
-            let _ = self.connection.sender.send(Message::Response(resp));
-            return;
-        };
-
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
-        let tokens = analysis.semantic_tokens(file_id);
-        let data = encode_semantic_tokens(&tokens, &line_index, &source);
-
-        let result = SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data,
-        });
-        let resp = Response::new_ok(id, Some(result));
-        let _ = self.connection.sender.send(Message::Response(resp));
+        );
     }
 
     fn handle_semantic_tokens_range(&mut self, req: Request) {
@@ -2863,75 +2852,36 @@ impl Server {
     fn handle_notification(&mut self, not: Notification) {
         match not.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                let params: lsp_types::DidOpenTextDocumentParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didOpen params: {e}");
-                            return;
-                        }
-                    };
-                self.open_document(params.text_document.uri, params.text_document.text);
+                extract_notification!(not, lsp_types::DidOpenTextDocumentParams, "didOpen", |p| {
+                    self.open_document(p.text_document.uri, p.text_document.text);
+                });
             }
             DidChangeTextDocument::METHOD => {
-                let params: lsp_types::DidChangeTextDocumentParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didChange params: {e}");
-                            return;
-                        }
-                    };
-                if let Some(change) = params.content_changes.last() {
-                    self.change_document(
-                        params.text_document.uri,
-                        change.text.clone(),
-                    );
-                }
+                extract_notification!(not, lsp_types::DidChangeTextDocumentParams, "didChange", |p| {
+                    if let Some(change) = p.content_changes.last() {
+                        self.change_document(p.text_document.uri, change.text.clone());
+                    }
+                });
             }
             DidCloseTextDocument::METHOD => {
-                let params: lsp_types::DidCloseTextDocumentParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didClose params: {e}");
-                            return;
-                        }
-                    };
-                self.close_document(params.text_document.uri);
+                extract_notification!(not, lsp_types::DidCloseTextDocumentParams, "didClose", |p| {
+                    self.close_document(p.text_document.uri);
+                });
             }
             DidSaveTextDocument::METHOD => {
-                let params: lsp_types::DidSaveTextDocumentParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didSave params: {e}");
-                            return;
-                        }
-                    };
-                self.handle_did_save(&params);
+                extract_notification!(not, lsp_types::DidSaveTextDocumentParams, "didSave", |p| {
+                    self.handle_did_save(&p);
+                });
             }
             DidChangeConfiguration::METHOD => {
-                let params: lsp_types::DidChangeConfigurationParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didChangeConfiguration params: {e}");
-                            return;
-                        }
-                    };
-                self.reload_configuration(&params.settings);
+                extract_notification!(not, lsp_types::DidChangeConfigurationParams, "didChangeConfiguration", |p| {
+                    self.reload_configuration(&p.settings);
+                });
             }
             DidChangeWatchedFiles::METHOD => {
-                let params: DidChangeWatchedFilesParams =
-                    match serde_json::from_value(not.params) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("rua-lsp: bad didChangeWatchedFiles params: {e}");
-                            return;
-                        }
-                    };
-                self.handle_watched_file_change(&params);
+                extract_notification!(not, DidChangeWatchedFilesParams, "didChangeWatchedFiles", |p| {
+                    self.handle_watched_file_change(&p);
+                });
             }
             _ => {}
         }
@@ -3035,6 +2985,21 @@ impl Server {
 
     // -- file watchers --------------------------------------------------------
 
+    /// Try to add a path to the watch list, skipping duplicates.
+    fn try_add_watcher(
+        glob: &str,
+        watched_paths: &mut Vec<PathBuf>,
+        watchers: &mut Vec<FileSystemWatcher>,
+    ) {
+        if !watched_paths.iter().any(|p| p.to_string_lossy() == glob) {
+            watchers.push(FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::String(glob.to_string()),
+                kind: Some(WatchKind::all()),
+            });
+            watched_paths.push(PathBuf::from(glob));
+        }
+    }
+
     /// Register `workspace/didChangeWatchedFiles` for configured library roots.
     fn register_watchers(&mut self) {
         let mut watchers: Vec<FileSystemWatcher> = Vec::new();
@@ -3047,26 +3012,13 @@ impl Server {
                     canonical
                 };
                 let glob = pattern.to_string_lossy().to_string();
-                // Only register if not already watching this path.
-                if !self.watched_paths.iter().any(|p| p.to_string_lossy() == glob) {
-                    watchers.push(FileSystemWatcher {
-                        glob_pattern: lsp_types::GlobPattern::String(glob.clone()),
-                        kind: Some(WatchKind::all()),
-                    });
-                    self.watched_paths.push(PathBuf::from(&glob));
-                }
+                Self::try_add_watcher(&glob, &mut self.watched_paths, &mut watchers);
             }
         }
         for mount_path in self.library_mounts.values() {
             if let Ok(canonical) = std::fs::canonicalize(mount_path) {
                 let glob = canonical.to_string_lossy().to_string();
-                if !self.watched_paths.iter().any(|p| p.to_string_lossy() == glob) {
-                    watchers.push(FileSystemWatcher {
-                        glob_pattern: lsp_types::GlobPattern::String(glob.clone()),
-                        kind: Some(WatchKind::all()),
-                    });
-                    self.watched_paths.push(PathBuf::from(&glob));
-                }
+                Self::try_add_watcher(&glob, &mut self.watched_paths, &mut watchers);
             }
         }
 
@@ -3141,21 +3093,19 @@ impl Server {
         }
     }
 
+    /// Register a file by filesystem path.  Delegates to [`ensure_file_id`] so
+    /// that the canonical URI-to-path round-trip produces a key consistent with
+    /// URI-registered files, avoiding duplicate FileIds.
     fn ensure_file_id_for_path(&mut self, path: &Path) -> FileId {
         if let Some((_, id)) = self.file_ids.get(path) {
             return *id;
         }
-        let id = FileId::new(self.next_file_id);
-        self.next_file_id += 1;
         let uri = path_to_uri(path).unwrap_or_else(|| {
-            format!("file:///unknown/{}", id.index())
+            format!("file:///unknown/{}", self.next_file_id)
                 .parse()
                 .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
         });
-        self.file_ids
-            .insert(path.to_path_buf(), (uri.clone(), id));
-        self.file_to_uri.insert(id, uri);
-        id
+        self.ensure_file_id(&uri)
     }
 
     // -- helpers -------------------------------------------------------------
