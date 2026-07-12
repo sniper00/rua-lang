@@ -1392,8 +1392,13 @@ impl Server {
                     data: None,
                 });
             }
+        }
 
-            // "Sort struct fields" — alphabetically reorder fields.
+        // The actions below use the cursor position (sel_start) but do
+        // NOT require a text selection — they work on the enclosing
+        // struct, function, or statement at the cursor.
+
+        // "Sort struct fields" — alphabetically reorder fields.
             for definition in def_map.definitions() {
                 if definition.kind() != rua_analysis::DefKind::Struct {
                     continue;
@@ -1488,7 +1493,6 @@ impl Server {
                     });
                 }
             }
-        }
 
         // "Extract function" — wrap selected code in a new function.
         if sel_end > sel_start && (sel_end - sel_start) > 10 {
