@@ -788,7 +788,18 @@ impl Server {
             };
 
             // Type hints for let bindings: show `: Type` after the name.
+            // Skip parameters (they already have types in source) and let
+            // bindings that already have an explicit type annotation.
             for (binding_id, binding) in body.bindings() {
+                // Parameters and closure parameters already have explicit types.
+                if matches!(
+                    binding.kind(),
+                    rua_analysis::BindingKind::Parameter
+                        | rua_analysis::BindingKind::ClosureParameter
+                        | rua_analysis::BindingKind::SelfParameter
+                ) {
+                    continue;
+                }
                 let Some(_name) = binding.name() else { continue };
                 let Some(ty) = inference.type_of_binding(binding_id) else {
                     continue;
