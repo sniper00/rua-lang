@@ -367,6 +367,19 @@ impl ModuleData {
     }
 }
 
+/// How [`DefMap::resolve_path`] resolves multi-segment paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolveStrategy {
+    /// Return the first matching definition (for hover).
+    First,
+    /// Require exactly one matching definition (for goto-def).
+    Unique,
+    /// Walk up the parent-module chain for the first segment (for completions).
+    Lexical,
+    /// Lexical scoping + unique-match requirement.
+    LexicalUnique,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefMap {
     project_id: Option<ProjectId>,
@@ -551,60 +564,55 @@ impl DefMap {
         }
     }
 
-    pub fn resolve_path(&self, start: ModuleId, segments: &[&str]) -> Option<&Definition> {
-        let (&last, parents) = segments.split_last()?;
-        let mut module_id = start;
-        for segment in parents {
-            module_id = self.resolve_name(module_id, segment)?.target_module()?;
-        }
-        self.resolve_name(module_id, last)
-    }
-
-    pub fn resolve_path_unique(&self, start: ModuleId, segments: &[&str]) -> Option<&Definition> {
-        let (&last, parents) = segments.split_last()?;
-        let mut module_id = start;
-        for segment in parents {
-            module_id = self
-                .resolve_name_unique(module_id, segment)?
-                .target_module()?;
-        }
-        self.resolve_name_unique(module_id, last)
-    }
-
-    pub fn resolve_path_lexical(
+    /// Unified multi-segment path resolution.  `strategy` selects:
+    /// - [`ResolveStrategy::First`] / [`ResolveStrategy::Unique`]: start from
+    ///   `module_id` and follow each segment through [`resolve_name`] /
+    ///   [`resolve_name_unique`].
+    /// - [`ResolveStrategy::Lexical`] / [`ResolveStrategy::LexicalUnique`]:
+    ///   walk the parent chain for the first segment, then proceed normally.
+    pub fn resolve_path(
         &self,
-        mut start: ModuleId,
+        start: ModuleId,
         segments: &[&str],
+        strategy: ResolveStrategy,
     ) -> Option<&Definition> {
-        let (&first, remaining) = segments.split_first()?;
-        let mut definition = loop {
-            if let Some(definition) = self.resolve_name(start, first) {
-                break definition;
-            }
-            start = self.module(start)?.parent()?;
-        };
-        for segment in remaining {
-            definition = self.resolve_name(definition.target_module()?, segment)?;
-        }
-        Some(definition)
-    }
+        let require_unique =
+            matches!(strategy, ResolveStrategy::Unique | ResolveStrategy::LexicalUnique);
+        let is_lexical =
+            matches!(strategy, ResolveStrategy::Lexical | ResolveStrategy::LexicalUnique);
 
-    pub fn resolve_path_lexical_unique(
-        &self,
-        mut start: ModuleId,
-        segments: &[&str],
-    ) -> Option<&Definition> {
-        let (&first, remaining) = segments.split_first()?;
-        let mut definition = loop {
-            if self.module(start)?.definitions.contains_key(first) {
-                break self.resolve_name_unique(start, first)?;
-            }
-            start = self.module(start)?.parent()?;
-        };
-        for segment in remaining {
-            definition = self.resolve_name_unique(definition.target_module()?, segment)?;
+        // Helper: resolve a single segment with the chosen uniqueness policy.
+        macro_rules! resolve {
+            ($slf:expr, $m:expr, $n:expr) => {
+                if require_unique {
+                    $slf.resolve_name_unique($m, $n)
+                } else {
+                    $slf.resolve_name($m, $n)
+                }
+            };
         }
-        Some(definition)
+
+        if is_lexical {
+            let (&first, remaining) = segments.split_first()?;
+            let mut cur = start;
+            let mut definition = loop {
+                if let Some(d) = resolve!(self, cur, first) {
+                    break d;
+                }
+                cur = self.module(cur)?.parent()?;
+            };
+            for segment in remaining {
+                definition = resolve!(self, definition.target_module()?, segment)?;
+            }
+            Some(definition)
+        } else {
+            let (&last, parents) = segments.split_last()?;
+            let mut module_id = start;
+            for segment in parents {
+                module_id = resolve!(self, module_id, segment)?.target_module()?;
+            }
+            resolve!(self, module_id, last)
+        }
     }
 }
 
@@ -828,7 +836,7 @@ impl DefMapBuilder<'_> {
             .iter()
             .filter_map(|(module_id, import)| {
                 let segments: Vec<_> = import.path().iter().map(String::as_str).collect();
-                let definition = self.map.resolve_path_lexical(*module_id, &segments)?;
+                let definition = self.map.resolve_path(*module_id, &segments, ResolveStrategy::Lexical)?;
                 Some((
                     *module_id,
                     import.binding_name()?.to_string(),
@@ -853,6 +861,7 @@ mod tests {
     use crate::{
         AnalysisHost, Change, DefKind, FileId, FileKind, SourceRootId, SourceRootKind, Visibility,
     };
+    use super::ResolveStrategy;
 
     fn host_with_module_tree() -> (AnalysisHost, FileId, FileId) {
         let root_id = SourceRootId::new(0);
@@ -889,7 +898,7 @@ mod tests {
         let map = host.analysis().def_map(main_id);
         let root = map.root();
 
-        let root_fn = map.resolve_path(root, &["root_fn"]).expect("root function");
+        let root_fn = map.resolve_path(root, &["root_fn"], ResolveStrategy::First).expect("root function");
         assert_eq!(root_fn.kind(), DefKind::Function);
         assert_eq!(root_fn.visibility(), Visibility::Public);
         assert_eq!(root_fn.file_id(), main_id);
@@ -901,20 +910,20 @@ mod tests {
             Some(main_id)
         );
         assert_eq!(
-            map.resolve_path(root, &["inline", "Thing"])
+            map.resolve_path(root, &["inline", "Thing"], ResolveStrategy::First)
                 .expect("inline struct")
                 .kind(),
             DefKind::Struct
         );
 
-        let math = map.resolve_path(root, &["math"]).expect("file module");
+        let math = map.resolve_path(root, &["math"], ResolveStrategy::First).expect("file module");
         let math_module = math.target_module().expect("math module target");
         assert_eq!(
             map.module(math_module).expect("math data").file_id(),
             Some(math_id)
         );
         assert_eq!(
-            map.resolve_path(root, &["math", "Number"])
+            map.resolve_path(root, &["math", "Number"], ResolveStrategy::First)
                 .expect("enum in file module")
                 .kind(),
             DefKind::Enum

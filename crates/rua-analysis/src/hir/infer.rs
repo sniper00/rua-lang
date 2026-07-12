@@ -4,8 +4,8 @@ use super::{
     BinaryOp, BindingId, BindingKind, Body, BodyId, BodyResolution, CallableRequirement,
     CallableSignature, CallableTy, Condition, DefId, DefKind, DefMap, Definition, Expr, ExprId,
     ItemSignature, LiteralKind, LocalResolveResult, MatchArm, MemberIndex, MemberKind,
-    MemberResolution, MemberTarget, NameRefId, Pat, PatId, Statement, StructField, Substitution,
-    Ty, TypeRef, UnaryOp, unify,
+    MemberResolution, MemberTarget, NameRefId, Pat, PatId, ResolveStrategy, Statement,
+    StructField, Substitution, Ty, TypeRef, UnaryOp, unify,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1698,10 +1698,10 @@ impl<'a> InferenceContext<'a> {
             .collect::<Option<Vec<_>>>()?;
         if names.first() == Some(&"self") {
             self.def_map
-                .resolve_path_unique(self.owner.module_id(), names.get(1..)?)
+                .resolve_path(self.owner.module_id(), names.get(1..)?, ResolveStrategy::Unique)
         } else {
             self.def_map
-                .resolve_path_lexical_unique(self.owner.module_id(), &names)
+                .resolve_path(self.owner.module_id(), &names, ResolveStrategy::LexicalUnique)
         }
     }
 

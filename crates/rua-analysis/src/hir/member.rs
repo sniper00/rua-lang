@@ -11,8 +11,8 @@ use std::{
 
 use super::{
     CallableSignature, CallableTy, DefId, DefKind, DefMap, GenericParamId, ItemSignature,
-    ItemSourceKind, NamedTy, ReceiverKind, Substitution, Ty, TypeLoweringContext, TypeRef,
-    VariantKind,
+    ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, Substitution, Ty,
+    TypeLoweringContext, TypeRef, VariantKind,
 };
 
 /// Analysis-owned identifiers for members supplied by the language runtime.
@@ -1016,7 +1016,7 @@ impl MemberIndex {
         let segments = path.split("::").collect::<Vec<_>>();
         let definition = self
             .def_map
-            .resolve_path_lexical_unique(module, &segments)?;
+            .resolve_path(module, &segments, ResolveStrategy::LexicalUnique)?;
         matches!(
             definition.kind(),
             DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias

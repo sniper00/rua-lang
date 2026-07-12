@@ -20,7 +20,7 @@ pub use body::{
 };
 pub use def_map::{
     DefId, DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, MemberId,
-    ModuleData, ModuleId,
+    ModuleData, ModuleId, ResolveStrategy,
 };
 pub(crate) use def_map::{IdentityContext, IdentityInterner};
 pub use infer::{
