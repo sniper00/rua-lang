@@ -269,13 +269,54 @@ end
 ### Iterators
 
 ```rua
-let doubled: Vec<i64> = vec![1, 2, 3, 4, 5].iter()
-    .map(|x| x * 2)
-    .filter(|x| x > 5)
-    .collect();                       // → { 6, 8, 10 }
+fn main() {
+    let doubled: Vec<i64> = vec![1, 2, 3, 4, 5].iter()
+        .map(|x| x * 2)
+        .filter(|x| x > 5)
+        .collect();
 
-let total = vec![1, 2, 3].iter().fold(0, |acc, x| acc + x);  // → 6
+    let total = vec![1, 2, 3].iter().fold(0, |acc, x| acc + x);
+}
 ```
+
+⇩
+
+```lua
+local function main()
+    local doubled
+    local __src = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
+    local __out = rt.vec({ n = 0 })
+    for __i = 0, __src.n - 1 do
+        local __v = __src[__i]
+        -- map: x * 2
+        local __keep = true
+        if __keep then
+            __v = (function(x) return x * 2 end)(__v)
+        end
+        -- filter: x > 5
+        if __keep then
+            if not ((function(x) return x > 5 end)(__v)) then __keep = false end
+        end
+        if __keep then
+            __out[__out.n] = __v
+            __out.n = __out.n + 1
+        end
+    end
+    doubled = __out
+
+    local total
+    local __src2 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
+    local __acc = 0
+    for __i2 = 0, __src2.n - 1 do
+        __acc = (function(acc, x) return acc + x end)(__acc, __src2[__i2])
+    end
+    total = __acc
+end
+```
+
+> Iterator chains (`map`, `filter`, `fold`, `any`, `all`, `find`, `count`, `collect`,
+> `enumerate`, `take`, `skip`) fuse into a single `for` loop — no intermediate
+> allocations.
 
 ### ? Operator — Error Propagation
 
