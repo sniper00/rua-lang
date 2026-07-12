@@ -387,8 +387,8 @@ function demo_iterators()
 end
 
 function demo_extern()
-    log(rt.str["to_string"]("LSP demo is running!"))
-    local msg = format("hello {}", rt.str["to_string"]("world"))
+    log("LSP demo is running!")
+    local msg = format("hello {}", "world")
 end
 
 function demo_literals()
@@ -434,7 +434,7 @@ end
 ---@return { ok: string }|{ err: string }
 function load_config(path)
     if path == "" then
-        return nil, rt.str["to_string"]("empty path")
+        return nil, "empty path"
     else
         return rt.format("config from {}", path)
     end
@@ -605,7 +605,7 @@ end
 
 ---@return string
 function Person:bye()
-    return rt.str["to_string"]("bye")
+    return "bye"
 end
 
 ---@return integer

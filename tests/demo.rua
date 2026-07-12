@@ -539,7 +539,7 @@ fn chain_option(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 
 fn demo_arithmetic() -> i64 {
     // 正确的算术运算
-    let int_sum = 1 + 2;
+    let int_sum = 1 + 2 + 3 ;
     let float_sum = 1.5 + 2.5;
     let mixed = 1 + 2.5; // i64 + f64 → f64
 

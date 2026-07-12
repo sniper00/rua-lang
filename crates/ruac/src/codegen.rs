@@ -1423,6 +1423,12 @@ impl Codegen<'_> {
                 // form avoids clashing with Lua keywords like `repeat`); the
                 // receiver is passed as the first argument.
                 if self.info.is_str_method(e.span.start, e.span.len) {
+                    // Optimise: .to_string() / .to_owned() / .clone() on a
+                    // string literal is a no-op — just return the literal.
+                    let is_string_lit = matches!(&recv.kind, ExprKind::Str(..));
+                    if is_string_lit && matches!(method.as_str(), "to_string" | "to_owned" | "clone") {
+                        return r;
+                    }
                     self.uses_rt = true;
                     let mut all = vec![r];
                     all.extend(a);
