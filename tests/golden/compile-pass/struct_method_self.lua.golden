@@ -7,7 +7,7 @@ Point.__index = Point
 
 ---@param point Point
 ---@return integer
-function read(point)
+local function read(point)
     return point:sum()
 end
 

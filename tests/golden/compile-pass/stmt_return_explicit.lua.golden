@@ -3,7 +3,7 @@
 ---@param a integer
 ---@param b integer
 ---@return integer
-function add(a, b)
+local function add(a, b)
     do
         return a + b
     end

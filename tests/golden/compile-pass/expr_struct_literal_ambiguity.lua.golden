@@ -6,7 +6,7 @@ Choice.__index = Choice
 
 ---@param flag boolean
 ---@return Choice
-function choose(flag)
+local function choose(flag)
     if flag then
         return setmetatable({ value = 1 }, Choice)
     else

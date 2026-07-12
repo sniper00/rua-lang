@@ -3,7 +3,7 @@
 ---@param a integer
 ---@param b integer
 ---@return integer
-function maximum(a, b)
+local function maximum(a, b)
     if a > b then
         return a
     else

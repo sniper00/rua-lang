@@ -2,6 +2,6 @@
 
 ---@param n integer
 ---@return boolean
-function unary_bool(n)
+local function unary_bool(n)
     return -n < 0 and not false
 end

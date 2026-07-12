@@ -3,11 +3,11 @@
 ---@generic T
 ---@param value T
 ---@return T
-function identity(value)
+local function identity(value)
     return value
 end
 
-function main()
+local function main()
     local value = identity(7)
 end
 

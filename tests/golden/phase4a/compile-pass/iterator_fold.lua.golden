@@ -2,7 +2,7 @@
 local rt = require("rua_rt")
 
 ---@return integer
-function main()
+local function main()
     local __t1 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
     local __t2 = 0
     for __t4 = 0, __t1.n - 1 do

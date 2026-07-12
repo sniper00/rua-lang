@@ -45,25 +45,25 @@ local format = format or function(...) end
 ---@generic T
 ---@param value T
 ---@return T
-function identity(value)
+local function identity(value)
     return value
 end
 
 ---@generic T
 ---@param value T
 ---@return string
-function label(value)
+local function label(value)
     return value:name()
 end
 
 ---@generic T
 ---@param value T
 ---@return T
-function first(value)
+local function first(value)
     return value
 end
 
-function demo_let()
+local function demo_let()
     local simple = 42
     ---@type integer
     local typed = 100
@@ -79,7 +79,7 @@ end
 
 ---@param n integer
 ---@return integer
-function demo_control_flow(n)
+local function demo_control_flow(n)
     local sign
     if n > 0 then
         sign = "positive"
@@ -130,7 +130,7 @@ end
 
 ---@param c Color
 ---@return string
-function describe_color(c)
+local function describe_color(c)
     local __t1, __t2 = c
     if __t1.tag == "Red" then
         return "red"
@@ -150,7 +150,7 @@ end
 
 ---@param msg Message
 ---@return integer
-function classify_message(msg)
+local function classify_message(msg)
     local __t3, __t4 = msg
     if __t3.tag == "Quit" then
         return 0
@@ -173,7 +173,7 @@ end
 
 ---@param x integer|nil
 ---@return integer
-function match_with_wildcard(x)
+local function match_with_wildcard(x)
     local __t5, __t6 = x
     if __t5 ~= nil then
         local v = __t5
@@ -187,7 +187,7 @@ end
 
 ---@param maybe Point|nil
 ---@return integer
-function demo_patterns(maybe)
+local function demo_patterns(maybe)
     local __t7 = maybe
     if __t7 ~= nil then
         local p = __t7
@@ -216,7 +216,7 @@ function demo_patterns(maybe)
 end
 
 ---@return integer
-function demo_closures()
+local function demo_closures()
     local function increment(value)
         return value + 1
     end
@@ -234,7 +234,7 @@ function demo_closures()
 end
 
 ---@return integer
-function demo_expressions()
+local function demo_expressions()
     local arithmetic = 1 + 2 * 3 - rt.idiv(4, 2)
     local comparison = 5 > 3 and 4 < 10
     local logical = not false or true
@@ -259,7 +259,7 @@ function demo_expressions()
 end
 
 ---@return integer
-function demo_iterators()
+local function demo_iterators()
     local values = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
     ---@type integer[]
     local doubled
@@ -385,12 +385,12 @@ function demo_iterators()
     return total
 end
 
-function demo_extern()
+local function demo_extern()
     log("LSP demo is running!")
     local msg = format("hello {}", "world")
 end
 
-function demo_literals()
+local function demo_literals()
     local zero = 0
     local integer = 12345
     local negative = -42
@@ -405,13 +405,13 @@ function demo_literals()
 end
 
 ---@return integer
-function demo_comments()
+local function demo_comments()
     local x = 1
     return x
 end
 
 ---@return integer
-function demo_self_receivers()
+local function demo_self_receivers()
     local c = setmetatable({ value = 10 }, Counter)
     local val = c:read()
     return val
@@ -419,19 +419,19 @@ end
 
 ---@param g Greet
 ---@return string
-function greet_someone(g)
+local function greet_someone(g)
     return g:hello()
 end
 
 ---@param person Person
 ---@return string
-function demo_trait_object(person)
+local function demo_trait_object(person)
     return greet_someone(person)
 end
 
 ---@param path string
 ---@return string|nil, string|nil
-function load_config(path)
+local function load_config(path)
     if path == "" then
         return nil, "empty path"
     else
@@ -441,13 +441,13 @@ end
 
 ---@param raw string
 ---@return integer|nil, string|nil
-function parse_int(raw)
+local function parse_int(raw)
     return 42
 end
 
 ---@param path string
 ---@return integer|nil, string|nil
-function load_and_parse(path)
+local function load_and_parse(path)
     local __t49, __t50 = load_config(path)
     if __t50 ~= nil then return nil, __t50 end
     if __t49 == nil then return nil end
@@ -461,7 +461,7 @@ end
 
 ---@param x integer|nil
 ---@return integer|nil
-function maybe_double(x)
+local function maybe_double(x)
     local __t53, __t54 = x
     if __t54 ~= nil then return nil, __t54 end
     if __t53 == nil then return nil end
@@ -472,7 +472,7 @@ end
 ---@param a integer|nil
 ---@param b integer|nil
 ---@return integer|nil
-function chain_option(a, b)
+local function chain_option(a, b)
     local __t55, __t56 = a
     if __t56 ~= nil then return nil, __t56 end
     if __t55 == nil then return nil end
@@ -485,7 +485,7 @@ function chain_option(a, b)
 end
 
 ---@return integer
-function demo_arithmetic()
+local function demo_arithmetic()
     local int_sum = 1 + 2 + 3
     local float_sum = 1.5 + 2.5
     local mixed = 1 + 2.5
@@ -493,7 +493,7 @@ function demo_arithmetic()
     return int_sum
 end
 
-function main()
+local function main()
     local origin = Point.new(0, 0, "origin")
     local dist = origin:distance_sq()
     local p = Point.new(3, 4, "moving")
@@ -534,14 +534,14 @@ do
 ---@param a integer
 ---@param b integer
 ---@return integer
-    function add(a, b)
+    local function add(a, b)
         return a + b
     end
 
 ---@param a integer
 ---@param b integer
 ---@return integer
-    function multiply(a, b)
+    local function multiply(a, b)
         return a * b
     end
 
@@ -551,7 +551,7 @@ do
 
 ---@param _x number
 ---@return number
-        function sin(_x)
+        local function sin(_x)
             return 0.0
         end
         trig.sin = sin
@@ -567,7 +567,7 @@ do
 
 ---@param name string
 ---@return string
-    function greet(name)
+    local function greet(name)
         return rt.format("Hi, {}!", name)
     end
     utils.greet = greet

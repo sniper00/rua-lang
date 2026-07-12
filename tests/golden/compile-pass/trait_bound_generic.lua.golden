@@ -6,11 +6,11 @@ Item.__index = Item
 ---@generic T
 ---@param value T
 ---@return string
-function label(value)
+local function label(value)
     return value:name()
 end
 
-function main()
+local function main()
     local text = label(setmetatable({  }, Item))
 end
 

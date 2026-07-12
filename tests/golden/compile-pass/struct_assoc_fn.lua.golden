@@ -5,7 +5,7 @@
 local Point = {}
 Point.__index = Point
 
-function main()
+local function main()
     local point = Point.origin()
 end
 

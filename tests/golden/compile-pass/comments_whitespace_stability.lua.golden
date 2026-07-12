@@ -2,6 +2,6 @@
 
 ---@param value integer
 ---@return integer
-function stable(value)
+local function stable(value)
     return value + 1
 end

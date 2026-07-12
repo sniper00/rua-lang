@@ -5,7 +5,7 @@ Item.__index = Item
 
 ---@param item Item
 ---@return string
-function read(item)
+local function read(item)
     return item:name()
 end
 

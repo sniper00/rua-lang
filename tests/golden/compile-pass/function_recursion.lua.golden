@@ -2,7 +2,7 @@
 
 ---@param n integer
 ---@return integer
-function factorial(n)
+local function factorial(n)
     if n <= 1 then
         return 1
     else

@@ -3,7 +3,7 @@ local is_odd
 
 ---@param n integer
 ---@return boolean
-function is_even(n)
+local function is_even(n)
     if n == 0 then
         return true
     else
@@ -13,7 +13,7 @@ end
 
 ---@param n integer
 ---@return boolean
-function is_odd(n)
+local function is_odd(n)
     if n == 0 then
         return false
     else

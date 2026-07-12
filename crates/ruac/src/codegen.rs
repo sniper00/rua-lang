@@ -643,7 +643,7 @@ impl Codegen<'_> {
         self.blank();
         self.emit_fn_annotation(f);
         let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-        self.line(&format!("function {}({})", f.name, params.join(", ")));
+        self.line(&format!("local function {}({})", f.name, params.join(", ")));
         self.indent += 1;
         self.gen_block_to(&f.body, &Dest::Return);
         self.indent -= 1;

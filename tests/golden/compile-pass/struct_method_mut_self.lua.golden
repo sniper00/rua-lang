@@ -4,7 +4,7 @@
 local Counter = {}
 Counter.__index = Counter
 
-function main()
+local function main()
     local counter = setmetatable({ value = 0 }, Counter)
     counter:increment()
 end

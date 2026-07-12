@@ -6,7 +6,7 @@ local Point = {}
 Point.__index = Point
 
 ---@return integer
-function sum()
+local function sum()
     local point = setmetatable({ x = 2, y = 3 }, Point)
     return point.x + point.y
 end

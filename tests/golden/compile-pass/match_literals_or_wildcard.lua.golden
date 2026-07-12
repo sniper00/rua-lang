@@ -2,7 +2,7 @@
 
 ---@param value integer
 ---@return integer
-function classify(value)
+local function classify(value)
     local __t1, __t2 = value
     if __t1 == 0 then
         return 10

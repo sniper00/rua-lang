@@ -4,16 +4,16 @@ local Message = {}
 Message.__index = Message
 
 ---@return Message
-function quit()
+local function quit()
     return setmetatable({ tag = "Quit" }, Message)
 end
 
 ---@return Message
-function number()
+local function number()
     return setmetatable({ tag = "Number", 7 }, Message)
 end
 
 ---@return Message
-function movement()
+local function movement()
     return setmetatable({ tag = "Move", x = 1, y = 2 }, Message)
 end

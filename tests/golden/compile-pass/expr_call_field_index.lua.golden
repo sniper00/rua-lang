@@ -6,13 +6,13 @@ Item.__index = Item
 
 ---@param value integer
 ---@return integer
-function id(value)
+local function id(value)
     return value
 end
 
 ---@param item Item
 ---@param values integer[]
 ---@return integer
-function read(item, values)
+local function read(item, values)
     return id(item.value) + values[0]
 end

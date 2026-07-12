@@ -5,7 +5,7 @@ Shape.__index = Shape
 
 ---@param shape Shape
 ---@return integer
-function area(shape)
+local function area(shape)
     local __t1, __t2 = shape
     if __t1.tag == "Circle" then
         local radius = __t1[1]

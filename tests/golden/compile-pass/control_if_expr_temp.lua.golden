@@ -2,7 +2,7 @@
 
 ---@param value integer
 ---@return integer
-function absolute(value)
+local function absolute(value)
     local result
     if value < 0 then
         result = -value
