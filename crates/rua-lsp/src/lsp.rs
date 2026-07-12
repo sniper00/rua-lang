@@ -3627,7 +3627,7 @@ fn completion_to_lsp(
     CompletionItem {
         label: item.label().to_string(),
         kind,
-        detail: None, // moved to label_details for cleaner display
+        detail: item.detail().map(|d| d.to_string()),
         documentation: item.documentation().map(|d| {
             Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,

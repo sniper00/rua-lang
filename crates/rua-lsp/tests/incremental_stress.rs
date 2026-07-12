@@ -612,6 +612,55 @@ fn method_completion_filters_self_from_snippet() {
 }
 
 #[test]
+fn member_completion_detail_separates_label_and_type() {
+    // Field and method completion items should carry the type/signature in
+    // their `detail` field so that the LSP client can display it next to the
+    // label with proper visual separation (not concatenated).
+    let uri = uri("/test/detail_format.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64, y: i64 }\nimpl Point {\n    fn translate(&mut self, dx: i64, dy: i64) { self.x = self.x + dx; }\n}\nfn main() { let p = Point { x: 0, y: 0 }; p.x }",
+    );
+
+    // Cursor on `x` after `p.` — triggers dot completions (previous
+    // significant token is `.`), and `x` acts as a prefix filter.
+    let pp = srv.pp(&uri, 4, 44).unwrap();
+    let items = srv.snapshot().completions(pp);
+
+    // Field detail should show the type, not the label repeated
+    let x_field = items
+        .iter()
+        .find(|i| i.label() == "x" && i.kind() == rua_analysis::CompletionKind::Field)
+        .expect("field x should be in completions");
+    let x_detail = x_field.detail().expect("field x should have detail");
+    assert!(
+        x_detail.contains("i64"),
+        "field detail should contain the type, got: {x_detail}"
+    );
+    assert!(
+        !x_detail.contains("x: i64"),
+        "field detail should be just the type, not repeated label+type, got: {x_detail}"
+    );
+
+    // Method detail should show the full signature (with self), separate from
+    // the label (the label should not repeat inside the detail string twice).
+    let translate = items
+        .iter()
+        .find(|i| i.label() == "translate")
+        .expect("translate method should be in completions");
+    let t_detail = translate.detail().expect("method translate should have detail");
+    assert!(
+        t_detail.contains("&mut self"),
+        "method detail should include self, got: {t_detail}"
+    );
+    assert!(
+        !t_detail.starts_with("translate"),
+        "method detail should not start with the label name, got: {t_detail}"
+    );
+}
+
+#[test]
 fn completions_in_match_body_offer_enum_variants() {
     let uri = uri("/test/match_enum.rua");
     let mut srv = TestServer::new();
