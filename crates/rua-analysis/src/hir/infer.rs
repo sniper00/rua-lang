@@ -156,6 +156,14 @@ pub(crate) fn infer_body(
     InferenceContext::new(body, resolution, def_map, member_index).infer()
 }
 
+/// If `diverges` is true, return `Ty::Never`; otherwise return `ty`.
+/// Used to short-circuit the type of an expression when one of its arms
+/// diverges (e.g. `return`, `break`, `continue`, `panic!`).
+#[inline]
+fn diverge_or(diverges: bool, ty: Ty) -> Ty {
+    if diverges { Ty::Never } else { ty }
+}
+
 struct InferenceContext<'a> {
     body: &'a Body,
     resolution: &'a BodyResolution,
@@ -408,11 +416,7 @@ impl<'a> InferenceContext<'a> {
                         );
                     }
                 }
-                if condition_diverges {
-                    Ty::Never
-                } else {
-                    result
-                }
+                diverge_or(condition_diverges, result)
             }
             Expr::Match { scrutinee, arms } => {
                 let scrutinee_ty = self.infer_expr(scrutinee, None);
@@ -449,7 +453,7 @@ impl<'a> InferenceContext<'a> {
         match tail {
             Some(tail) => {
                 let tail_ty = self.infer_expr(tail, expected);
-                if diverges { Ty::Never } else { tail_ty }
+                diverge_or(diverges, tail_ty)
             }
             None if diverges => Ty::Never,
             None => Ty::UNIT,
@@ -971,7 +975,7 @@ impl<'a> InferenceContext<'a> {
             for field in fields {
                 diverges |= self.infer_expr(field.value(), None).is_never();
             }
-            return if diverges { Ty::Never } else { Ty::Unknown };
+            return diverge_or(diverges, Ty::Unknown);
         };
 
         let mut substitution = Substitution::new();
@@ -1024,7 +1028,7 @@ impl<'a> InferenceContext<'a> {
                 self.set_member(name_ref, resolution);
             }
         }
-        if diverges { Ty::Never } else { result }
+        diverge_or(diverges, result)
     }
 
     fn struct_literal_target(&mut self, path: &[NameRefId]) -> Option<(Ty, Option<DefId>)> {
@@ -1136,7 +1140,7 @@ impl<'a> InferenceContext<'a> {
             return_type: Ty::Unknown,
             substitution: Substitution::new(),
         });
-        if diverges { Ty::Never } else { Ty::Unknown }
+        diverge_or(diverges, Ty::Unknown)
     }
 
     /// Handle `.iter()` and `.into_iter()` on `Vec<T>` returning `Iterator<T>`.
@@ -1295,7 +1299,7 @@ impl<'a> InferenceContext<'a> {
             return_type: result.clone(),
             substitution: Substitution::new(),
         });
-        Some(if diverges { Ty::Never } else { result })
+        Some(diverge_or(diverges, result))
     }
 
     fn infer_call(
@@ -1367,7 +1371,7 @@ impl<'a> InferenceContext<'a> {
                 return_type: Ty::Unknown,
                 substitution: Substitution::new(),
             });
-            return if diverges { Ty::Never } else { Ty::Unknown };
+            return diverge_or(diverges, Ty::Unknown);
         };
 
         let variadic = callable
@@ -1454,7 +1458,7 @@ impl<'a> InferenceContext<'a> {
             return_type: return_type.clone(),
             substitution,
         });
-        if diverges { Ty::Never } else { return_type }
+        diverge_or(diverges, return_type)
     }
 
     fn report_unsatisfied_bounds(
@@ -1657,7 +1661,7 @@ impl<'a> InferenceContext<'a> {
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
                 }
-                if diverges { Ty::Never } else { Ty::STRING }
+                diverge_or(diverges, Ty::STRING)
             }
             "panic" => {
                 for argument in args {
@@ -1670,14 +1674,14 @@ impl<'a> InferenceContext<'a> {
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
                 }
-                if diverges { Ty::Never } else { Ty::UNIT }
+                diverge_or(diverges, Ty::UNIT)
             }
             _ => {
                 let mut diverges = false;
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
                 }
-                if diverges { Ty::Never } else { Ty::Unknown }
+                diverge_or(diverges, Ty::Unknown)
             }
         }
     }
