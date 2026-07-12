@@ -1,9 +1,11 @@
 # 完整代码审查报告：Rua 全代码库
 
-> **日期**: 2025-07-12
+> **日期**: 2026-07-12（原始审查 + 同日复验更新）
 > **审查范围**: 全部核心源文件（10 个文件，~15,000 行）
 > **参照标准**: rust-analyzer 架构与代码质量
 > **审查维度**: 不清晰 (unclear) · 啰嗦 (verbose) · 问题 (bugs/problems)
+>
+> **复验状态图例**: ✅ 已修复 · ⚠️ 部分修复 · 🔴 未修复
 
 ---
 
@@ -13,11 +15,11 @@
 
 引入 conventional commits (`feat:`/`fix:`/`docs:`)，删除无意义的版本号示例。与 rust-analyzer 风格一致。
 
-### `lsp.rs:3157` — 🟡 正确的 bug 修复，但有残余 bug
+### `lsp.rs:3157` — 🟡 正确的 bug 修复，但有残余 bug 🔴 未修复
 
 新增 `self.file_to_uri.insert(id, uri)` 修复了 `ensure_file_id_for_path` 不维护 `file_to_uri` 反向映射的问题（与 `ensure_file_id` L125 行为对齐）。
 
-**残余 bug**：L3151 的 fallback URI 使用了递增后的 `self.next_file_id`（已是 id+1）：
+**残余 bug**（🔴 2026-07-12 仍未修复）：L3151 的 fallback URI 使用了递增后的 `self.next_file_id`（已是 id+1）：
 
 ```rust
 let id = FileId::new(self.next_file_id);
@@ -51,9 +53,9 @@ let uri = path_to_uri(path).unwrap_or_else(|| {
 
 ## 三、严重问题（12 项）
 
-### 问题 1 · `lsp.rs` — 30× handler boilerplate（~450 行冗余）
+### 问题 1 · `lsp.rs` — 30× handler boilerplate（~450 行冗余） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 啰嗦
+**严重度**: 🔴 严重 | **类别**: 啰嗦 | **复验**: 🔴 2026-07-12 仍存在
 
 每个 request handler 复制 15 行相同模式：
 
@@ -100,9 +102,9 @@ fn handle_position_request<T, R>(
 
 ---
 
-### 问题 2 · `lsp.rs` — 6× notification 解析重复（~60 行冗余）
+### 问题 2 · `lsp.rs` — 6× notification 解析重复（~60 行冗余） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 啰嗦
+**严重度**: 🔴 严重 | **类别**: 啰嗦 | **复验**: 🔴 2026-07-12 仍存在
 
 `handle_notification`（L2863-2937）的 6 个 arm 各自重复相同的 JSON 解析 + 错误处理：
 
@@ -121,9 +123,9 @@ DidOpenTextDocument::METHOD => {
 
 ---
 
-### 问题 3 · `completion.rs` — 14 个硬编码 relevance magic number
+### 问题 3 · `completion.rs` — 14 个硬编码 relevance magic number 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 不清晰
+**严重度**: 🔴 严重 | **类别**: 不清晰 | **复验**: 🔴 2026-07-12 仍存在
 
 所有 relevance 分数是原始整数，分散在 `scope_completions()` 各处，无命名常量：
 
@@ -153,9 +155,9 @@ DidOpenTextDocument::METHOD => {
 
 ---
 
-### 问题 4 · `completion.rs` — `scope_completions()` 310 行单函数（L191-500）
+### 问题 4 · `completion.rs` — `scope_completions()` 310 行单函数（L191-500） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 不清晰
+**严重度**: 🔴 严重 | **类别**: 不清晰 | **复验**: 🔴 2026-07-12 仍存在
 
 包含 8 个 completion 类别 + 后处理，全部内联在一个函数里：
 
@@ -174,9 +176,9 @@ DidOpenTextDocument::METHOD => {
 
 ---
 
-### 问题 5 · `completion.rs` — Token-based context detection
+### 问题 5 · `completion.rs` — Token-based context detection 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 问题
+**严重度**: 🔴 严重 | **类别**: 问题 | **复验**: 🔴 2026-07-12 仍存在
 
 `is_type_position()`（L1569-1585）只检测 `:` token 紧邻关系，**漏检**：
 - `fn foo(x: |)` — 光标在参数列表中但不在 `:` 后
@@ -191,9 +193,9 @@ DidOpenTextDocument::METHOD => {
 
 ---
 
-### 问题 6 · `ide/mod.rs` + `completion.rs` — 4 对跨模块完全重复的函数
+### 问题 6 · `ide/mod.rs` + `completion.rs` — 4 对跨模块完全重复的函数 ✅ 已修复
 
-**严重度**: 🔴 严重 | **类别**: 问题/啰嗦
+**严重度**: 🔴 严重 | **类别**: 问题/啰嗦 | **复验**: ✅ 2026-07-12 已修复——`ide/mod.rs` 中的重复已移除
 
 | 函数 | semantic/mod.rs | completion.rs |
 |------|----------------|---------------|
@@ -208,9 +210,9 @@ DidOpenTextDocument::METHOD => {
 
 ---
 
-### 问题 7 · `infer.rs` — `infer_expr` 162 行单函数（L272-434）
+### 问题 7 · `infer.rs` — `infer_expr` 162 行单函数（L272-434） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 不清晰
+**严重度**: 🔴 严重 | **类别**: 不清晰 | **复验**: 🔴 2026-07-12 仍存在
 
 这是中心推断分发函数。每个 match arm 有内联逻辑，经常 span 5-15 行。If arm 独占 40 行（L376-416），含 condition_diverges/then_ty/else_fact 元组、join 逻辑和延迟 mismatch 报告。Path arm 有特殊 `None` 逻辑（L286-297）。
 
@@ -220,9 +222,9 @@ Match/StructLiteral/MacroCall arms 已经委托，但 If/Assign/Range/Try/Index/
 
 ---
 
-### 问题 8 · `infer.rs` — `infer_iterator_adapter` 131 行技术债务（L1168-1299）
+### 问题 8 · `infer.rs` — `infer_iterator_adapter` 131 行技术债务（L1168-1299） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 问题
+**严重度**: 🔴 严重 | **类别**: 问题 | **复验**: 🔴 2026-07-12 仍存在
 
 文档注释承认这是临时方案（"handled inline until 4B.6's builtin metadata is complete enough"）。11 个 iterator 方法（count/any/all/find/fold/collect/filter/take/skip/map/filter_map/enumerate）各自内联 ad-hoc 闭包类型构造和参数/返回类型提取。
 
@@ -230,9 +232,9 @@ Match/StructLiteral/MacroCall arms 已经委托，但 If/Assign/Range/Try/Index/
 
 ---
 
-### 问题 9 · `infer.rs` — `infer_callable_call` 8 参数 + clippy suppression
+### 问题 9 · `infer.rs` — `infer_callable_call` 8 参数 + clippy suppression 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 不清晰
+**严重度**: 🔴 严重 | **类别**: 不清晰 | **复验**: 🔴 2026-07-12 仍存在
 
 L1396 显式压制 `#[allow(clippy::too_many_arguments)]`。`infer_method_call` 有同样问题。
 
@@ -240,9 +242,9 @@ L1396 显式压制 `#[allow(clippy::too_many_arguments)]`。`infer_method_call` 
 
 ---
 
-### 问题 10 · `diagnostic/mod.rs` — 未使用函数 lint O(n²) + 字符串名校验（L488-526）
+### 问题 10 · `diagnostic/mod.rs` — 未使用函数 lint O(n²) + 字符串名校验（L488-526） ⚠️ 部分修复
 
-**严重度**: 🔴 严重 | **类别**: 问题
+**严重度**: 🔴 严重 | **类别**: 问题 | **复验**: ⚠️ 2026-07-12 部分修复——未使用变量 lint 已改用决议查找；未使用函数 lint 仍用字符串匹配
 
 对每个非公开函数，遍历所有 body 的所有 NameRef，比对 `.name()` 字符串：
 
@@ -257,9 +259,9 @@ nr.name() == Some(name)
 
 ---
 
-### 问题 11 · `diagnostic/mod.rs` — unreachable code lint 基于文本（L528-571）
+### 问题 11 · `diagnostic/mod.rs` — unreachable code lint 基于文本（L528-571） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 问题
+**严重度**: 🔴 严重 | **类别**: 问题 | **复验**: 🔴 2026-07-12 仍存在（L690-733）
 
 通过正则匹配源码 `return;`/`break;`/`continue;`：
 - 每行只检查第一个匹配（L567 的 `break` 退出关键字循环）
@@ -270,9 +272,9 @@ nr.name() == Some(name)
 
 ---
 
-### 问题 12 · `def_map.rs` — `module_for_file` O(N×M)（L507-517）
+### 问题 12 · `def_map.rs` — `module_for_file` O(N×M)（L507-517） 🔴 未修复
 
-**严重度**: 🔴 严重 | **类别**: 问题
+**严重度**: 🔴 严重 | **类别**: 问题 | **复验**: 🔴 2026-07-12 仍存在
 
 ```rust
 pub fn module_for_file(&self, file_id: FileId) -> Option<ModuleId> {
@@ -1142,3 +1144,15 @@ DidOpenTextDocument::METHOD => {
 | **以后** | R11 Fixture 系统 | 4h | 中 | 测试体验 |
 
 **第1周五项可在一个工作日内完成**，净减少 ~500 行重复代码，同时建立可扩展的 completion relevance 体系。建议先做 R1（最直观的收益）和 R2（消除 magic number），再做 R4（改动较多但影响最大）。
+
+---
+
+## 附录 A · 2026-07-12 复验结果
+
+> 同日复验，91 项 findings 中 **1 项完全修复**（问题 6 跨模块重复），**1 项部分修复**（问题 10 未使用变量 lint），**89 项未修复**。
+>
+> 12 项重构方案中仅 R3（跨模块函数去重）完成。
+>
+> 新增发现：W0304 infinite loop lint（`diagnostic/mod.rs:275-333`）同样基于源文本检测，与问题 11 同类问题。
+>
+> 详见 `docs/code-review-2026-07-12-REVERIFIED.md` 和 `docs/construction-2026-07-12.md`。
