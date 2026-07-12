@@ -40,6 +40,8 @@ Person.__index = Person
 ---@field value integer
 local Counter = {}
 Counter.__index = Counter
+local log = log or function(...) end
+local format = format or function(...) end
 
 ---@generic T
 ---@param value T
@@ -238,6 +240,8 @@ function demo_patterns(maybe)
             local v = __t5
             if (v > 10) then
                 opt = nil
+            else
+                opt = (v + 1)
             end
         else
             break

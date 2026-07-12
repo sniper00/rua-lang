@@ -288,6 +288,8 @@ fn demo_patterns(maybe: Option<Point>) -> i64 {
     while let Option::Some(v) = opt {
         if v > 10 {
             opt = Option::None;
+        } else {
+            opt = Option::Some(v + 1);
         }
     }
 

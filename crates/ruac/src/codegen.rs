@@ -350,6 +350,20 @@ impl Codegen<'_> {
             }
         }
 
+        // Extern stubs: for each `extern "lua" { fn name(...) }`, emit a
+        // local fallback so the generated code runs standalone without the
+        // host providing these functions.
+        for item in &prog.items {
+            if let Item::Extern(eb) = item {
+                for f in &eb.fns {
+                    self.line(&format!(
+                        "local {0} = {0} or function(...) end",
+                        f.name
+                    ));
+                }
+            }
+        }
+
         // Trait table across all scopes (root + modules), keyed by simple name,
         // for resolving inherited default methods in `impl Trait for Type`.
         let mut traits: HashMap<&str, &TraitDecl> = HashMap::new();
