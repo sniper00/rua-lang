@@ -39,7 +39,7 @@ pub use member::{
 };
 pub use module_resolution::module_file_candidates;
 pub use scope::{
-    BodyResolution, BodyScopes, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
+    BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
     LocalUseKind, ScopeData, ScopeId, ScopeKind,
 };
 pub use ty::{

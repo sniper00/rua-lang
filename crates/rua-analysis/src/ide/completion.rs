@@ -1262,7 +1262,9 @@ fn def_kind_to_completion_kind(kind: DefKind) -> CompletionKind {
     }
 }
 
-fn definition_signature(
+/// Format a definition's signature for display in completions and hover.
+/// Returns `None` for impl blocks (which don't have a useful display form).
+pub(crate) fn definition_signature(
     db: &BaseDb,
     def_map: &DefMap,
     definition: &Definition,
@@ -1285,9 +1287,35 @@ fn definition_signature(
         DefKind::Enum => Some(format!("enum {}", definition.name())),
         DefKind::Trait => Some(format!("trait {}", definition.name())),
         DefKind::Module => Some(format!("mod {}", definition.name())),
-        DefKind::Field | DefKind::Variant | DefKind::TypeAlias => {
+        DefKind::Field => {
+            let member_index = db.member_index(def_map.root_file());
+            if let Some(parent_id) = definition.owner() {
+                if let Some(template_ty) = member_index.type_template(parent_id) {
+                    let candidates = member_index.field_candidates(template_ty);
+                    if let Some(c) =
+                        candidates.iter().find(|c| c.name() == definition.name())
+                    {
+                        return Some(format!("{}: {}", definition.name(), c.ty()));
+                    }
+                }
+            }
             Some(definition.name().to_string())
         }
+        DefKind::Variant => {
+            let member_index = db.member_index(def_map.root_file());
+            if let Some(parent_id) = definition.owner() {
+                if let Some(template_ty) = member_index.type_template(parent_id) {
+                    let candidates = member_index.associated_candidates(template_ty);
+                    if let Some(c) =
+                        candidates.iter().find(|c| c.name() == definition.name())
+                    {
+                        return Some(format!("{}: {}", definition.name(), c.ty()));
+                    }
+                }
+            }
+            Some(definition.name().to_string())
+        }
+        DefKind::TypeAlias => Some(definition.name().to_string()),
         DefKind::Impl => None,
     }
 }

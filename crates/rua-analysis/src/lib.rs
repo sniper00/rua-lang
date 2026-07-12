@@ -27,7 +27,7 @@ pub use hir::{
     GenericParamId, GenericParamTy, ImplSignature, Import, InferenceDiagnostic, InferenceResult,
     InferenceSource, ItemKind,
     ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, Literal, LiteralKind, LocalBindingId,
-    LocalCapture, LocalResolveResult, LocalUse, LocalUseKind, MatchArm, MemberId, ModuleData,
+    CaptureKind, LocalCapture, LocalResolveResult, LocalUse, LocalUseKind, MatchArm, MemberId, ModuleData,
     MemberCandidate, MemberIndex, MemberKind, MemberOrigin, MemberResolution, MemberTarget,
     ModuleId, ModuleKind, NameRef, NameRefId, NameRefKind, NamedTy, NamedTypeResolver,
     ParameterData, Pat, PatId, PatternField, PrimitiveTy, ReceiverKind, ScopeData, ScopeId,

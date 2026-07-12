@@ -211,11 +211,22 @@ impl LocalUse {
     }
 }
 
+/// Whether a closure captures a variable by reading or writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CaptureKind {
+    Read,
+    Write,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalCapture {
     closure: ExprId,
     binding: LocalBindingId,
     first_use: NameRefId,
+    /// The strongest capture kind (Write > Read). If the first use is a
+    /// Read but a later use in the same closure is a Write, this is
+    /// upgraded to Write.
+    kind: CaptureKind,
 }
 
 impl LocalCapture {
@@ -229,6 +240,10 @@ impl LocalCapture {
 
     pub const fn first_use(self) -> NameRefId {
         self.first_use
+    }
+
+    pub const fn kind(self) -> CaptureKind {
+        self.kind
     }
 }
 
@@ -355,13 +370,12 @@ impl<'body> ScopeBuilder<'body> {
             .collect::<Vec<_>>();
 
         let mut ambiguous = Vec::new();
-        for (index, binding) in valid.iter().enumerate() {
+        let mut seen_names = std::collections::HashSet::new();
+        for binding in valid.iter() {
             let Some(name) = self.body[*binding].name() else {
                 continue;
             };
-            let duplicate = valid[..index]
-                .iter()
-                .any(|previous| self.body[*previous].name() == Some(name));
+            let duplicate = !seen_names.insert(name);
             if (poison_bindings || duplicate)
                 && !ambiguous.iter().any(|candidate| candidate == name)
             {
@@ -728,12 +742,28 @@ impl<'a> LocalResolver<'a> {
                 );
                 captured_by.reverse();
                 for closure in &captured_by {
-                    if self.seen_captures.insert((*closure, target.binding())) {
+                    let capture_kind = match candidate.kind {
+                        LocalUseKind::Write => CaptureKind::Write,
+                        LocalUseKind::Read => CaptureKind::Read,
+                    };
+                    if let Some(existing) = self
+                        .captures
+                        .iter_mut()
+                        .find(|c| c.closure == *closure && c.binding == target)
+                    {
+                        // Upgrade to Write if this or any use is a write.
+                        if capture_kind == CaptureKind::Write {
+                            existing.kind = CaptureKind::Write;
+                        }
+                    } else {
                         self.captures.push(LocalCapture {
                             closure: *closure,
                             binding: target,
                             first_use: candidate.name_ref,
+                            kind: capture_kind,
                         });
+                        self.seen_captures
+                            .insert((*closure, target.binding()));
                     }
                 }
                 self.uses.push(LocalUse {

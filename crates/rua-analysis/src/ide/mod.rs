@@ -14,7 +14,7 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     hir::{
-        Body, BodyResolution, BodyScopes, BodySourceMap, CallableTy, DefId, DefKind, DefMap,
+        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap,
         Definition, InferenceResult, ItemTree, MemberIndex, Ty,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
@@ -998,56 +998,15 @@ impl Analysis {
 // ---------------------------------------------------------------------------
 
 fn item_hover_text(definition: &Definition, db: &BaseDb, root_file: FileId) -> String {
-    match definition.kind() {
-        DefKind::Function | DefKind::ExternFunction | DefKind::Method => {
-            if let Some(callable) = db.member_index(root_file)
-                .callable(definition.id())
-            {
-                format!("fn {}{}", definition.name(), callable_display(&callable))
-            } else {
-                format!("fn {}", definition.name())
-            }
-        }
-        DefKind::Struct => format!("struct {}", definition.name()),
-        DefKind::Enum => format!("enum {}", definition.name()),
-        DefKind::Trait => format!("trait {}", definition.name()),
-        DefKind::Module => format!("mod {}", definition.name()),
-        DefKind::Impl => format!("impl {}", definition.name()),
-        DefKind::Field => {
-            if let Some(parent_id) = definition.owner() {
-                let member_index = db.member_index(root_file);
-                if let Some(template_ty) = member_index.type_template(parent_id) {
-                    let candidates = member_index.field_candidates(template_ty);
-                    if let Some(c) = candidates.iter().find(|c| c.name() == definition.name()) {
-                        return format!("{}: {}", definition.name(), c.ty());
-                    }
-                }
-            }
-            definition.name().to_string()
-        }
-        DefKind::Variant => {
-            if let Some(parent_id) = definition.owner() {
-                let member_index = db.member_index(root_file);
-                if let Some(template_ty) = member_index.type_template(parent_id) {
-                    let candidates = member_index.associated_candidates(template_ty);
-                    if let Some(c) = candidates.iter().find(|c| c.name() == definition.name()) {
-                        return format!("{}: {}", definition.name(), c.ty());
-                    }
-                }
-            }
-            definition.name().to_string()
-        }
-        DefKind::TypeAlias => definition.name().to_string(),
+    let def_map = db.def_map(root_file);
+    // Delegate to the shared signature formatter in the completion module.
+    // For Impl blocks (which definition_signature returns None for), show a
+    // simple label.
+    if definition.kind() == DefKind::Impl {
+        return format!("impl {}", definition.name());
     }
-}
-
-fn callable_display(callable: &CallableTy) -> String {
-    let params: Vec<String> = callable
-        .params()
-        .iter()
-        .map(|ty| ty.to_string())
-        .collect();
-    format!("({}) -> {}", params.join(", "), callable.return_ty())
+    completion::definition_signature(db, &def_map, definition)
+        .unwrap_or_else(|| definition.name().to_string())
 }
 
 fn is_valid_identifier(name: &str) -> bool {
