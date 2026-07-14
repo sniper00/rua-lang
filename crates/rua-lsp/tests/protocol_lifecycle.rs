@@ -287,6 +287,99 @@ fn large_project() -> String {
 }
 
 #[test]
+fn stdio_inlay_hints_return_inferred_binding_types() {
+    let uri = "file:///workspace/inlay-hints.rua";
+    let source = "fn main() { let inferred = 42; let explicit: bool = true; }\n";
+    let mut server = ProtocolServer::start();
+    server.initialize();
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "rua",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 19,
+        "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 1, "character": 0 }
+            }
+        }
+    }));
+    let hints = server.response(19)["result"].clone();
+    let labels = hints
+        .as_array()
+        .expect("inlay hint result array")
+        .iter()
+        .filter_map(|hint| hint["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&": i64"), "{hints}");
+    assert!(!labels.contains(&": bool"), "{hints}");
+    server.shutdown();
+}
+
+#[test]
+fn stdio_completion_inserts_builtin_generic_type_snippets() {
+    let uri = "file:///workspace/builtin-types.rua";
+    let source = "fn use_values(option: Opt, result: Res) {}\n";
+    let mut server = ProtocolServer::start();
+    server.initialize();
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "rua",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+
+    for (id, position, label, snippet) in [
+        (20, position_of(source, ","), "Option", "Option<${1:T}>$0"),
+        (
+            21,
+            position_of(source, ")"),
+            "Result",
+            "Result<${1:T}, ${2:E}>$0",
+        ),
+    ] {
+        server.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": position
+            }
+        }));
+        let response = server.response(id);
+        let items = response["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("completion result array: {response}"));
+        let item = items
+            .iter()
+            .find(|item| item["label"] == label)
+            .unwrap_or_else(|| panic!("missing {label} completion: {response}"));
+        assert_eq!(item["insertTextFormat"], 2, "{item}");
+        assert_eq!(item["textEdit"]["newText"], snippet, "{item}");
+    }
+    server.shutdown();
+}
+
+#[test]
 fn stdio_code_actions_emit_semantically_valid_edits() {
     let uri = "file:///workspace/code-actions.rua";
     let match_source = concat!(

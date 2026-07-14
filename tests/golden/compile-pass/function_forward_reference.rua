@@ -1,0 +1,2 @@
+fn caller() -> i64 { callee() }
+fn callee() -> i64 { 42 }

@@ -864,6 +864,19 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
             .target(),
         MemberTarget::Builtin(BuiltinMemberId::OptionSome)
     );
+    let option_methods = index
+        .instance_candidates(&Ty::Option(Box::new(Ty::I64)))
+        .into_iter()
+        .map(|candidate| candidate.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(option_methods, ["map"]);
+    assert_eq!(
+        index
+            .resolve_method(&Ty::Option(Box::new(Ty::I64)), "map")
+            .expect("Option::map")
+            .target(),
+        MemberTarget::Builtin(BuiltinMemberId::OptionMap)
+    );
 
     let result_names = index
         .associated_candidates(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
@@ -888,6 +901,8 @@ fn builtin_calls() -> i64 {
     values./*vec_push*/push(3);
     let length = values./*vec_len*/len();
     let upper = "rua"./*string_upper*/to_uppercase();
+    let option: Option<i64> = Option::Some(length);
+    let mapped = option./*option_map*/map(|value| value > 0);
     let mut map = HashMap::/*map_new*/new();
     map./*map_insert*/insert(upper, length);
     map./*map_len*/len()
@@ -901,6 +916,11 @@ fn builtin_calls() -> i64 {
             "/*string_upper*/",
             BuiltinMemberId::StringToUppercase,
             Ty::STRING,
+        ),
+        (
+            "/*option_map*/",
+            BuiltinMemberId::OptionMap,
+            Ty::Option(Box::new(Ty::BOOL)),
         ),
         ("/*map_insert*/", BuiltinMemberId::HashMapInsert, Ty::UNIT),
         ("/*map_len*/", BuiltinMemberId::HashMapLen, Ty::I64),

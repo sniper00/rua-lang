@@ -8,6 +8,7 @@ use rua_core::{
 };
 
 use crate::ast::*;
+use crate::token::SourceRange;
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -147,6 +148,9 @@ pub struct ResolvedHir {
     pub modules: Vec<ModuleData>,
     pub definitions: Vec<DefData>,
     pub locals: Vec<LocalData>,
+    /// Definition-site identity for local bindings. Source ranges are keyed by
+    /// file/start/length so shadowed names remain distinct backend inputs.
+    pub binding_targets: BTreeMap<(u32, usize, usize), LocalId>,
     /// Declaration identity for each source item, keyed by its owning module and
     /// source-order item index. `Use` and `Impl` entries have no direct target.
     pub item_targets: BTreeMap<(ModuleId, usize), ResolvedTarget>,
@@ -177,6 +181,12 @@ pub struct ResolvedHir {
 impl ResolvedHir {
     pub fn definition(&self, id: DefId) -> &DefData {
         &self.definitions[id.index()]
+    }
+
+    pub fn binding_target(&self, source: SourceRange) -> Option<LocalId> {
+        self.binding_targets
+            .get(&(source.file, source.start, source.len))
+            .copied()
     }
 
     pub fn module(&self, id: ModuleId) -> &ModuleData {
@@ -414,6 +424,7 @@ pub fn collect_declarations(program: &Program) -> ResolvedHir {
         }],
         definitions: Vec::new(),
         locals: Vec::new(),
+        binding_targets: BTreeMap::new(),
         item_targets: BTreeMap::new(),
         enum_variant_targets: BTreeMap::new(),
         trait_method_targets: BTreeMap::new(),
@@ -460,10 +471,10 @@ fn resolve_module_bodies(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]
                 let mut resolver = BodyResolver::new(hir, module, &aliases);
                 resolver.push();
                 if function.has_self {
-                    resolver.bind("self", function.receiver_mutable);
+                    resolver.bind("self", function.receiver_mutable, None);
                 }
                 for parameter in &function.params {
-                    resolver.bind(&parameter.name, false);
+                    resolver.bind(&parameter.name, false, Some(parameter.name_span));
                 }
                 resolver.block(&function.body);
                 resolver.pop();
@@ -473,10 +484,10 @@ fn resolve_module_bodies(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]
                     let mut resolver = BodyResolver::new(hir, module, &aliases);
                     resolver.push();
                     if method.has_self {
-                        resolver.bind("self", method.receiver_mutable);
+                        resolver.bind("self", method.receiver_mutable, None);
                     }
                     for parameter in &method.params {
-                        resolver.bind(&parameter.name, false);
+                        resolver.bind(&parameter.name, false, Some(parameter.name_span));
                     }
                     resolver.block(&method.body);
                     resolver.pop();
@@ -488,10 +499,10 @@ fn resolve_module_bodies(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]
                         let mut resolver = BodyResolver::new(hir, module, &aliases);
                         resolver.push();
                         if method.has_self {
-                            resolver.bind("self", method.receiver_mutable);
+                            resolver.bind("self", method.receiver_mutable, None);
                         }
                         for parameter in &method.params {
-                            resolver.bind(&parameter.name, false);
+                            resolver.bind(&parameter.name, false, Some(parameter.name_span));
                         }
                         resolver.block(body);
                         resolver.pop();
@@ -1050,7 +1061,7 @@ impl<'a> BodyResolver<'a> {
         self.scopes.pop();
     }
 
-    fn bind(&mut self, name: &str, is_mutable: bool) -> LocalId {
+    fn bind(&mut self, name: &str, is_mutable: bool, source: Option<SourceRange>) -> LocalId {
         let id = LocalId::new(self.hir.locals.len() as u32);
         self.hir.locals.push(LocalData {
             id,
@@ -1062,6 +1073,13 @@ impl<'a> BodyResolver<'a> {
             .last_mut()
             .expect("binding requires a body scope")
             .insert(name.to_string(), id);
+        if let Some(source) = source {
+            let previous = self
+                .hir
+                .binding_targets
+                .insert((source.file, source.start, source.len), id);
+            assert!(previous.is_none(), "binding source range is unique");
+        }
         id
     }
 
@@ -1100,12 +1118,13 @@ impl<'a> BodyResolver<'a> {
         match statement {
             Stmt::Let {
                 name,
+                name_span,
                 mutable,
                 init,
                 ..
             } => {
                 self.expression(init);
-                self.bind(name, *mutable);
+                self.bind(name, *mutable, Some(*name_span));
             }
             Stmt::Expr(expression) | Stmt::Return(Some(expression)) => self.expression(expression),
             Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -1115,11 +1134,14 @@ impl<'a> BodyResolver<'a> {
             }
             Stmt::Loop { body } => self.block(body),
             Stmt::For {
-                var, iter, body, ..
+                var,
+                var_span,
+                iter,
+                body,
             } => {
                 self.expression(iter);
                 self.push();
-                self.bind(var, false);
+                self.bind(var, false, Some(*var_span));
                 self.block(body);
                 self.pop();
             }
@@ -1171,7 +1193,7 @@ impl<'a> BodyResolver<'a> {
             ExprKind::Closure { params, body, .. } => {
                 self.push();
                 for parameter in params {
-                    self.bind(&parameter.name, false);
+                    self.bind(&parameter.name, false, Some(parameter.name_span));
                 }
                 match body {
                     ClosureBody::Expr(expression) => self.expression(expression),
@@ -1267,8 +1289,8 @@ impl<'a> BodyResolver<'a> {
 
     fn pattern(&mut self, pattern: &Pattern, bind: bool) {
         match pattern {
-            Pattern::Binding(name, _) if bind => {
-                self.bind(name, false);
+            Pattern::Binding(name, source) if bind => {
+                self.bind(name, false, Some(*source));
             }
             Pattern::Literal(expression) => self.expression(expression),
             Pattern::Range { lo, hi, .. } => {
@@ -2024,6 +2046,9 @@ mod tests {
         let ExprKind::Call { callee, .. } = &call.kind else {
             panic!("expected call");
         };
+        let Stmt::Let { name_span, .. } = &run.body.stmts[1] else {
+            panic!("expected local binding");
+        };
         let Stmt::Expr(local_use) = &run.body.stmts[2] else {
             panic!("expected local use");
         };
@@ -2035,6 +2060,13 @@ mod tests {
             hir.expression_targets[&local_use.id],
             ResolvedTarget::Local(_)
         ));
+        assert_eq!(
+            hir.binding_target(*name_span),
+            match hir.expression_targets[&local_use.id] {
+                ResolvedTarget::Local(local) => Some(local),
+                _ => None,
+            }
+        );
     }
 
     #[test]

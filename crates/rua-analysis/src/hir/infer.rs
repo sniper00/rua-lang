@@ -1180,6 +1180,18 @@ impl<'a> InferenceContext<'a> {
         else {
             return self.infer_unresolved_member_call(call, args);
         };
+        if let Ty::Option(item) = &receiver_ty
+            && name == "map"
+            && let [closure] = args
+        {
+            if let Some(resolution) =
+                self.member_index
+                    .resolve_method_in(&receiver_ty, name, self.owner.id())
+            {
+                self.set_member(method, resolution);
+            }
+            return self.infer_option_map(call, item, *closure, expected);
+        }
         let resolution = self
             .member_index
             .resolve_method_in(&receiver_ty, name, self.owner.id());
@@ -1219,6 +1231,33 @@ impl<'a> InferenceContext<'a> {
             requirements: &requirements,
             variadic: false,
         })
+    }
+
+    fn infer_option_map(
+        &mut self,
+        call: ExprId,
+        item: &Ty,
+        closure: ExprId,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let expected_output = match expected {
+            Some(Ty::Option(output)) => (**output).clone(),
+            _ => Ty::Unknown,
+        };
+        let expected_closure = Ty::Closure(CallableTy::new(vec![item.clone()], expected_output));
+        let closure_ty = self.infer_expr(closure, Some(&expected_closure));
+        let output = match closure_ty {
+            Ty::Closure(callable) | Ty::Function(callable) => callable.return_ty().clone(),
+            _ => Ty::Unknown,
+        };
+        let result = Ty::Option(Box::new(output));
+        self.calls[call.index() as usize] = Some(CallInfo {
+            target: CallTarget::Builtin,
+            parameters: vec![expected_closure],
+            return_type: result.clone(),
+            substitution: Substitution::new(),
+        });
+        result
     }
 
     fn infer_unresolved_member_call(&mut self, call: ExprId, args: &[ExprId]) -> Ty {

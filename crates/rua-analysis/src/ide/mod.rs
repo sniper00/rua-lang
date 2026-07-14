@@ -14,8 +14,9 @@ use rua_syntax::{Parse, ast::SourceFile};
 use crate::{
     BaseDb,
     hir::{
-        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, Definition,
-        InferenceResult, ItemTree, MemberIndex, Ty,
+        Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, BuiltinMemberId, DefId,
+        DefKind, DefMap, Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution,
+        MemberTarget, Ty,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
@@ -27,11 +28,12 @@ pub use crate::diagnostic::{
 };
 pub use closure_iterator::ClosureParameterInfo;
 pub use contract::{
-    CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance,
-    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile,
-    ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError,
-    RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo,
-    SourceChange, TextEdit, TextRange, TypeHierarchyItem,
+    BuiltinDefinitionTarget, CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind,
+    CompletionRelevance, FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter,
+    NavigationTarget, ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind,
+    ReferenceResult, RenameError, RenameTarget, SemanticToken, SemanticTokenKind,
+    SemanticTokenModifiers, SignatureHelpInfo, SourceChange, TextEdit, TextRange,
+    TypeHierarchyItem, TypeHint,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
@@ -68,15 +70,133 @@ struct ProjectQueryData {
     member_index: Arc<MemberIndex>,
 }
 
-impl Analysis {
-    fn project_query_data(&self, position: ProjectPosition) -> Option<ProjectQueryData> {
-        let def_map = self.db.project_def_map(position.project_id)?;
-        def_map.module_for_file(position.position.file_id)?;
-        let member_index = self.db.project_member_index(position.project_id)?;
-        Some(ProjectQueryData {
+struct BuiltinMemberAt {
+    id: BuiltinMemberId,
+    resolution: MemberResolution,
+    range: FileRange,
+}
+
+struct BuiltinSourceDefinition {
+    range: TextRange,
+    documentation: Option<String>,
+}
+
+fn builtin_source_definition(id: BuiltinMemberId) -> Option<BuiltinSourceDefinition> {
+    let source = rua_core::BUILTIN_SOURCES
+        .iter()
+        .find(|source| source.name == id.source_name())?;
+    let parse = rua_syntax::parse(source.text);
+    let token = parse
+        .syntax_node()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.kind() == rua_syntax::SyntaxKind::Ident && token.text() == id.name())?;
+    let raw_range = token.text_range();
+    let range = TextRange::new(raw_range.start().into(), raw_range.end().into());
+    let line_start = source.text[..range.start() as usize]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let mut documentation = Vec::new();
+    for line in source.text[..line_start].lines().rev() {
+        let Some(line) = line.trim_start().strip_prefix("///") else {
+            break;
+        };
+        documentation.push(line.trim_start().to_string());
+    }
+    documentation.reverse();
+    Some(BuiltinSourceDefinition {
+        range,
+        documentation: (!documentation.is_empty()).then(|| documentation.join("\n")),
+    })
+}
+
+fn builtin_hover_text(member: &BuiltinMemberAt) -> String {
+    let resolution = &member.resolution;
+    if let Some(callable) = resolution.callable() {
+        let mut params = callable
+            .params()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if let Some(receiver) = resolution.receiver() {
+            params.insert(
+                0,
+                match receiver {
+                    crate::hir::ReceiverKind::Value => "self",
+                    crate::hir::ReceiverKind::SharedRef => "&self",
+                    crate::hir::ReceiverKind::MutRef => "&mut self",
+                }
+                .to_string(),
+            );
+        }
+        format!(
+            "fn {}({}) -> {}",
+            member.id.name(),
+            params.join(", "),
+            callable.return_ty()
+        )
+    } else {
+        format!("{}: {}", member.id.name(), resolution.ty())
+    }
+}
+
+fn semantic_query_data(db: &Arc<BaseDb>, position: ProjectPosition) -> Option<ProjectQueryData> {
+    if let Some(def_map) = db.project_def_map(position.project_id)
+        && def_map.module_for_file(position.position.file_id).is_some()
+    {
+        let member_index = db.project_member_index(position.project_id)?;
+        return Some(ProjectQueryData {
             def_map,
             member_index,
-        })
+        });
+    }
+
+    // A workspace may contain independent Rua files that are not reachable
+    // from its selected project root. Keep those files semantically useful
+    // by analyzing the current file as a standalone root.
+    let def_map = db.def_map(position.position.file_id);
+    def_map.module_for_file(position.position.file_id)?;
+    let member_index = db.member_index(position.position.file_id);
+    Some(ProjectQueryData {
+        def_map,
+        member_index,
+    })
+}
+
+impl Analysis {
+    fn project_query_data(&self, position: ProjectPosition) -> Option<ProjectQueryData> {
+        semantic_query_data(&self.db, position)
+    }
+
+    fn builtin_member_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<BuiltinMemberAt> {
+        let owner = completion::innermost_body_owner(
+            &query.def_map,
+            position.position,
+            position.position.offset,
+        )?;
+        let source_map = self.db.body_source_map(owner.id())?;
+        let inference = self.db.infer(owner.id())?;
+        for source_id in source_map.ids_at(position.position.file_id, position.position.offset) {
+            let BodySourceId::NameRef(name_ref) = source_id else {
+                continue;
+            };
+            let Some(resolution) = inference.member_resolution(name_ref).cloned() else {
+                continue;
+            };
+            let MemberTarget::Builtin(id) = resolution.target() else {
+                continue;
+            };
+            return Some(BuiltinMemberAt {
+                id,
+                resolution,
+                range: source_map.name_ref_range(name_ref)?,
+            });
+        }
+        None
     }
 
     /// Test and integration helper for syntax queries during Phase 2.
@@ -393,12 +513,88 @@ impl Analysis {
     // Navigation and hover
     // ------------------------------------------------------------------
 
+    /// Inferred type hints for bindings in one project-aware file.
+    pub fn inlay_hints(&self, file: ProjectFile) -> Vec<TypeHint> {
+        let Some(query) = semantic_query_data(
+            &self.db,
+            ProjectPosition::at(file.project_id, file.file_id, 0),
+        ) else {
+            return Vec::new();
+        };
+        let mut hints = Vec::new();
+
+        for definition in query.def_map.definitions().filter(|definition| {
+            definition.file_id() == file.file_id && definition.kind().is_body_owner()
+        }) {
+            let Some(body) = self.db.body(definition.id()) else {
+                continue;
+            };
+            let Some(source_map) = self.db.body_source_map(definition.id()) else {
+                continue;
+            };
+            let Some(inference) = self.db.infer(definition.id()) else {
+                continue;
+            };
+
+            for (binding_id, binding) in body.bindings() {
+                if binding.name().is_none()
+                    || binding.type_ref().is_some()
+                    || matches!(
+                        binding.kind(),
+                        crate::hir::BindingKind::Parameter
+                            | crate::hir::BindingKind::ClosureParameter
+                            | crate::hir::BindingKind::SelfParameter
+                    )
+                {
+                    continue;
+                }
+                let Some(ty) = inference.type_of_binding(binding_id) else {
+                    continue;
+                };
+                if ty.is_unknown() || ty.is_never() {
+                    continue;
+                }
+                let Some(range) = source_map.binding_range(binding_id) else {
+                    continue;
+                };
+                if range.file_id != file.file_id {
+                    continue;
+                }
+
+                let mut hint = TypeHint::new(
+                    FilePosition::new(file.file_id, range.range.end()),
+                    ty.to_string(),
+                );
+                if let Ty::Named(named) = ty
+                    && let Some(target) = query.def_map.definition(named.definition())
+                {
+                    hint = hint.with_target(FileRange::new(target.file_id(), target.name_range()));
+                }
+                hints.push(hint);
+            }
+        }
+
+        hints.sort();
+        hints.dedup();
+        hints
+    }
+
     /// Type and signature information at a cursor position.
     pub fn hover(&self, position: ProjectPosition) -> Option<HoverResult> {
         let query = self.project_query_data(position)?;
         let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
         if let Some(hover) = self.builtin_macro_hover(position) {
+            return Some(hover);
+        }
+
+        if let Some(member) = self.builtin_member_at(position, &query) {
+            let mut hover = HoverResult::new(member.range, builtin_hover_text(&member));
+            if let Some(documentation) =
+                builtin_source_definition(member.id).and_then(|source| source.documentation)
+            {
+                hover = hover.with_documentation(documentation);
+            }
             return Some(hover);
         }
 
@@ -558,6 +754,20 @@ impl Analysis {
         }
 
         None
+    }
+
+    /// Navigate to a member declaration in the configured builtin sysroot.
+    pub fn goto_builtin_definition(
+        &self,
+        position: ProjectPosition,
+    ) -> Option<BuiltinDefinitionTarget> {
+        let query = self.project_query_data(position)?;
+        let member = self.builtin_member_at(position, &query)?;
+        let source = builtin_source_definition(member.id)?;
+        Some(BuiltinDefinitionTarget::new(
+            member.id.source_name(),
+            source.range,
+        ))
     }
 
     /// Goto definition for `receiver.field` or `receiver.method()`.

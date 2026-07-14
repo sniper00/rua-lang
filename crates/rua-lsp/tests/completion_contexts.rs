@@ -119,6 +119,35 @@ fn completions_in_function_return_type() {
     );
 }
 
+#[test]
+fn completions_offer_builtin_generic_type_snippets() {
+    for (partial, expected, snippet) in [
+        ("Opt", "Option", "Option<${1:T}>$0"),
+        ("Res", "Result", "Result<${1:T}, ${2:E}>$0"),
+    ] {
+        let root_uri = uri("/test/main.rua");
+        let file_uri = uri(&format!("/test/{expected}.rua"));
+        let (source, offset) = extract_marker(&format!("fn use_value(value: {partial}$0) {{}}"));
+        let mut srv = TestServer::new();
+        srv.open(&root_uri, "fn root() {}");
+        srv.open(&file_uri, &source);
+
+        let items = srv
+            .snapshot()
+            .completions(srv.pp_at_offset(&file_uri, offset).unwrap());
+        let item = items
+            .iter()
+            .find(|item| item.label() == expected)
+            .unwrap_or_else(|| panic!("missing {expected} completion: {items:?}"));
+        assert_eq!(
+            item.insert(),
+            Some(&rua_analysis::CompletionInsert::Snippet(
+                snippet.to_string()
+            ))
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Item-level completions (module body)
 // ---------------------------------------------------------------------------

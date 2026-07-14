@@ -524,6 +524,54 @@ fn main() -> Vec<i64> {
 }
 
 #[test]
+fn iterator_collect_preallocates_only_when_length_is_exact() {
+    let exact = crate::compile_str(
+        "fn main() -> Vec<i64> { vec![1, 2, 3].iter().map(|value| value * 2).collect() }",
+    )
+    .expect("compile exact-size collect");
+    assert!(
+        exact.contains("local __rua_table_create = table.create"),
+        "missing Lua 5.5 capacity helper: {exact}"
+    );
+    assert!(
+        exact.contains("rt.vec(__rua_table_create(") && exact.contains(".n, 2)"),
+        "exact-size collect was not preallocated: {exact}"
+    );
+
+    let filtered = crate::compile_str(
+        "fn main() -> Vec<i64> { vec![1, 2, 3].iter().filter(|value| value > 1).collect() }",
+    )
+    .expect("compile filtered collect");
+    assert!(
+        !filtered.contains("__rua_table_create"),
+        "filter output length is not exact and must not reserve the source length: {filtered}"
+    );
+}
+
+#[test]
+fn unused_pure_iterator_pipeline_is_eliminated_but_trapping_expression_is_kept() {
+    let iterator = crate::compile_str(
+        "fn main() { let unused = vec![1, 2, 3].iter().map(|value| value * 2).collect::<Vec<i64>>(); }",
+    )
+    .expect("compile removable iterator");
+    assert!(
+        !iterator.contains("for "),
+        "unused loop survived: {iterator}"
+    );
+    assert!(
+        !iterator.contains("rua_rt"),
+        "unused Vec survived: {iterator}"
+    );
+
+    let division = crate::compile_str("fn main() { let unused = 1 / 0; }")
+        .expect("compile potentially trapping division");
+    assert!(
+        division.contains("local unused = rt.idiv(1, 0)"),
+        "potential division-by-zero was removed: {division}"
+    );
+}
+
+#[test]
 fn iterator_codegen_handles_fold_filter_map_enumerate_and_early_exit() {
     let sources = [
         "fn main() -> i64 { (0..4).fold(0, |total, value| total + value) }",
@@ -805,12 +853,11 @@ fn struct_decl_and_literal() {
         fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
     "#,
     );
-    assert!(lua.contains("local Point"), "got: {lua}");
-    assert!(lua.contains("Point.__index = Point"));
-    assert!(
-        lua.contains("setmetatable({ x = 0.0, y = 0.0 }, Point)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("---@class Point"), "got: {lua}");
+    assert!(!lua.contains("local Point ="), "got: {lua}");
+    assert!(!lua.contains("Point.__index = Point"), "got: {lua}");
+    assert!(!lua.contains("setmetatable"), "got: {lua}");
+    assert!(lua.contains("x = 0.0"), "got: {lua}");
 }
 
 #[test]
@@ -830,7 +877,7 @@ fn impl_methods_use_colon() {
 }
 
 #[test]
-fn method_call_uses_colon() {
+fn concrete_method_call_uses_static_identity() {
     let lua = compile(
         r#"
         struct P { x: f64 }
@@ -838,7 +885,7 @@ fn method_call_uses_colon() {
         fn f(p: P) -> f64 { p.get() }
     "#,
     );
-    assert!(lua.contains("return p:get()"), "got: {lua}");
+    assert!(lua.contains("return P.get(p)"), "got: {lua}");
 }
 
 #[test]
@@ -851,18 +898,10 @@ fn enum_construction_tagged() {
         fn c() -> Shape { Shape::Unit }
     "#,
     );
-    assert!(
-        lua.contains(r#"setmetatable({ tag = "Circle", 2.0 }, Shape)"#),
-        "got: {lua}"
-    );
-    assert!(
-        lua.contains(r#"setmetatable({ tag = "Rect", w = 3.0, h = 4.0 }, Shape)"#),
-        "got: {lua}"
-    );
-    assert!(
-        lua.contains(r#"setmetatable({ tag = "Unit" }, Shape)"#),
-        "got: {lua}"
-    );
+    assert!(!lua.contains("setmetatable"), "got: {lua}");
+    assert!(lua.contains(r#"tag = "Circle""#), "got: {lua}");
+    assert!(lua.contains(r#"tag = "Rect""#), "got: {lua}");
+    assert!(lua.contains(r#"tag = "Unit""#), "got: {lua}");
 }
 
 #[test]
@@ -911,9 +950,10 @@ fn match_on_enum() {
         }
     "#,
     );
-    assert!(lua.contains(r#".tag == "Circle""#), "got: {lua}");
+    assert!(lua.contains(r#"s.tag == "Circle""#), "got: {lua}");
     assert!(lua.contains("local r ="), "binds tuple field; got: {lua}");
-    assert!(lua.contains(r#".tag == "Rect""#));
+    assert!(!lua.contains(r#"== "Rect""#), "got: {lua}");
+    assert!(lua.contains("else"), "got: {lua}");
     assert!(lua.contains("local w ="));
     assert!(lua.contains("local h ="));
 }
@@ -1079,9 +1119,12 @@ fn match_guard() {
         }
     "#,
     );
-    assert!(lua.contains("local x ="), "binds x for guard; got: {lua}");
     assert!(
-        lua.contains("if x > 0 then"),
+        !lua.contains("local x ="),
+        "stable binding was copied: {lua}"
+    );
+    assert!(
+        lua.contains("if __t1 > 0 then"),
         "guard uses binding; got: {lua}"
     );
 }
@@ -1101,6 +1144,16 @@ fn for_range_inclusive() {
 }
 
 #[test]
+fn empty_pure_range_loop_is_eliminated_but_effectful_bounds_are_kept() {
+    let pure = compile("fn f() { for _ in 0..5 {} }");
+    assert!(!pure.contains("for _ ="), "got: {pure}");
+
+    let effectful = compile("fn bound() -> i64 { 5 } fn f() { for _ in bound()..bound() {} }");
+    assert!(effectful.contains("bound()"), "got: {effectful}");
+    assert!(effectful.contains("for _ ="), "got: {effectful}");
+}
+
+#[test]
 fn for_over_vec() {
     let lua = compile(
         r#"
@@ -1115,9 +1168,9 @@ fn for_over_vec() {
 
 #[test]
 fn vec_macro_zero_based() {
-    let lua = compile("fn f() { let v = vec![10, 20]; }");
+    let lua = compile("fn f() -> i64 { let v = vec![10, 20]; v[0] }");
     assert!(
-        lua.contains("rt.vec({ [0] = 10, [1] = 20, n = 2 })"),
+        lua.contains("rt.vec({ [0] = 10, 20, n = 2 })"),
         "got: {lua}"
     );
     assert!(
@@ -1128,7 +1181,7 @@ fn vec_macro_zero_based() {
 
 #[test]
 fn index_expr() {
-    let lua = compile("fn f() { let v = vec![1, 2]; let a = v[0]; }");
+    let lua = compile("fn f() -> i64 { let v = vec![1, 2]; let a = v[0]; a }");
     assert!(lua.contains("local a = v[0]"), "0-based index; got: {lua}");
 }
 
@@ -1481,10 +1534,10 @@ fn typeck_option_result_return_ok() {
 
 #[test]
 fn codegen_integer_division() {
-    // i64 / i64 -> truncating helper `rt.idiv` (matches Rust for negatives).
+    // Constant i64 division is folded without loading the runtime helper.
     let lua = compile("fn f() -> i64 { 7 / 2 }");
-    assert!(lua.contains("rt.idiv(7, 2)"), "got: {lua}");
-    assert!(!lua.contains("//"), "got: {lua}");
+    assert!(lua.contains("return 3"), "got: {lua}");
+    assert!(!lua.contains("rt.idiv"), "got: {lua}");
 }
 
 #[test]
@@ -1528,6 +1581,15 @@ fn codegen_int_remainder_via_params() {
     // `i64 % i64` lowers to the truncating remainder helper.
     let lua = compile("fn f(a: i64, b: i64) -> i64 { a % b }");
     assert!(lua.contains("rt.irem(a, b)"), "got: {lua}");
+}
+
+#[test]
+fn codegen_nonnegative_range_remainder_uses_lua_operator() {
+    let lua = compile(
+        "fn f() -> i64 { let mut total = 0; for i in 0..10 { total = total + i % 2; } total }",
+    );
+    assert!(lua.contains("i % 2"), "got: {lua}");
+    assert!(!lua.contains("rt.irem"), "got: {lua}");
 }
 
 #[test]
@@ -1637,7 +1699,8 @@ fn if_let_some_binds_and_tests_nil() {
     "#,
     );
     assert!(lua.contains("~= nil then"), "got: {lua}");
-    assert!(lua.contains("local x ="), "got: {lua}");
+    assert!(!lua.contains("local x ="), "got: {lua}");
+    assert!(lua.contains("rt.println(\"{}\", opt)"), "got: {lua}");
 }
 
 #[test]
@@ -1716,7 +1779,10 @@ fn module_emits_one_table_identity() {
         fn main() { println!("{}", math::add(1, 2)); }
     "#,
     );
-    assert!(lua.contains("math = {}"), "got: {lua}");
+    assert!(
+        lua.contains("local math = __rua_table_create(0, 1)"),
+        "got: {lua}"
+    );
     assert!(lua.contains("function math.add(a, b)"), "got: {lua}");
     // Qualified call `math::add` lowers to `math.add`.
     assert!(lua.contains("math.add(1, 2)"), "got: {lua}");
@@ -1750,7 +1816,10 @@ fn nested_module_qualified_access() {
         fn main() { println!("{}", outer::inner::f()); }
     "#,
     );
-    assert!(lua.contains("outer.inner = {}"), "got: {lua}");
+    assert!(
+        lua.contains("outer.inner = __rua_table_create(0, 1)"),
+        "got: {lua}"
+    );
     assert!(lua.contains("function outer.inner.f()"), "got: {lua}");
     assert!(lua.contains("outer.inner.f()"), "got: {lua}");
 }
@@ -1844,8 +1913,14 @@ fn same_fn_name_across_modules_no_dup_error() {
         fn main() {}
     "#,
     );
-    assert!(lua.contains("a = {}"), "got: {lua}");
-    assert!(lua.contains("b = {}"), "got: {lua}");
+    assert!(
+        lua.contains("local a = __rua_table_create(0, 1)"),
+        "got: {lua}"
+    );
+    assert!(
+        lua.contains("local b = __rua_table_create(0, 1)"),
+        "got: {lua}"
+    );
 }
 
 #[test]
@@ -1866,7 +1941,10 @@ fn module_struct_qualified_literal_and_assoc_fn() {
     "#,
     );
     // The class table has one module-owned backend place.
-    assert!(lua.contains("geo.Point = {}"), "got: {lua}");
+    assert!(
+        lua.contains("geo.Point = __rua_table_create(0, 2)"),
+        "got: {lua}"
+    );
     assert!(lua.contains("geo.Point.__index = geo.Point"), "got: {lua}");
     assert!(lua.contains("function geo.Point.new(x, y)"), "got: {lua}");
     // Cross-module associated fn + struct literal use the qualified table.
@@ -1884,25 +1962,22 @@ fn module_enum_variants_qualified() {
         mod geo {
             pub enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Dot }
         }
+        fn consume(_a: geo::Shape, _b: geo::Shape, _c: geo::Shape) {}
         fn main() {
             let a = geo::Shape::Circle(5.0);
             let b = geo::Shape::Rect { w: 2.0, h: 3.0 };
             let c = geo::Shape::Dot;
+            consume(a, b, c);
         }
     "#,
     );
+    assert!(!lua.contains("setmetatable"), "got: {lua}");
+    assert!(lua.contains("{ tag = \"Circle\", 5.0 }"), "got: {lua}");
     assert!(
-        lua.contains("setmetatable({ tag = \"Circle\", 5.0 }, geo.Shape)"),
+        lua.contains("{ tag = \"Rect\", w = 2.0, h = 3.0 }"),
         "got: {lua}"
     );
-    assert!(
-        lua.contains("setmetatable({ tag = \"Rect\", w = 2.0, h = 3.0 }, geo.Shape)"),
-        "got: {lua}"
-    );
-    assert!(
-        lua.contains("setmetatable({ tag = \"Dot\" }, geo.Shape)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("{ tag = \"Dot\" }"), "got: {lua}");
 }
 
 #[test]
@@ -1922,8 +1997,7 @@ fn module_method_and_self_call() {
     "#,
     );
     assert!(lua.contains("function geo.P:get()"), "got: {lua}");
-    // Method call resolves at runtime via metatable (colon call).
-    assert!(lua.contains("p:get()"), "got: {lua}");
+    assert!(lua.contains("geo.P.get(p)"), "got: {lua}");
 }
 
 #[test]
@@ -1955,9 +2029,9 @@ fn same_type_name_across_modules_no_dup_error() {
     "#,
     );
     assert!(lua.contains("a.Point = {}"), "got: {lua}");
-    assert!(lua.contains("a.Point.__index = a.Point"), "got: {lua}");
+    assert!(!lua.contains("a.Point.__index = a.Point"), "got: {lua}");
     assert!(lua.contains("b.Point = {}"), "got: {lua}");
-    assert!(lua.contains("b.Point.__index = b.Point"), "got: {lua}");
+    assert!(!lua.contains("b.Point.__index = b.Point"), "got: {lua}");
 }
 
 #[test]
@@ -2172,7 +2246,10 @@ fn file_module_resolution() {
     .unwrap();
     std::fs::write(dir.join("util.rua"), "pub fn f() -> i64 { 7 }\n").unwrap();
     let lua = crate::compile_path(&dir.join("main.rua")).unwrap();
-    assert!(lua.contains("util = {}"), "got: {lua}");
+    assert!(
+        lua.contains("local util = __rua_table_create(0, 1)"),
+        "got: {lua}"
+    );
     assert!(lua.contains("function util.f()"), "got: {lua}");
     assert!(lua.contains("util.f()"), "got: {lua}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2306,7 +2383,7 @@ fn if_let_binding_is_scoped_no_false_positive() {
         }
     "#,
     );
-    assert!(lua.contains("x + 1"), "got: {lua}");
+    assert!(lua.contains("opt + 1"), "got: {lua}");
 }
 
 // --- P5c-4 generics + bounds ------------------------------------------------
@@ -2327,8 +2404,10 @@ fn generic_struct_and_enum_parse_and_erase() {
         fn main() {}
     "#,
     );
-    assert!(lua.contains("Wrapper = {}"), "got: {lua}");
-    assert!(lua.contains("Either = {}"), "got: {lua}");
+    assert!(lua.contains("---@class Wrapper"), "got: {lua}");
+    assert!(lua.contains("---@class Either"), "got: {lua}");
+    assert!(!lua.contains("local Wrapper ="), "got: {lua}");
+    assert!(!lua.contains("local Either ="), "got: {lua}");
 }
 
 #[test]
@@ -2342,7 +2421,7 @@ fn generic_bound_method_call_ok() {
     "#,
     );
     assert!(lua.contains("function describe(a)"), "got: {lua}");
-    assert!(lua.contains("a:speak()"), "got: {lua}");
+    assert!(lua.contains("getmetatable(a).speak(a)"), "got: {lua}");
 }
 
 #[test]
@@ -2428,7 +2507,7 @@ fn impl_generic_bound_in_module_ok() {
     "#,
     );
     assert!(lua.contains("function z.label(x)"), "got: {lua}");
-    assert!(lua.contains("x:name()"), "got: {lua}");
+    assert!(lua.contains("getmetatable(x).name(x)"), "got: {lua}");
 }
 
 // --- P5c-5: `where` clauses + call-site constraint satisfaction -------------
@@ -2444,7 +2523,7 @@ fn where_clause_bounds_merge_and_resolve() {
     "#,
     );
     assert!(lua.contains("function describe(a)"), "got: {lua}");
-    assert!(lua.contains("a:speak()"), "got: {lua}");
+    assert!(lua.contains("getmetatable(a).speak(a)"), "got: {lua}");
 }
 
 #[test]
@@ -2806,7 +2885,8 @@ fn generic_receiver_method_uses_qualified_trait_identity() {
         let answer = read(left::Number { value: 42 });
         "#,
     );
-    assert!(lua.contains("local answer = read("), "{lua}");
+    assert!(lua.contains("read(setmetatable("), "{lua}");
+    assert!(!lua.contains("local answer"), "{lua}");
 }
 
 #[test]

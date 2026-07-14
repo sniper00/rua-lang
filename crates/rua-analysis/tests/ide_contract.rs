@@ -6,7 +6,7 @@ use rua_analysis::{
     FileKind, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectId,
     ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, SemanticToken,
     SemanticTokenKind, SemanticTokenModifiers, SourceChange, SourceRootId, SourceRootKind,
-    TextEdit, TextRange, normalize_diagnostics,
+    TextEdit, TextRange, TypeHint, normalize_diagnostics,
 };
 
 #[test]
@@ -113,6 +113,11 @@ fn ide_contract_navigation_hover_and_completion_are_protocol_neutral() {
     assert_eq!(hover.range().file_id, file_id);
     assert_eq!(hover.signature(), "fn area(point: Point) -> i64");
     assert_eq!(hover.documentation(), Some("Returns the area."));
+
+    let hint = TypeHint::new(FilePosition::new(file_id, 50), "Point").with_target(full);
+    assert_eq!(hint.position(), FilePosition::new(file_id, 50));
+    assert_eq!(hint.ty(), "Point");
+    assert_eq!(hint.target(), Some(full));
 
     let completion = CompletionItem::new("area", CompletionKind::Function)
         .with_detail("fn area(point: Point) -> i64")

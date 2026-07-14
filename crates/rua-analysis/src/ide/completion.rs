@@ -50,9 +50,9 @@ pub(crate) struct CompletionContext<'a> {
 impl<'a> CompletionContext<'a> {
     fn new(db: &'a Arc<BaseDb>, project_position: ProjectPosition) -> Option<Self> {
         let position = project_position.position;
-        let def_map = db.project_def_map(project_position.project_id)?;
-        def_map.module_for_file(position.file_id)?;
-        let member_index = db.project_member_index(project_position.project_id)?;
+        let query = super::semantic_query_data(db, project_position)?;
+        let def_map = query.def_map;
+        let member_index = query.member_index;
         let text = db.file_text(position.file_id)?;
         let parse = db.parse(position.file_id);
         let root = parse.syntax_node();
@@ -242,8 +242,21 @@ const DECLARATION_KEYWORDS: &[&str] = &[
     "fn", "struct", "enum", "trait", "impl", "mod", "pub", "extern", "use", "type",
 ];
 
-const BUILTIN_TYPES: &[&str] = &[
-    "i64", "f64", "bool", "String", "str", "Vec", "HashMap", "Option", "Result", "Box",
+const BUILTIN_TYPES: &[(&str, &str, Option<&str>)] = &[
+    ("i64", "i64", None),
+    ("f64", "f64", None),
+    ("bool", "bool", None),
+    ("String", "String", None),
+    ("str", "str", None),
+    ("Vec", "Vec<T>", Some("Vec<${1:T}>$0")),
+    (
+        "HashMap",
+        "HashMap<K, V>",
+        Some("HashMap<${1:K}, ${2:V}>$0"),
+    ),
+    ("Option", "Option<T>", Some("Option<${1:T}>$0")),
+    ("Result", "Result<T, E>", Some("Result<${1:T}, ${2:E}>$0")),
+    ("Box", "Box<T>", Some("Box<${1:T}>$0")),
 ];
 
 const BUILTIN_VALUES: &[(&str, &str)] = &[
@@ -632,20 +645,22 @@ fn complete_builtin_types(
         })
     });
     let numeric_types: &[&str] = &["i64", "f64"];
-    for ty in BUILTIN_TYPES {
-        if seen.insert(ty.to_string()) {
-            let relevance = if in_arithmetic && numeric_types.contains(ty) {
+    for (name, signature, snippet) in BUILTIN_TYPES {
+        if seen.insert((*name).to_string()) {
+            let relevance = if in_arithmetic && numeric_types.contains(name) {
                 CompletionRelevance::arithmetic_num()
             } else if in_type_pos {
                 CompletionRelevance::builtin_type_pos()
             } else {
                 CompletionRelevance::builtin_type()
             };
-            items.push(
-                CompletionItem::new(*ty, CompletionKind::BuiltinType)
-                    .with_detail(format!("{ty}  (built-in type)"))
-                    .with_relevance(relevance),
-            );
+            let mut item = CompletionItem::new(*name, CompletionKind::BuiltinType)
+                .with_detail(format!("{signature} (built-in type)"))
+                .with_relevance(relevance);
+            if let Some(snippet) = snippet {
+                item = item.with_insert(CompletionInsert::Snippet((*snippet).to_string()));
+            }
+            items.push(item);
         }
     }
 }
@@ -1389,7 +1404,7 @@ pub(crate) fn find_containing_body_data(
     })
 }
 
-fn innermost_body_owner(
+pub(super) fn innermost_body_owner(
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,

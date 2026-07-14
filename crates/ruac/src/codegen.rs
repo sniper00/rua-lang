@@ -40,6 +40,8 @@ struct IterChain<'a> {
     consumer_args: &'a [Expr],
 }
 
+type PatternBinding = (String, crate::token::SourceRange, LuaExpr);
+
 #[derive(Default)]
 struct IterAdapterState {
     counter: Option<String>,
@@ -53,7 +55,7 @@ enum IterLoopSource {
         inclusive: bool,
     },
     Vec {
-        holder: String,
+        holder: LuaExpr,
     },
 }
 
@@ -82,16 +84,34 @@ pub fn generate_with_source_map(
     rules: &crate::builtins::CodegenRules,
 ) -> GeneratedLua {
     let hir = program.hir();
+    let mut metatable_types = HashSet::new();
+    collect_metatable_types(
+        &program.syntax().items,
+        hir.root,
+        program,
+        &mut metatable_types,
+    );
+    let mut local_uses = HashMap::new();
+    for target in hir.expression_targets.values() {
+        if let crate::hir::ResolvedTarget::Local(local) = target {
+            *local_uses.entry(*local).or_insert(0) += 1;
+        }
+    }
     let mut cg = Codegen {
         lua: crate::lua_ir::Builder::new(),
         uses_rt: false,
+        uses_table_create: false,
         closure_return_targets: Vec::new(),
+        local_substitutions: Vec::new(),
+        local_uses,
+        nonnegative_integer_locals: Vec::new(),
         program,
         info: program.types(),
         hir,
         layout: BackendLayout::new(program),
         current_module: hir.root,
         builtin_rules: rules,
+        metatable_types,
     };
     cg.gen_program(program.syntax());
 
@@ -102,6 +122,9 @@ pub fn generate_with_source_map(
             "assert(rt.ABI_VERSION == {}, \"incompatible rua_rt ABI\")\n",
             rua_core::RUNTIME_ABI_VERSION
         ));
+    }
+    if cg.uses_table_create {
+        prefix.push_str("local __rua_table_create = table.create\n");
     }
     let printed = crate::lua_ir::print_with_source_map(&cg.lua.finish());
     let generated_offset = prefix.len();
@@ -125,15 +148,24 @@ struct Codegen<'a> {
     lua: crate::lua_ir::Builder,
     /// Set when any generated code references the `rua_rt` runtime shim.
     uses_rt: bool,
+    /// Set when a table is populated after construction and benefits from a
+    /// Lua 5.5 `table.create` capacity hint.
+    uses_table_create: bool,
     /// Inlined iterator closure returns assign a local and jump out of the
     /// closure body instead of returning from the enclosing Rua function.
     closure_return_targets: Vec<(String, String)>,
+    /// Identity-keyed replacements active while an expression closure is fused
+    /// into its caller.
+    local_substitutions: Vec<HashMap<crate::hir::LocalId, LuaExpr>>,
+    local_uses: HashMap<crate::hir::LocalId, usize>,
+    nonnegative_integer_locals: Vec<crate::hir::LocalId>,
     program: &'a crate::typed_ir::TypedProgram,
     info: &'a TypeInfo,
     hir: &'a crate::hir::ResolvedHir,
     layout: BackendLayout,
     current_module: crate::hir::ModuleId,
     builtin_rules: &'a crate::builtins::CodegenRules,
+    metatable_types: HashSet<crate::hir::DefId>,
 }
 
 fn statement_source(statement: &Stmt) -> Option<crate::token::SourceRange> {
@@ -301,31 +333,392 @@ impl Codegen<'_> {
         self.layout.local_name(self.current_module, name)
     }
 
+    fn table_create(&mut self, sequence: LuaExpr, records: usize) -> LuaExpr {
+        self.uses_table_create = true;
+        LuaExpr::name("__rua_table_create")
+            .call(vec![sequence, LuaExpr::integer(records.to_string())])
+    }
+
+    fn empty_table(&mut self, records: usize) -> LuaExpr {
+        if records == 0 {
+            LuaExpr::Table(Vec::new())
+        } else {
+            self.table_create(LuaExpr::integer("0"), records)
+        }
+    }
+
+    fn type_table_record_capacity(&self, owner: crate::hir::DefId) -> usize {
+        let mut fields = HashSet::new();
+        if self.metatable_types.contains(&owner) {
+            fields.insert("__index".to_string());
+        }
+        for definition in &self.hir.definitions {
+            if !matches!(definition.kind, crate::hir::DefKind::Method { owner: method_owner } if method_owner == owner)
+            {
+                continue;
+            }
+            fields.insert(self.layout.member_name(&definition.name));
+            if let Some(alias) = self
+                .hir
+                .method_traits
+                .get(&definition.id)
+                .copied()
+                .and_then(|target| op_alias(target, &definition.name))
+            {
+                fields.insert(alias.to_string());
+            }
+        }
+        fields.len()
+    }
+
+    fn type_needs_runtime_table(&self, owner: crate::hir::DefId) -> bool {
+        self.hir.definition(owner).is_public
+            || self.metatable_types.contains(&owner)
+            || self.hir.definitions.iter().any(|definition| {
+                matches!(
+                    definition.kind,
+                    crate::hir::DefKind::Method { owner: method_owner }
+                        if method_owner == owner
+                )
+            })
+    }
+
+    fn module_table_record_capacity(
+        &self,
+        declaration: &ModDecl,
+        module: crate::hir::ModuleId,
+    ) -> usize {
+        let mut fields = HashSet::new();
+        let mut insert_item = |name: &str, is_public: bool| {
+            let encoded = self.layout.member_name(name);
+            fields.insert(encoded.clone());
+            if is_public && encoded != name {
+                fields.insert(name.to_string());
+            }
+        };
+        for (item_index, item) in declaration.items.iter().enumerate() {
+            match item {
+                Item::Fn(function) => insert_item(&function.name, function.is_pub),
+                Item::Struct(structure)
+                    if self.type_needs_runtime_table(
+                        self.program.item_definition(module, item_index),
+                    ) =>
+                {
+                    insert_item(&structure.name, structure.is_pub);
+                }
+                Item::Enum(enumeration)
+                    if self.type_needs_runtime_table(
+                        self.program.item_definition(module, item_index),
+                    ) =>
+                {
+                    insert_item(&enumeration.name, enumeration.is_pub);
+                }
+                Item::Mod(child)
+                    if !child.is_decl
+                        && (child.is_pub
+                            || self.module_table_record_capacity(
+                                child,
+                                self.program.child_module(module, item_index),
+                            ) > 0) =>
+                {
+                    insert_item(&child.name, child.is_pub);
+                }
+                Item::Extern(block) => {
+                    for function in &block.fns {
+                        insert_item(&function.name, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fields.len()
+    }
+
+    fn binding_is_unused(&self, source: crate::token::SourceRange) -> bool {
+        self.hir
+            .binding_target(source)
+            .is_some_and(|local| self.local_uses.get(&local).copied().unwrap_or(0) == 0)
+    }
+
+    fn bind_local_substitution(&mut self, source: crate::token::SourceRange, value: LuaExpr) {
+        let local = self
+            .hir
+            .binding_target(source)
+            .expect("resolved binding has a local identity");
+        self.local_substitutions
+            .last_mut()
+            .expect("local substitution requires a block scope")
+            .insert(local, value);
+    }
+
+    fn emit_pattern_bindings(&mut self, bindings: &[PatternBinding]) {
+        for (name, source, value) in bindings {
+            if matches!(value, LuaExpr::Name(_)) {
+                self.bind_local_substitution(*source, value.clone());
+            } else {
+                self.local(self.local_name(name), Some(value.clone()));
+            }
+        }
+    }
+
+    fn is_immutable_local_path(&self, expression: &Expr) -> bool {
+        matches!(expression.kind, ExprKind::Path(_))
+            && matches!(
+                self.program.expression_target(expression.id),
+                crate::hir::ResolvedTarget::Local(local)
+                    if !self.hir.locals[local.index()].is_mutable
+            )
+    }
+
+    fn expression_is_known_nonnegative(&self, expression: &Expr) -> bool {
+        match &expression.kind {
+            ExprKind::Int(source) => rua_int_value(source).is_some_and(|value| value >= 0),
+            ExprKind::Path(_) => matches!(
+                self.program.expression_target(expression.id),
+                crate::hir::ResolvedTarget::Local(local)
+                    if self.nonnegative_integer_locals.contains(&local)
+            ),
+            _ => false,
+        }
+    }
+
+    fn closure_invocation_is_removable(&self, closure: &Expr) -> bool {
+        let ExprKind::Closure { body, .. } = &closure.kind else {
+            return false;
+        };
+        match body {
+            ClosureBody::Expr(expression) => {
+                self.expression_is_removable_with_returns(expression, true)
+            }
+            ClosureBody::Block(block) => self.block_is_removable(block, true),
+        }
+    }
+
+    fn block_is_removable(&self, block: &Block, closure_returns: bool) -> bool {
+        block.stmts.iter().all(|statement| match statement {
+            Stmt::Let { init, .. } | Stmt::Expr(init) => {
+                self.expression_is_removable_with_returns(init, closure_returns)
+            }
+            Stmt::Return(value) if closure_returns => value.as_ref().is_none_or(|value| {
+                self.expression_is_removable_with_returns(value, closure_returns)
+            }),
+            Stmt::Return(_)
+            | Stmt::While { .. }
+            | Stmt::Loop { .. }
+            | Stmt::For { .. }
+            | Stmt::WhileLet { .. }
+            | Stmt::Break
+            | Stmt::Continue => false,
+        }) && block
+            .tail
+            .as_ref()
+            .is_none_or(|tail| self.expression_is_removable_with_returns(tail, closure_returns))
+    }
+
+    fn iterator_is_removable(&self, expression: &Expr, plan: &IterPlan) -> bool {
+        let Some(chain) = extract_iter_chain(expression, plan, true) else {
+            return false;
+        };
+        if !self.expression_is_removable(chain.source) {
+            return false;
+        }
+        for adapter in &chain.adapters {
+            match adapter.kind {
+                IterAdapterKind::Map | IterAdapterKind::Filter | IterAdapterKind::FilterMap => {
+                    if !adapter
+                        .args
+                        .first()
+                        .is_some_and(|closure| self.closure_invocation_is_removable(closure))
+                    {
+                        return false;
+                    }
+                }
+                IterAdapterKind::Skip | IterAdapterKind::Take => {
+                    if !adapter
+                        .args
+                        .first()
+                        .is_some_and(|limit| self.expression_is_removable(limit))
+                    {
+                        return false;
+                    }
+                }
+                IterAdapterKind::Enumerate => {}
+            }
+        }
+        match plan.consumer {
+            IterConsumerKind::For => false,
+            IterConsumerKind::CollectVec | IterConsumerKind::Count => true,
+            IterConsumerKind::Fold => {
+                chain.consumer_args.len() == 2
+                    && self.expression_is_removable(&chain.consumer_args[0])
+                    && self.closure_invocation_is_removable(&chain.consumer_args[1])
+            }
+            IterConsumerKind::Any | IterConsumerKind::All | IterConsumerKind::Find => chain
+                .consumer_args
+                .first()
+                .is_some_and(|closure| self.closure_invocation_is_removable(closure)),
+        }
+    }
+
+    fn expression_is_removable(&self, expression: &Expr) -> bool {
+        self.expression_is_removable_with_returns(expression, false)
+    }
+
+    fn expression_is_removable_with_returns(
+        &self,
+        expression: &Expr,
+        closure_returns: bool,
+    ) -> bool {
+        if let Some(plan) = self.info.iter_plan(expression.id) {
+            return self.iterator_is_removable(expression, plan);
+        }
+        match &expression.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Path(_)
+            | ExprKind::Closure { .. } => true,
+            ExprKind::Unary { expr, .. } => {
+                self.info.is_pure_operator(expression.id)
+                    && self.expression_is_removable_with_returns(expr, closure_returns)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let cannot_trap = !matches!(op, BinOp::Div | BinOp::Rem)
+                    || matches!(&rhs.kind, ExprKind::Int(source) if rua_int_value(source).is_some_and(|value| value != 0));
+                cannot_trap
+                    && self.info.is_pure_operator(expression.id)
+                    && self.expression_is_removable_with_returns(lhs, closure_returns)
+                    && self.expression_is_removable_with_returns(rhs, closure_returns)
+            }
+            ExprKind::Call { callee, args } => {
+                let enum_variant = matches!(callee.kind, ExprKind::Path(_))
+                    && matches!(
+                        self.program.expression_target(callee.id),
+                        crate::hir::ResolvedTarget::Item(definition)
+                            if matches!(
+                                self.hir.definition(definition).kind,
+                                crate::hir::DefKind::EnumVariant { .. }
+                            )
+                    );
+                let builtin = if matches!(callee.kind, ExprKind::Path(_)) {
+                    match self.program.expression_target(callee.id) {
+                        crate::hir::ResolvedTarget::Builtin(builtin) => matches!(
+                            self.builtin_rules.get(builtin),
+                            Some(
+                                crate::builtins::CodegenRule::InlineArg
+                                    | crate::builtins::CodegenRule::TableCtor { .. }
+                                    | crate::builtins::CodegenRule::TaggedResult { .. }
+                                    | crate::builtins::CodegenRule::EmptyVec
+                                    | crate::builtins::CodegenRule::EmptyMap
+                            )
+                        ),
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                (builtin
+                    || enum_variant
+                    || matches!(callee.kind, ExprKind::Closure { .. })
+                        && self.closure_invocation_is_removable(callee))
+                    && args.iter().all(|argument| {
+                        self.expression_is_removable_with_returns(argument, closure_returns)
+                    })
+            }
+            ExprKind::MethodCall { recv, args, .. } if self.info.is_option_map(expression.id) => {
+                self.expression_is_removable_with_returns(recv, closure_returns)
+                    && args
+                        .first()
+                        .is_some_and(|closure| self.closure_invocation_is_removable(closure))
+            }
+            ExprKind::MethodCall {
+                recv, method, args, ..
+            } if self.info.is_str_method(expression.id)
+                && matches!(
+                    method.as_str(),
+                    "len" | "is_empty" | "to_string" | "to_owned" | "clone"
+                ) =>
+            {
+                self.expression_is_removable_with_returns(recv, closure_returns)
+                    && args.iter().all(|argument| {
+                        self.expression_is_removable_with_returns(argument, closure_returns)
+                    })
+            }
+            ExprKind::StructLit { fields, .. } => fields.iter().all(|(_, value)| {
+                self.expression_is_removable_with_returns(value, closure_returns)
+            }),
+            ExprKind::Range { start, end, .. } => {
+                self.expression_is_removable_with_returns(start, closure_returns)
+                    && self.expression_is_removable_with_returns(end, closure_returns)
+            }
+            ExprKind::MacroCall { args, .. }
+                if matches!(
+                    self.program.expression_target(expression.id),
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroVec)
+                ) =>
+            {
+                args.iter().all(|argument| {
+                    self.expression_is_removable_with_returns(argument, closure_returns)
+                })
+            }
+            ExprKind::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                self.expression_is_removable_with_returns(cond, closure_returns)
+                    && self.block_is_removable(then_block, closure_returns)
+                    && else_block
+                        .as_ref()
+                        .is_none_or(|branch| match branch.as_ref() {
+                            ElseBranch::Block(block) => {
+                                self.block_is_removable(block, closure_returns)
+                            }
+                            ElseBranch::If(expression) => self
+                                .expression_is_removable_with_returns(expression, closure_returns),
+                        })
+            }
+            ExprKind::Block(block) => self.block_is_removable(block, closure_returns),
+            ExprKind::MethodCall { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Try { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfLet { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::MacroCall { .. }
+            | ExprKind::Assign { .. } => false,
+        }
+    }
+
+    fn unused_value_can_be_discarded(&self, expression: &Expr) -> bool {
+        match &expression.kind {
+            ExprKind::Call { callee, .. } => !matches!(
+                self.program.expression_target(callee.id),
+                crate::hir::ResolvedTarget::Item(definition)
+                    if matches!(
+                        self.hir.definition(definition).kind,
+                        crate::hir::DefKind::EnumVariant { .. }
+                    )
+            ),
+            ExprKind::MethodCall { .. }
+            | ExprKind::MacroCall { .. }
+            | ExprKind::If { .. }
+            | ExprKind::IfLet { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Block(_)
+            | ExprKind::Assign { .. }
+            | ExprKind::Try { .. } => true,
+            _ => false,
+        }
+    }
+
     // --- program ----------------------------------------------------------
 
     fn gen_program(&mut self, prog: &Program) {
         if prog.is_decl {
             return;
         }
-        // Every root callable gets exactly one lexical binding. Definitions
-        // below assign to these bindings, which makes forward and mutual
-        // recursion identical and avoids `local function` shadowing.
-        let fn_names: Vec<String> = prog
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(item_index, item)| match item {
-                Item::Fn(_) => self
-                    .layout
-                    .definition(self.program.item_definition(self.hir.root, item_index))
-                    .map(ToString::to_string),
-                _ => None,
-            })
-            .collect();
-        if !fn_names.is_empty() {
-            self.locals(fn_names);
-        }
-
         // Class tables (with `__index`) for structs and enums so their values
         // can carry methods. Each is self-contained: @class annotation + local table.
         for (item_index, item) in prog.items.iter().enumerate() {
@@ -341,15 +734,27 @@ impl Codegen<'_> {
                             type_to_emmylua(&field.ty)
                         ));
                     }
-                    self.lua.local_table(place.to_string());
-                    self.assign(place.field("__index").expression(), place.expression());
+                    if self.type_needs_runtime_table(definition) {
+                        let capacity = self.type_table_record_capacity(definition);
+                        let table = self.empty_table(capacity);
+                        self.local(place.to_string(), Some(table));
+                        if self.metatable_types.contains(&definition) {
+                            self.assign(place.field("__index").expression(), place.expression());
+                        }
+                    }
                 }
                 Item::Enum(e) => {
                     let definition = self.program.item_definition(self.hir.root, item_index);
                     let place = self.layout.definition(definition).unwrap().clone();
                     self.annotation(format!("---@class {0}", e.name));
-                    self.lua.local_table(place.to_string());
-                    self.assign(place.field("__index").expression(), place.expression());
+                    if self.type_needs_runtime_table(definition) {
+                        let capacity = self.type_table_record_capacity(definition);
+                        let table = self.empty_table(capacity);
+                        self.local(place.to_string(), Some(table));
+                        if self.metatable_types.contains(&definition) {
+                            self.assign(place.field("__index").expression(), place.expression());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -372,7 +777,32 @@ impl Codegen<'_> {
         // Nested extern places live under their owning module table, so all
         // runtime module places must exist before extern bindings are emitted.
         self.bind_externs(&prog.items, self.hir.root);
-        // Phase 2: define every callable against its preallocated place.
+
+        // Root locals must be in lexical scope before module functions are
+        // parsed. Acyclic dependencies are emitted callee-first as `local
+        // function`; only genuine mutual-recursion groups need declarations.
+        for group in root_function_schedule(self.program) {
+            let mutually_recursive = group.len() > 1;
+            if mutually_recursive {
+                let names = group
+                    .iter()
+                    .map(|&item_index| {
+                        let definition = self.program.item_definition(self.hir.root, item_index);
+                        self.layout.definition(definition).unwrap().to_string()
+                    })
+                    .collect();
+                self.locals(names);
+            }
+            for item_index in group {
+                let Item::Fn(function) = &prog.items[item_index] else {
+                    unreachable!("root function schedule only contains functions")
+                };
+                let definition = self.program.item_definition(self.hir.root, item_index);
+                self.gen_free_fn(function, definition, mutually_recursive);
+            }
+        }
+
+        // Phase 2: define module callables against their preallocated tables.
         for (item_index, item) in prog.items.iter().enumerate() {
             if let Item::Mod(m) = item
                 && !m.is_decl
@@ -380,12 +810,6 @@ impl Codegen<'_> {
                 let module = self.program.child_module(self.hir.root, item_index);
                 self.define_mod(m, &traits, module);
                 self.publish_mod(m, module);
-            }
-        }
-        for (item_index, item) in prog.items.iter().enumerate() {
-            if let Item::Fn(f) = item {
-                let definition = self.program.item_definition(self.hir.root, item_index);
-                self.gen_free_fn(f, definition);
             }
         }
         self.gen_impls(&prog.items, &traits, self.hir.root);
@@ -463,6 +887,12 @@ impl Codegen<'_> {
     fn bind_result_extern(&mut self, function: &ExternFn, definition: crate::hir::DefId) {
         self.uses_rt = true;
         self.lua.push_anchor(function.name_span);
+        let place = self.layout.definition(definition).unwrap().clone();
+        let target = if self.hir.definition(definition).module == self.hir.root {
+            FunctionTarget::local(place.to_string())
+        } else {
+            place.function_target()
+        };
         let host = self.fresh_tmp();
         let ambient = LuaExpr::name("_G").index(LuaExpr::string(&function.name));
         let missing = LuaExpr::string(&format!("missing Lua extern `{}`", function.name));
@@ -476,10 +906,7 @@ impl Codegen<'_> {
             .iter()
             .map(|parameter| self.local_name(&parameter.name))
             .collect::<Vec<_>>();
-        self.lua.begin_function(
-            self.layout.callable_target(definition, false),
-            params.clone(),
-        );
+        self.lua.begin_function(target, params.clone());
         let mut host_args = Vec::new();
         for (parameter, parameter_name) in function.params.iter().zip(params) {
             if self
@@ -535,10 +962,15 @@ impl Codegen<'_> {
             .clone();
         self.blank();
         self.annotation(format!("---@class {place}"));
+        let capacity = self.module_table_record_capacity(m, module);
+        if !m.is_pub && capacity == 0 {
+            return;
+        }
+        let table = self.empty_table(capacity);
         if self.hir.module(module).parent == Some(self.hir.root) {
-            self.lua.local_table(place.to_string());
+            self.local(place.to_string(), Some(table));
         } else {
-            self.lua.assign_table(place.expression());
+            self.assign(place.expression(), table);
         }
 
         // Class tables for module-local structs/enums.
@@ -547,20 +979,32 @@ impl Codegen<'_> {
                 Item::Struct(_) => {
                     let definition = self.program.item_definition(module, item_index);
                     let type_place = self.layout.definition(definition).unwrap().clone();
-                    self.lua.assign_table(type_place.expression());
-                    self.assign(
-                        type_place.field("__index").expression(),
-                        type_place.expression(),
-                    );
+                    if self.type_needs_runtime_table(definition) {
+                        let capacity = self.type_table_record_capacity(definition);
+                        let table = self.empty_table(capacity);
+                        self.assign(type_place.expression(), table);
+                        if self.metatable_types.contains(&definition) {
+                            self.assign(
+                                type_place.field("__index").expression(),
+                                type_place.expression(),
+                            );
+                        }
+                    }
                 }
                 Item::Enum(_) => {
                     let definition = self.program.item_definition(module, item_index);
                     let type_place = self.layout.definition(definition).unwrap().clone();
-                    self.lua.assign_table(type_place.expression());
-                    self.assign(
-                        type_place.field("__index").expression(),
-                        type_place.expression(),
-                    );
+                    if self.type_needs_runtime_table(definition) {
+                        let capacity = self.type_table_record_capacity(definition);
+                        let table = self.empty_table(capacity);
+                        self.assign(type_place.expression(), table);
+                        if self.metatable_types.contains(&definition) {
+                            self.assign(
+                                type_place.field("__index").expression(),
+                                type_place.expression(),
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -622,6 +1066,7 @@ impl Codegen<'_> {
     ) {
         let previous_module = self.current_module;
         self.current_module = module;
+        self.local_substitutions.push(HashMap::new());
         for entry in order {
             match *entry {
                 ChunkEntry::Statement(index) => self.gen_stmt(&chunk.stmts[index]),
@@ -640,6 +1085,7 @@ impl Codegen<'_> {
                 }
             }
         }
+        self.local_substitutions.pop();
         self.current_module = previous_module;
     }
 
@@ -757,7 +1203,7 @@ impl Codegen<'_> {
         self.current_module = previous_module;
     }
 
-    fn gen_free_fn(&mut self, f: &FnDecl, definition: crate::hir::DefId) {
+    fn gen_free_fn(&mut self, f: &FnDecl, definition: crate::hir::DefId, predeclared: bool) {
         self.lua.push_anchor(f.name_span);
         self.blank();
         self.emit_fn_annotation(f);
@@ -767,7 +1213,12 @@ impl Codegen<'_> {
             .map(|parameter| self.local_name(&parameter.name))
             .collect();
         let place = self.layout.definition(definition).unwrap().clone();
-        self.lua.begin_function(place.function_target(), params);
+        let target = if predeclared {
+            place.function_target()
+        } else {
+            FunctionTarget::local(place.to_string())
+        };
+        self.lua.begin_function(target, params);
         self.gen_block_to(&f.body, &Dest::Return);
         self.lua.end_block();
         self.lua.pop_anchor();
@@ -833,7 +1284,22 @@ impl Codegen<'_> {
 
     fn gen_stmt_inner(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, init, ty, .. } => {
+            Stmt::Let {
+                name,
+                name_span,
+                init,
+                ty,
+                ..
+            } => {
+                if self.binding_is_unused(*name_span) {
+                    if self.expression_is_removable(init) {
+                        return;
+                    }
+                    if self.unused_value_can_be_discarded(init) {
+                        self.gen_expr_to(init, &Dest::Discard);
+                        return;
+                    }
+                }
                 let local = self.local_name(name);
                 // EmmyLua type annotation for explicitly typed bindings
                 if let Some(ty_ann) = ty {
@@ -854,13 +1320,33 @@ impl Codegen<'_> {
                         );
                         self.local(&local, Some(LuaExpr::name(&result).field("value")));
                     } else {
+                        if self.is_immutable_local_path(expr) {
+                            self.lua.compact_if(
+                                v.clone().binary(LuaBinaryOp::Eq, LuaExpr::Nil),
+                                vec![InlineStatement::return_nil()],
+                            );
+                            self.bind_local_substitution(*name_span, v);
+                            return;
+                        }
                         self.local(&local, Some(v));
                         self.lua.compact_if(
                             LuaExpr::name(&local).binary(LuaBinaryOp::Eq, LuaExpr::Nil),
                             vec![InlineStatement::return_nil()],
                         );
                     }
-                } else if self.info.iter_plan(init.id).is_some() || needs_hoist(init) {
+                } else if let Some(plan) = self.info.iter_plan(init.id)
+                    && let Some(chain) = extract_iter_chain(init, plan, true)
+                {
+                    self.lua.push_anchor(init.span);
+                    self.gen_iter_loop(
+                        &chain,
+                        plan,
+                        None,
+                        &Dest::Var(LuaExpr::name(&local)),
+                        Some(&local),
+                    );
+                    self.lua.pop_anchor();
+                } else if needs_hoist(init) {
                     self.local(&local, None);
                     self.gen_expr_to(init, &Dest::Var(LuaExpr::name(local)));
                 } else {
@@ -903,20 +1389,38 @@ impl Codegen<'_> {
                 self.lua.end_block();
             }
             Stmt::For {
-                var, iter, body, ..
-            } => self.gen_for(var, iter, body),
+                var,
+                var_span,
+                iter,
+                body,
+            } => {
+                let removable_empty_range = body.stmts.is_empty()
+                    && body.tail.is_none()
+                    && matches!(
+                        &iter.kind,
+                        ExprKind::Range { start, end, .. }
+                            if self.expression_is_removable(start)
+                                && self.expression_is_removable(end)
+                    );
+                if !removable_empty_range {
+                    self.gen_for(var, *var_span, iter, body);
+                }
+            }
             Stmt::WhileLet { pat, expr, body } => {
                 self.lua.begin_while(LuaExpr::Bool(true));
-                let m = self.fresh_tmp();
                 let s = self.gen_inline(expr);
-                self.local(&m, Some(s));
+                let subject = if self.is_immutable_local_path(expr) {
+                    s
+                } else {
+                    let temporary = self.fresh_tmp();
+                    self.local(&temporary, Some(s));
+                    LuaExpr::name(temporary)
+                };
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, LuaExpr::name(&m), &mut tests, &mut binds);
+                self.pat_test(pat, subject, None, &mut tests, &mut binds);
                 self.lua.begin_if(and_all(tests));
-                for (name, subj) in &binds {
-                    self.local(self.local_name(name), Some(subj.clone()));
-                }
+                self.emit_pattern_bindings(&binds);
                 self.gen_block_to(body, &Dest::Discard);
                 self.lua.begin_else();
                 self.lua.break_statement();
@@ -931,7 +1435,13 @@ impl Codegen<'_> {
         }
     }
 
-    fn gen_for(&mut self, var: &str, iter: &Expr, body: &Block) {
+    fn gen_for(
+        &mut self,
+        var: &str,
+        var_span: crate::token::SourceRange,
+        iter: &Expr,
+        body: &Block,
+    ) {
         let variable = self.local_name(var);
         if let Some(plan) = self.info.iter_plan(iter.id)
             && (!plan.adapters.is_empty()
@@ -941,7 +1451,7 @@ impl Codegen<'_> {
                 ))
             && let Some(chain) = extract_iter_chain(iter, plan, false)
         {
-            self.gen_iter_loop(&chain, plan, Some((&variable, body)), &Dest::Discard);
+            self.gen_iter_loop(&chain, plan, Some((&variable, body)), &Dest::Discard, None);
             return;
         }
         if let ExprKind::Range {
@@ -964,7 +1474,18 @@ impl Codegen<'_> {
                 e.binary(LuaBinaryOp::Sub, LuaExpr::integer("1"))
             };
             self.lua.begin_numeric_for(&variable, s, stop);
+            let nonnegative = matches!(&start.kind, ExprKind::Int(source) if rua_int_value(source).is_some_and(|value| value >= 0));
+            if nonnegative {
+                self.nonnegative_integer_locals.push(
+                    self.hir
+                        .binding_target(var_span)
+                        .expect("resolved for binding has a local identity"),
+                );
+            }
             self.gen_block_to(body, &Dest::Discard);
+            if nonnegative {
+                self.nonnegative_integer_locals.pop();
+            }
             if Self::block_has_continue(body) {
                 self.lua.label("continue");
             }
@@ -1017,6 +1538,23 @@ impl Codegen<'_> {
         let ExprKind::Closure { params, body, .. } = &closure.kind else {
             return LuaExpr::Nil;
         };
+        if let ClosureBody::Expr(expression) = body {
+            let substitutions = params
+                .iter()
+                .zip(inputs)
+                .map(|(parameter, input)| {
+                    let local = self
+                        .hir
+                        .binding_target(parameter.name_span)
+                        .expect("resolved closure parameter has a local identity");
+                    (local, input.clone())
+                })
+                .collect();
+            self.local_substitutions.push(substitutions);
+            let result = self.gen_inline(expression);
+            self.local_substitutions.pop();
+            return result;
+        }
         let result = self.fresh_tmp();
         let done =
             matches!(body, ClosureBody::Block(_)).then(|| format!("{}_done", self.fresh_tmp()));
@@ -1042,12 +1580,34 @@ impl Codegen<'_> {
         LuaExpr::name(result)
     }
 
+    fn init_iter_result(
+        &mut self,
+        dest: &Dest,
+        local_result: Option<&str>,
+        value: LuaExpr,
+    ) -> (LuaExpr, bool) {
+        if let Some(local) = local_result {
+            self.local(local, Some(value));
+            return (LuaExpr::name(local), true);
+        }
+        if let Dest::Var(target) = dest
+            && matches!(target, LuaExpr::Name(_))
+        {
+            self.assign(target.clone(), value);
+            return (target.clone(), true);
+        }
+        let result = self.fresh_tmp();
+        self.local(&result, Some(value));
+        (LuaExpr::name(result), false)
+    }
+
     fn gen_iter_loop(
         &mut self,
         chain: &IterChain<'_>,
         plan: &IterPlan,
         for_body: Option<(&str, &Block)>,
         dest: &Dest,
+        local_result: Option<&str>,
     ) {
         let source = match plan.source.kind {
             IterSourceKind::ExclusiveRange | IterSourceKind::InclusiveRange => {
@@ -1068,8 +1628,13 @@ impl Codegen<'_> {
             }
             IterSourceKind::Vec | IterSourceKind::VecIter | IterSourceKind::VecIntoIter => {
                 let value = self.gen_inline(chain.source);
-                let holder = self.fresh_tmp();
-                self.local(&holder, Some(value));
+                let holder = if self.is_immutable_local_path(chain.source) {
+                    value
+                } else {
+                    let holder = self.fresh_tmp();
+                    self.local(&holder, Some(value));
+                    LuaExpr::name(holder)
+                };
                 IterLoopSource::Vec { holder }
             }
         };
@@ -1105,18 +1670,34 @@ impl Codegen<'_> {
             IterConsumerKind::For => None,
             IterConsumerKind::CollectVec => {
                 self.uses_rt = true;
-                let result = self.fresh_tmp();
-                self.local(
-                    &result,
-                    Some(rt_call(
-                        "vec",
-                        vec![LuaExpr::named_table(vec![(
-                            "n".into(),
-                            LuaExpr::integer("0"),
-                        )])],
-                    )),
-                );
-                Some(result)
+                let preserves_length = chain.adapters.iter().all(|adapter| {
+                    matches!(
+                        adapter.kind,
+                        IterAdapterKind::Map | IterAdapterKind::Enumerate
+                    )
+                });
+                let exact_capacity = if preserves_length {
+                    match &source {
+                        IterLoopSource::Vec { holder } => Some(holder.clone().field("n")),
+                        IterLoopSource::Range { .. } => None,
+                    }
+                } else {
+                    None
+                };
+                let preallocated = exact_capacity.is_some();
+                let storage = if let Some(capacity) = exact_capacity {
+                    // Rua Vec uses key 0 plus an `n` record field, so reserve two
+                    // non-sequence slots in addition to the exact element count.
+                    self.table_create(capacity, 2)
+                } else {
+                    LuaExpr::named_table(vec![("n".into(), LuaExpr::integer("0"))])
+                };
+                let (result, sunk) =
+                    self.init_iter_result(dest, local_result, rt_call("vec", vec![storage]));
+                if preallocated {
+                    self.assign(result.clone().field("n"), LuaExpr::integer("0"));
+                }
+                Some((result, sunk))
             }
             IterConsumerKind::Fold => {
                 let init = chain
@@ -1124,26 +1705,16 @@ impl Codegen<'_> {
                     .first()
                     .map(|arg| self.gen_inline(arg))
                     .unwrap_or(LuaExpr::Nil);
-                let result = self.fresh_tmp();
-                self.local(&result, Some(init));
-                Some(result)
+                Some(self.init_iter_result(dest, local_result, init))
             }
             IterConsumerKind::Count => {
-                let result = self.fresh_tmp();
-                self.local(&result, Some(LuaExpr::integer("0")));
-                Some(result)
+                Some(self.init_iter_result(dest, local_result, LuaExpr::integer("0")))
             }
             IterConsumerKind::Any | IterConsumerKind::All => {
-                let result = self.fresh_tmp();
                 let initial = plan.consumer == IterConsumerKind::All;
-                self.local(&result, Some(LuaExpr::Bool(initial)));
-                Some(result)
+                Some(self.init_iter_result(dest, local_result, LuaExpr::Bool(initial)))
             }
-            IterConsumerKind::Find => {
-                let result = self.fresh_tmp();
-                self.local(&result, Some(LuaExpr::Nil));
-                Some(result)
-            }
+            IterConsumerKind::Find => Some(self.init_iter_result(dest, local_result, LuaExpr::Nil)),
         };
 
         let item = self.fresh_tmp();
@@ -1168,21 +1739,17 @@ impl Codegen<'_> {
                 self.lua.begin_numeric_for(
                     &index,
                     LuaExpr::integer("0"),
-                    LuaExpr::name(holder)
+                    holder
+                        .clone()
                         .field("n")
                         .binary(LuaBinaryOp::Sub, LuaExpr::integer("1")),
                 );
-                self.local(
-                    &item,
-                    Some(LuaExpr::name(holder).index(LuaExpr::name(index))),
-                );
+                self.local(&item, Some(holder.clone().index(LuaExpr::name(index))));
             }
         }
-        let active = self.fresh_tmp();
-        self.local(&active, Some(LuaExpr::Bool(true)));
+        let mut open_guards = 0;
 
         for (adapter, state) in chain.adapters.iter().zip(&states) {
-            self.lua.begin_if(LuaExpr::name(&active));
             match adapter.kind {
                 IterAdapterKind::Map => {
                     if let Some(closure) = adapter.args.first() {
@@ -1199,13 +1766,8 @@ impl Codegen<'_> {
                             closure,
                             std::slice::from_ref(&LuaExpr::name(&item)),
                         );
-                        self.lua.compact_if(
-                            LuaExpr::unary(LuaUnaryOp::Not, keep),
-                            vec![InlineStatement::assign(
-                                LuaExpr::name(&active),
-                                LuaExpr::Bool(false),
-                            )],
-                        );
+                        self.lua.begin_if(keep);
+                        open_guards += 1;
                     }
                 }
                 IterAdapterKind::FilterMap => {
@@ -1215,11 +1777,9 @@ impl Codegen<'_> {
                             std::slice::from_ref(&LuaExpr::name(&item)),
                         );
                         self.lua
-                            .begin_if(mapped.clone().binary(LuaBinaryOp::Eq, LuaExpr::Nil));
-                        self.assign(LuaExpr::name(&active), LuaExpr::Bool(false));
-                        self.lua.begin_else();
+                            .begin_if(mapped.clone().binary(LuaBinaryOp::Ne, LuaExpr::Nil));
                         self.assign(LuaExpr::name(&item), mapped);
-                        self.lua.end_block();
+                        open_guards += 1;
                     }
                 }
                 IterAdapterKind::Enumerate => {
@@ -1228,7 +1788,7 @@ impl Codegen<'_> {
                         LuaExpr::name(&item),
                         LuaExpr::Table(vec![
                             TableField::Indexed(LuaExpr::integer("0"), LuaExpr::name(counter)),
-                            TableField::Indexed(LuaExpr::integer("1"), LuaExpr::name(&item)),
+                            TableField::Value(LuaExpr::name(&item)),
                             TableField::Named("n".into(), LuaExpr::integer("2")),
                         ]),
                     );
@@ -1247,8 +1807,8 @@ impl Codegen<'_> {
                         LuaExpr::name(counter),
                         LuaExpr::name(counter).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
                     );
-                    self.assign(LuaExpr::name(&active), LuaExpr::Bool(false));
-                    self.lua.end_block();
+                    self.lua.begin_else();
+                    open_guards += 1;
                 }
                 IterAdapterKind::Take => {
                     let counter = state.counter.as_deref().unwrap_or("0");
@@ -1263,10 +1823,8 @@ impl Codegen<'_> {
                     );
                 }
             }
-            self.lua.end_block();
         }
 
-        self.lua.begin_if(LuaExpr::name(&active));
         match plan.consumer {
             IterConsumerKind::For => {
                 if let Some((var, body)) = for_body {
@@ -1275,37 +1833,38 @@ impl Codegen<'_> {
                 }
             }
             IterConsumerKind::CollectVec => {
-                let result = result.as_deref().unwrap();
-                let length = LuaExpr::name(result).field("n");
-                self.assign(
-                    LuaExpr::name(result).index(length.clone()),
-                    LuaExpr::name(&item),
-                );
+                let result = &result.as_ref().unwrap().0;
+                let length = result.clone().field("n");
+                self.assign(result.clone().index(length.clone()), LuaExpr::name(&item));
                 self.assign(
                     length.clone(),
                     length.binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
                 );
             }
             IterConsumerKind::Fold => {
-                if let (Some(result), Some(closure)) =
-                    (result.as_deref(), chain.consumer_args.get(1))
-                {
-                    let inputs = [LuaExpr::name(result), LuaExpr::name(&item)];
+                if let (Some(result), Some(closure)) = (
+                    result.as_ref().map(|result| &result.0),
+                    chain.consumer_args.get(1),
+                ) {
+                    let inputs = [result.clone(), LuaExpr::name(&item)];
                     let next = self.gen_inlined_closure(closure, &inputs);
-                    self.assign(LuaExpr::name(result), next);
+                    self.assign(result.clone(), next);
                 }
             }
             IterConsumerKind::Count => {
-                let result = result.as_deref().unwrap();
+                let result = &result.as_ref().unwrap().0;
                 self.assign(
-                    LuaExpr::name(result),
-                    LuaExpr::name(result).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                    result.clone(),
+                    result
+                        .clone()
+                        .binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
                 );
             }
             IterConsumerKind::Any | IterConsumerKind::All | IterConsumerKind::Find => {
-                if let (Some(result), Some(predicate)) =
-                    (result.as_deref(), chain.consumer_args.first())
-                {
+                if let (Some(result), Some(predicate)) = (
+                    result.as_ref().map(|result| &result.0),
+                    chain.consumer_args.first(),
+                ) {
                     let matches = self.gen_inlined_closure(
                         predicate,
                         std::slice::from_ref(&LuaExpr::name(&item)),
@@ -1315,10 +1874,7 @@ impl Codegen<'_> {
                             self.lua.compact_if(
                                 matches,
                                 vec![
-                                    InlineStatement::assign(
-                                        LuaExpr::name(result),
-                                        LuaExpr::Bool(true),
-                                    ),
+                                    InlineStatement::assign(result.clone(), LuaExpr::Bool(true)),
                                     InlineStatement::Break,
                                 ],
                             );
@@ -1327,10 +1883,7 @@ impl Codegen<'_> {
                             self.lua.compact_if(
                                 LuaExpr::unary(LuaUnaryOp::Not, matches),
                                 vec![
-                                    InlineStatement::assign(
-                                        LuaExpr::name(result),
-                                        LuaExpr::Bool(false),
-                                    ),
+                                    InlineStatement::assign(result.clone(), LuaExpr::Bool(false)),
                                     InlineStatement::Break,
                                 ],
                             );
@@ -1339,10 +1892,7 @@ impl Codegen<'_> {
                             self.lua.compact_if(
                                 matches,
                                 vec![
-                                    InlineStatement::assign(
-                                        LuaExpr::name(result),
-                                        LuaExpr::name(&item),
-                                    ),
+                                    InlineStatement::assign(result.clone(), LuaExpr::name(&item)),
                                     InlineStatement::Break,
                                 ],
                             );
@@ -1352,7 +1902,9 @@ impl Codegen<'_> {
                 }
             }
         }
-        self.lua.end_block();
+        for _ in 0..open_guards {
+            self.lua.end_block();
+        }
 
         if plan.consumer == IterConsumerKind::For
             && let Some((_, body)) = for_body
@@ -1372,11 +1924,12 @@ impl Codegen<'_> {
         }
         self.lua.end_block();
 
-        if let Some(result) = result {
+        if let Some((result, sunk)) = result {
             match dest {
-                Dest::Var(target) => self.assign(target.clone(), LuaExpr::name(result)),
-                Dest::Return => self.return_value(LuaExpr::name(result)),
+                Dest::Var(target) if !sunk => self.assign(target.clone(), result),
+                Dest::Return => self.return_value(result),
                 Dest::Discard => {}
+                Dest::Var(_) => {}
             }
         }
     }
@@ -1384,6 +1937,7 @@ impl Codegen<'_> {
     // --- expression to destination ----------------------------------------
 
     fn gen_block_to(&mut self, block: &Block, dest: &Dest) {
+        self.local_substitutions.push(HashMap::new());
         for s in &block.stmts {
             self.gen_stmt(s);
         }
@@ -1395,6 +1949,7 @@ impl Codegen<'_> {
                 }
             }
         }
+        self.local_substitutions.pop();
     }
 
     fn gen_expr_to(&mut self, expression: &Expr, dest: &Dest) {
@@ -1407,7 +1962,7 @@ impl Codegen<'_> {
         if let Some(plan) = self.info.iter_plan(e.id)
             && let Some(chain) = extract_iter_chain(e, plan, true)
         {
-            self.gen_iter_loop(&chain, plan, None, dest);
+            self.gen_iter_loop(&chain, plan, None, dest, None);
             return;
         }
         match &e.kind {
@@ -1443,16 +1998,19 @@ impl Codegen<'_> {
                 then_block,
                 else_block,
             } => {
-                let m = self.fresh_tmp();
                 let s = self.gen_inline(expr);
-                self.local(&m, Some(s));
+                let subject = if self.is_immutable_local_path(expr) {
+                    s
+                } else {
+                    let temporary = self.fresh_tmp();
+                    self.local(&temporary, Some(s));
+                    LuaExpr::name(temporary)
+                };
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, LuaExpr::name(&m), &mut tests, &mut binds);
+                self.pat_test(pat, subject, None, &mut tests, &mut binds);
                 self.lua.begin_if(and_all(tests));
-                for (name, subj) in &binds {
-                    self.local(self.local_name(name), Some(subj.clone()));
-                }
+                self.emit_pattern_bindings(&binds);
                 self.gen_block_to(then_block, dest);
                 match else_block.as_deref() {
                     Some(ElseBranch::Block(b)) => {
@@ -1506,6 +2064,11 @@ impl Codegen<'_> {
     // --- match -------------------------------------------------------------
 
     fn gen_match(&mut self, scrut: &Expr, arms: &[MatchArm], dest: &Dest) {
+        if matches!(dest, Dest::Return) && arms.iter().all(|arm| arm.guard.is_none()) {
+            self.gen_return_match(scrut, arms);
+            return;
+        }
+
         let m = self.fresh_tmp();
         let s = self.gen_inline(scrut);
         self.local(&m, Some(s));
@@ -1513,7 +2076,7 @@ impl Codegen<'_> {
         self.local(&matched, Some(LuaExpr::Bool(false)));
 
         for arm in arms {
-            let (tests, binds) = self.arm_tests(arm, LuaExpr::name(&m));
+            let (tests, binds) = self.arm_tests(arm, LuaExpr::name(&m), None);
             let unmatched = LuaExpr::unary(LuaUnaryOp::Not, LuaExpr::name(&matched));
             let condition = if tests.is_empty() {
                 unmatched
@@ -1522,9 +2085,7 @@ impl Codegen<'_> {
             };
             self.lua.begin_if(condition);
 
-            for (name, subj) in &binds {
-                self.local(self.local_name(name), Some(subj.clone()));
-            }
+            self.emit_pattern_bindings(&binds);
             let guard = arm.guard.as_ref().map(|g| self.gen_inline(g));
             if let Some(g) = &guard {
                 self.lua.begin_if(g.clone());
@@ -1547,16 +2108,159 @@ impl Codegen<'_> {
         );
     }
 
+    fn root_pattern_target(&self, pattern: &Pattern) -> Option<crate::hir::ResolvedTarget> {
+        match pattern {
+            Pattern::Path { id, .. }
+            | Pattern::TupleVariant { id, .. }
+            | Pattern::StructVariant { id, .. } => Some(self.pattern_target(*id)),
+            _ => None,
+        }
+    }
+
+    fn match_uses_root_tag(&self, arms: &[MatchArm]) -> bool {
+        arms.iter().flat_map(|arm| &arm.pats).any(|pattern| {
+            matches!(
+                self.root_pattern_target(pattern),
+                Some(crate::hir::ResolvedTarget::Builtin(
+                    rua_core::BuiltinId::VariantResultOk | rua_core::BuiltinId::VariantResultErr
+                ))
+            ) || self
+                .root_pattern_target(pattern)
+                .is_some_and(|target| self.resolve_variant(Some(target)).is_some())
+        })
+    }
+
+    fn match_is_exhaustive(&self, arms: &[MatchArm]) -> bool {
+        let mut builtins = HashSet::new();
+        let mut enum_owner = None;
+        let mut enum_variants = HashSet::new();
+        let mut booleans = HashSet::new();
+
+        for pattern in arms.iter().flat_map(|arm| &arm.pats) {
+            match pattern {
+                Pattern::Wildcard | Pattern::Binding(_, _) => return true,
+                Pattern::Literal(expression) => {
+                    if let ExprKind::Bool(value) = expression.kind {
+                        booleans.insert(value);
+                    }
+                }
+                _ => match self.root_pattern_target(pattern) {
+                    Some(crate::hir::ResolvedTarget::Builtin(builtin)) => {
+                        builtins.insert(builtin);
+                    }
+                    Some(target) => {
+                        if let Some((owner, variant, _)) = self.resolve_variant(Some(target)) {
+                            if enum_owner.is_some_and(|existing| existing != owner) {
+                                return false;
+                            }
+                            enum_owner = Some(owner);
+                            enum_variants.insert(variant);
+                        }
+                    }
+                    None => {}
+                },
+            }
+        }
+
+        let option = builtins.contains(&rua_core::BuiltinId::VariantOptionSome)
+            && builtins.contains(&rua_core::BuiltinId::VariantOptionNone);
+        let result = builtins.contains(&rua_core::BuiltinId::VariantResultOk)
+            && builtins.contains(&rua_core::BuiltinId::VariantResultErr);
+        if option || result || booleans.len() == 2 {
+            return true;
+        }
+        let Some(owner) = enum_owner else {
+            return false;
+        };
+        builtins.is_empty()
+            && booleans.is_empty()
+            && enum_variants.len()
+                == self
+                    .hir
+                    .enum_variants
+                    .keys()
+                    .filter(|(variant_owner, _)| *variant_owner == owner)
+                    .count()
+    }
+
+    fn gen_return_match(&mut self, scrut: &Expr, arms: &[MatchArm]) {
+        let value = self.gen_inline(scrut);
+        let subject = if matches!(&scrut.kind, ExprKind::Path(_)) {
+            value
+        } else {
+            let temporary = self.fresh_tmp();
+            self.local(&temporary, Some(value));
+            LuaExpr::name(temporary)
+        };
+
+        let proven_exhaustive = self.match_is_exhaustive(arms);
+        let conditional_arms = arms.len().saturating_sub(usize::from(proven_exhaustive));
+        let cached_tag = (conditional_arms >= 2 && self.match_uses_root_tag(arms)).then(|| {
+            let temporary = self.fresh_tmp();
+            self.local(&temporary, Some(subject.clone().field("tag")));
+            LuaExpr::name(temporary)
+        });
+
+        let mut open = false;
+        let mut exhaustive = false;
+        for (index, arm) in arms.iter().enumerate() {
+            let (tests, binds) = self.arm_tests(arm, subject.clone(), cached_tag.as_ref());
+            let final_exhaustive_arm = proven_exhaustive && index + 1 == arms.len();
+            if tests.is_empty() || final_exhaustive_arm {
+                if open {
+                    self.lua.begin_else();
+                }
+                self.emit_pattern_bindings(&binds);
+                self.gen_expr_to(&arm.body, &Dest::Return);
+                exhaustive = true;
+                break;
+            }
+
+            let condition = and_all(tests);
+            if open {
+                self.lua.begin_else_if(condition);
+            } else {
+                self.lua.begin_if(condition);
+                open = true;
+            }
+            self.emit_pattern_bindings(&binds);
+            self.gen_expr_to(&arm.body, &Dest::Return);
+        }
+
+        if !open {
+            if !exhaustive {
+                self.expression_statement(
+                    LuaExpr::name("error").call(vec![LuaExpr::string("non-exhaustive match")]),
+                );
+            }
+            return;
+        }
+        if !exhaustive {
+            self.lua.begin_else();
+            self.expression_statement(
+                LuaExpr::name("error").call(vec![LuaExpr::string("non-exhaustive match")]),
+            );
+        }
+        self.lua.end_block();
+    }
+
     /// Structural tests + bindings for a match arm against subject variable `m`.
     fn arm_tests(
         &mut self,
         arm: &MatchArm,
         subject: LuaExpr,
-    ) -> (Vec<LuaExpr>, Vec<(String, LuaExpr)>) {
+        cached_tag: Option<&LuaExpr>,
+    ) -> (Vec<LuaExpr>, Vec<PatternBinding>) {
         if arm.pats.len() == 1 {
             let mut tests = Vec::new();
             let mut binds = Vec::new();
-            self.pat_test(&arm.pats[0], subject, &mut tests, &mut binds);
+            self.pat_test(&arm.pats[0], subject, cached_tag, &mut tests, &mut binds);
+            binds.retain(|(name, _, _)| {
+                arm.guard
+                    .as_ref()
+                    .is_some_and(|guard| expression_mentions_binding(guard, name))
+                    || expression_mentions_binding(&arm.body, name)
+            });
             (tests, binds)
         } else {
             // or-patterns: combine alternatives; bindings are not supported here.
@@ -1564,7 +2268,7 @@ impl Codegen<'_> {
             for p in &arm.pats {
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(p, subject.clone(), &mut tests, &mut binds);
+                self.pat_test(p, subject.clone(), cached_tag, &mut tests, &mut binds);
                 alts.push(and_all(tests).parenthesized());
             }
             (vec![or_all(alts)], Vec::new())
@@ -1575,12 +2279,13 @@ impl Codegen<'_> {
         &mut self,
         pat: &Pattern,
         subject: LuaExpr,
+        cached_tag: Option<&LuaExpr>,
         tests: &mut Vec<LuaExpr>,
-        binds: &mut Vec<(String, LuaExpr)>,
+        binds: &mut Vec<PatternBinding>,
     ) {
         match pat {
             Pattern::Wildcard => {}
-            Pattern::Binding(name, _) => binds.push((name.clone(), subject)),
+            Pattern::Binding(name, source) => binds.push((name.clone(), *source, subject)),
             Pattern::Literal(lit) => {
                 let v = self.gen_inline(lit);
                 tests.push(subject.binary(LuaBinaryOp::Eq, v));
@@ -1612,15 +2317,17 @@ impl Codegen<'_> {
                     }
                     crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
                         tests.push(
-                            subject
-                                .field("tag")
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.field("tag"))
                                 .binary(LuaBinaryOp::Eq, LuaExpr::string("ok")),
                         )
                     }
                     crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
                         tests.push(
-                            subject
-                                .field("tag")
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.field("tag"))
                                 .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
                         )
                     }
@@ -1628,10 +2335,15 @@ impl Codegen<'_> {
                         let (_, variant, _) = self
                             .resolve_variant(Some(target))
                             .expect("checked path pattern resolves to an enum variant");
-                        tests.push(subject.field("tag").binary(
-                            LuaBinaryOp::Eq,
-                            LuaExpr::string(&self.hir.definition(variant).name),
-                        ));
+                        tests.push(
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.field("tag"))
+                                .binary(
+                                    LuaBinaryOp::Eq,
+                                    LuaExpr::string(&self.hir.definition(variant).name),
+                                ),
+                        );
                     }
                 }
             }
@@ -1642,29 +2354,29 @@ impl Codegen<'_> {
                         // Some(x) is the bare value; None is nil.
                         tests.push(subject.clone().binary(LuaBinaryOp::Ne, LuaExpr::Nil));
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject, tests, binds);
+                            self.pat_test(inner, subject, None, tests, binds);
                         }
                     }
                     crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
                         tests.push(
-                            subject
-                                .clone()
-                                .field("tag")
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.clone().field("tag"))
                                 .binary(LuaBinaryOp::Eq, LuaExpr::string("ok")),
                         );
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject.field("value"), tests, binds);
+                            self.pat_test(inner, subject.field("value"), None, tests, binds);
                         }
                     }
                     crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
                         tests.push(
-                            subject
-                                .clone()
-                                .field("tag")
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.clone().field("tag"))
                                 .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
                         );
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject.field("value"), tests, binds);
+                            self.pat_test(inner, subject.field("value"), None, tests, binds);
                         }
                     }
                     _ => {
@@ -1674,13 +2386,18 @@ impl Codegen<'_> {
                         else {
                             unreachable!("checked tuple pattern has tuple variant shape")
                         };
-                        tests.push(subject.clone().field("tag").binary(
-                            LuaBinaryOp::Eq,
-                            LuaExpr::string(&self.hir.definition(variant).name),
-                        ));
+                        tests.push(
+                            cached_tag
+                                .cloned()
+                                .unwrap_or_else(|| subject.clone().field("tag"))
+                                .binary(
+                                    LuaBinaryOp::Eq,
+                                    LuaExpr::string(&self.hir.definition(variant).name),
+                                ),
+                        );
                         for (i, elem) in elems.iter().enumerate() {
                             let sub = subject.clone().index(LuaExpr::integer((i + 1).to_string()));
-                            self.pat_test(elem, sub, tests, binds);
+                            self.pat_test(elem, sub, None, tests, binds);
                         }
                     }
                 }
@@ -1696,14 +2413,19 @@ impl Codegen<'_> {
                 if let Some((_, variant, _)) =
                     self.resolve_variant(Some(self.program.pattern_target(*id)))
                 {
-                    tests.push(subject.clone().field("tag").binary(
-                        LuaBinaryOp::Eq,
-                        LuaExpr::string(&self.hir.definition(variant).name),
-                    ));
+                    tests.push(
+                        cached_tag
+                            .cloned()
+                            .unwrap_or_else(|| subject.clone().field("tag"))
+                            .binary(
+                                LuaBinaryOp::Eq,
+                                LuaExpr::string(&self.hir.definition(variant).name),
+                            ),
+                    );
                 }
                 for (fname, fpat) in fields {
                     let sub = subject.clone().field(self.layout.member_name(fname));
-                    self.pat_test(fpat, sub, tests, binds);
+                    self.pat_test(fpat, sub, None, tests, binds);
                 }
             }
         }
@@ -1724,7 +2446,7 @@ impl Codegen<'_> {
         {
             let tmp = self.fresh_tmp();
             self.local(&tmp, None);
-            self.gen_iter_loop(&chain, plan, None, &Dest::Var(LuaExpr::name(&tmp)));
+            self.gen_iter_loop(&chain, plan, None, &Dest::Var(LuaExpr::name(&tmp)), None);
             return LuaExpr::name(tmp);
         }
         match &e.kind {
@@ -1742,6 +2464,21 @@ impl Codegen<'_> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                if let (ExprKind::Int(left), ExprKind::Int(right)) = (&lhs.kind, &rhs.kind)
+                    && let (Some(left), Some(right)) = (rua_int_value(left), rua_int_value(right))
+                    && right != 0
+                {
+                    let folded = if *op == BinOp::Div && self.info.is_int_div(e.id) {
+                        left.checked_div(right)
+                    } else if *op == BinOp::Rem && self.info.is_int_rem(e.id) {
+                        left.checked_rem(right)
+                    } else {
+                        None
+                    };
+                    if let Some(value) = folded {
+                        return LuaExpr::integer(value.to_string());
+                    }
+                }
                 let l = self.gen_inline(lhs);
                 let r = self.gen_inline(rhs);
                 // `i64 / i64` and `i64 % i64` lower to `rt.idiv`/`rt.irem`, which
@@ -1753,6 +2490,14 @@ impl Codegen<'_> {
                     return rt_call("idiv", vec![l, r]);
                 }
                 if *op == BinOp::Rem && self.info.is_int_rem(e.id) {
+                    let positive_divisor = matches!(
+                        &rhs.kind,
+                        ExprKind::Int(source)
+                            if rua_int_value(source).is_some_and(|value| value > 0)
+                    );
+                    if positive_divisor && self.expression_is_known_nonnegative(lhs) {
+                        return l.binary(LuaBinaryOp::Rem, r);
+                    }
                     self.uses_rt = true;
                     return rt_call("irem", vec![l, r]);
                 }
@@ -1767,11 +2512,17 @@ impl Codegen<'_> {
                 recv, method, args, ..
             } => {
                 let r = self.gen_inline(recv);
-                let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
                 // Recognized `String` methods route through `rt.str` (bracket
                 // form avoids clashing with Lua keywords like `repeat`); the
                 // receiver is passed as the first argument.
                 if self.info.is_str_method(e.id) {
+                    if args.is_empty() && method == "len" {
+                        return LuaExpr::unary(LuaUnaryOp::Len, r);
+                    }
+                    if args.is_empty() && method == "is_empty" {
+                        return LuaExpr::unary(LuaUnaryOp::Len, r)
+                            .binary(LuaBinaryOp::Eq, LuaExpr::integer("0"));
+                    }
                     // Optimise: .to_string() / .to_owned() / .clone() on a
                     // string literal is a no-op — just return the literal.
                     let is_string_lit = matches!(&recv.kind, ExprKind::Str(..));
@@ -1782,7 +2533,7 @@ impl Codegen<'_> {
                     }
                     self.uses_rt = true;
                     let mut all = vec![r];
-                    all.extend(a);
+                    all.extend(args.iter().map(|argument| self.gen_inline(argument)));
                     return LuaExpr::name("rt")
                         .field("str")
                         .index(LuaExpr::string(method))
@@ -1804,6 +2555,37 @@ impl Codegen<'_> {
                     }
                     self.lua.end_block();
                     return LuaExpr::name(val);
+                }
+                let mut a = args
+                    .iter()
+                    .map(|argument| self.gen_inline(argument))
+                    .collect::<Vec<_>>();
+                if let Some(dispatch) = self.info.user_method(e.id) {
+                    use crate::typeck::UserMethodDispatch;
+                    return match dispatch {
+                        UserMethodDispatch::Static(definition) => {
+                            let callable = self
+                                .target_place(crate::hir::ResolvedTarget::Item(definition))
+                                .expect("resolved user method has a backend place")
+                                .expression();
+                            a.insert(0, r);
+                            callable.call(a)
+                        }
+                        UserMethodDispatch::Dynamic => {
+                            let receiver = if self.is_immutable_local_path(recv) {
+                                r
+                            } else {
+                                let receiver = self.fresh_tmp();
+                                self.local(&receiver, Some(r));
+                                LuaExpr::name(receiver)
+                            };
+                            let callable = LuaExpr::name("getmetatable")
+                                .call(vec![receiver.clone()])
+                                .field(self.layout.member_name(method));
+                            a.insert(0, receiver);
+                            callable.call(a)
+                        }
+                    };
                 }
                 r.method_call(self.layout.member_name(method), a)
             }
@@ -1859,6 +2641,15 @@ impl Codegen<'_> {
 
     fn gen_path(&mut self, expression: &Expr) -> LuaExpr {
         let target = self.program.expression_target(expression.id);
+        if let crate::hir::ResolvedTarget::Local(local) = target
+            && let Some(replacement) = self
+                .local_substitutions
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&local))
+        {
+            return replacement.clone();
+        }
         if let crate::hir::ResolvedTarget::Builtin(builtin) = target
             && matches!(
                 self.builtin_rules.get(builtin),
@@ -1870,16 +2661,11 @@ impl Codegen<'_> {
         if let Some((owner, variant, shape)) = self.resolve_variant(Some(target))
             && let crate::hir::VariantShape::Unit = shape
         {
-            let meta = self
-                .target_place(crate::hir::ResolvedTarget::Item(owner))
-                .expect("enum owner has a backend place");
-            return setmetatable(
-                LuaExpr::named_table(vec![(
-                    "tag".into(),
-                    LuaExpr::string(&self.hir.definition(variant).name),
-                )]),
-                meta.expression(),
-            );
+            let value = LuaExpr::named_table(vec![(
+                "tag".into(),
+                LuaExpr::string(&self.hir.definition(variant).name),
+            )]);
+            return self.attach_metatable(owner, value);
         }
         if let Some(place) = self.target_place(target) {
             return place.expression();
@@ -1892,6 +2678,16 @@ impl Codegen<'_> {
         target: crate::hir::ResolvedTarget,
     ) -> Option<crate::backend_layout::Place> {
         self.layout.target(target).cloned()
+    }
+
+    fn attach_metatable(&self, owner: crate::hir::DefId, value: LuaExpr) -> LuaExpr {
+        if !self.metatable_types.contains(&owner) {
+            return value;
+        }
+        let metatable = self
+            .target_place(crate::hir::ResolvedTarget::Item(owner))
+            .expect("type with impl has a backend place");
+        setmetatable(value, metatable.expression())
     }
 
     fn resolve_variant(
@@ -1956,15 +2752,12 @@ impl Codegen<'_> {
                 self.resolve_variant(target)
             {
                 let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
-                let meta = self
-                    .target_place(crate::hir::ResolvedTarget::Item(owner))
-                    .expect("enum owner has a backend place");
                 let mut fields = vec![TableField::Named(
                     "tag".into(),
                     LuaExpr::string(&self.hir.definition(variant).name),
                 )];
                 fields.extend(a.into_iter().map(TableField::Value));
-                return setmetatable(LuaExpr::Table(fields), meta.expression());
+                return self.attach_metatable(owner, LuaExpr::Table(fields));
             }
             // Associated function `Type::func(..)` or plain call.
             let a = args.iter().map(|x| self.gen_inline(x)).collect();
@@ -1992,16 +2785,19 @@ impl Codegen<'_> {
             BuiltinMacroLowering::Vec => {
                 self.uses_rt = true;
                 // 0-based storage + length field, matching Rust indexing.
-                let mut fields: Vec<TableField> = a
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| {
-                        TableField::Indexed(LuaExpr::integer(index.to_string()), value)
-                    })
-                    .collect();
+                // Keep only index 0 explicit. Remaining list fields compile to a
+                // Lua `NEWTABLE` with an array-capacity hint and still land at
+                // indices 1..n-1.
+                let length = a.len();
+                let mut values = a.into_iter();
+                let mut fields = Vec::with_capacity(length + 1);
+                if let Some(first) = values.next() {
+                    fields.push(TableField::Indexed(LuaExpr::integer("0"), first));
+                    fields.extend(values.map(TableField::Value));
+                }
                 fields.push(TableField::Named(
                     "n".into(),
-                    LuaExpr::integer(fields.len().to_string()),
+                    LuaExpr::integer(length.to_string()),
                 ));
                 rt_call("vec", vec![LuaExpr::Table(fields)])
             }
@@ -2036,30 +2832,20 @@ impl Codegen<'_> {
         if let Some((owner, variant, crate::hir::VariantShape::Struct)) =
             self.resolve_variant(target)
         {
-            let meta = self
-                .target_place(crate::hir::ResolvedTarget::Item(owner))
-                .expect("enum owner has a backend place");
             let mut values = vec![(
                 "tag".into(),
                 LuaExpr::string(&self.hir.definition(variant).name),
             )];
             values.extend(field_values);
-            return setmetatable(LuaExpr::named_table(values), meta.expression());
+            return self.attach_metatable(owner, LuaExpr::named_table(values));
         }
 
-        let is_struct = matches!(
-            target,
-            Some(crate::hir::ResolvedTarget::Item(definition))
-                if self.hir.definition(definition).kind == crate::hir::DefKind::Struct
-        );
-        if is_struct {
-            let meta = self
-                .target_place(self.program.expression_target(expression.id))
-                .expect("checked struct literal target has a backend place");
-            setmetatable(LuaExpr::named_table(field_values), meta.expression())
-        } else {
-            LuaExpr::named_table(field_values)
+        if let Some(crate::hir::ResolvedTarget::Item(definition)) = target
+            && self.hir.definition(definition).kind == crate::hir::DefKind::Struct
+        {
+            return self.attach_metatable(definition, LuaExpr::named_table(field_values));
         }
+        LuaExpr::named_table(field_values)
     }
 }
 
@@ -2125,6 +2911,493 @@ fn collect_traits<'p>(
             }
             _ => {}
         }
+    }
+}
+
+fn collect_metatable_types(
+    items: &[Item],
+    module: crate::hir::ModuleId,
+    program: &crate::typed_ir::TypedProgram,
+    out: &mut HashSet<crate::hir::DefId>,
+) {
+    for (item_index, item) in items.iter().enumerate() {
+        match item {
+            Item::Impl(_) => {
+                let implementation = program.implementation(module, item_index);
+                if implementation.trait_target.is_some()
+                    || program.hir().definition(implementation.owner).is_public
+                {
+                    out.insert(implementation.owner);
+                }
+            }
+            Item::Mod(child) if !child.is_decl => {
+                collect_metatable_types(
+                    &child.items,
+                    program.child_module(module, item_index),
+                    program,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn block_mentions_binding(block: &Block, name: &str) -> bool {
+    block
+        .stmts
+        .iter()
+        .any(|statement| statement_mentions_binding(statement, name))
+        || block
+            .tail
+            .as_deref()
+            .is_some_and(|tail| expression_mentions_binding(tail, name))
+}
+
+fn statement_mentions_binding(statement: &Stmt, name: &str) -> bool {
+    match statement {
+        Stmt::Let { init, .. } | Stmt::Expr(init) => expression_mentions_binding(init, name),
+        Stmt::Return(value) => value
+            .as_ref()
+            .is_some_and(|value| expression_mentions_binding(value, name)),
+        Stmt::While { cond, body } => {
+            expression_mentions_binding(cond, name) || block_mentions_binding(body, name)
+        }
+        Stmt::Loop { body } => block_mentions_binding(body, name),
+        Stmt::For { iter, body, .. } => {
+            expression_mentions_binding(iter, name) || block_mentions_binding(body, name)
+        }
+        Stmt::WhileLet {
+            pat, expr, body, ..
+        } => {
+            pattern_mentions_binding(pat, name)
+                || expression_mentions_binding(expr, name)
+                || block_mentions_binding(body, name)
+        }
+        Stmt::Break | Stmt::Continue => false,
+    }
+}
+
+fn expression_mentions_binding(expression: &Expr, name: &str) -> bool {
+    match &expression.kind {
+        ExprKind::Path(path) => path.len() == 1 && path[0] == name,
+        ExprKind::Closure { body, .. } => match body {
+            ClosureBody::Expr(expression) => expression_mentions_binding(expression, name),
+            ClosureBody::Block(block) => block_mentions_binding(block, name),
+        },
+        ExprKind::Unary { expr, .. } | ExprKind::Try { expr } => {
+            expression_mentions_binding(expr, name)
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            expression_mentions_binding(lhs, name) || expression_mentions_binding(rhs, name)
+        }
+        ExprKind::Call { callee, args } => {
+            expression_mentions_binding(callee, name)
+                || args
+                    .iter()
+                    .any(|argument| expression_mentions_binding(argument, name))
+        }
+        ExprKind::MethodCall { recv, args, .. } => {
+            expression_mentions_binding(recv, name)
+                || args
+                    .iter()
+                    .any(|argument| expression_mentions_binding(argument, name))
+        }
+        ExprKind::Field { base, .. } => expression_mentions_binding(base, name),
+        ExprKind::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expression_mentions_binding(value, name)),
+        ExprKind::Match { scrut, arms } => {
+            expression_mentions_binding(scrut, name)
+                || arms.iter().any(|arm| {
+                    arm.pats
+                        .iter()
+                        .any(|pattern| pattern_mentions_binding(pattern, name))
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| expression_mentions_binding(guard, name))
+                        || expression_mentions_binding(&arm.body, name)
+                })
+        }
+        ExprKind::Range { start, end, .. } => {
+            expression_mentions_binding(start, name) || expression_mentions_binding(end, name)
+        }
+        ExprKind::Index { base, index } => {
+            expression_mentions_binding(base, name) || expression_mentions_binding(index, name)
+        }
+        ExprKind::MacroCall { args, .. } => args
+            .iter()
+            .any(|argument| expression_mentions_binding(argument, name)),
+        ExprKind::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            expression_mentions_binding(cond, name)
+                || block_mentions_binding(then_block, name)
+                || else_block
+                    .as_deref()
+                    .is_some_and(|branch| else_mentions_binding(branch, name))
+        }
+        ExprKind::IfLet {
+            pat,
+            expr,
+            then_block,
+            else_block,
+        } => {
+            pattern_mentions_binding(pat, name)
+                || expression_mentions_binding(expr, name)
+                || block_mentions_binding(then_block, name)
+                || else_block
+                    .as_deref()
+                    .is_some_and(|branch| else_mentions_binding(branch, name))
+        }
+        ExprKind::Block(block) => block_mentions_binding(block, name),
+        ExprKind::Assign { target, value } => {
+            expression_mentions_binding(target, name) || expression_mentions_binding(value, name)
+        }
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => false,
+    }
+}
+
+fn else_mentions_binding(branch: &ElseBranch, name: &str) -> bool {
+    match branch {
+        ElseBranch::Block(block) => block_mentions_binding(block, name),
+        ElseBranch::If(expression) => expression_mentions_binding(expression, name),
+    }
+}
+
+fn pattern_mentions_binding(pattern: &Pattern, name: &str) -> bool {
+    match pattern {
+        Pattern::Literal(expression) => expression_mentions_binding(expression, name),
+        Pattern::Range { lo, hi, .. } => {
+            expression_mentions_binding(lo, name) || expression_mentions_binding(hi, name)
+        }
+        Pattern::TupleVariant { elems, .. } => elems
+            .iter()
+            .any(|pattern| pattern_mentions_binding(pattern, name)),
+        Pattern::StructVariant { fields, .. } => fields
+            .iter()
+            .any(|(_, pattern)| pattern_mentions_binding(pattern, name)),
+        Pattern::Wildcard | Pattern::Binding(..) | Pattern::Path { .. } => false,
+    }
+}
+
+/// Return root function item indices in dependency-first strongly connected
+/// groups. A group with more than one member is the only case that needs Lua
+/// forward declarations; `local function` handles direct recursion itself.
+fn root_function_schedule(program: &crate::typed_ir::TypedProgram) -> Vec<Vec<usize>> {
+    let syntax = program.syntax();
+    let hir = program.hir();
+    let functions = syntax
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(item_index, item)| match item {
+            Item::Fn(function) => Some((
+                item_index,
+                program.item_definition(hir.root, item_index),
+                function,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let function_by_definition = functions
+        .iter()
+        .enumerate()
+        .map(|(function_index, (_, definition, _))| (*definition, function_index))
+        .collect::<HashMap<_, _>>();
+
+    let graph = functions
+        .iter()
+        .map(|(_, _, function)| {
+            let mut dependencies = HashSet::new();
+            collect_block_function_dependencies(
+                &function.body,
+                hir,
+                &function_by_definition,
+                &mut dependencies,
+            );
+            let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies
+        })
+        .collect::<Vec<_>>();
+
+    FunctionComponents::new(&graph)
+        .run()
+        .into_iter()
+        .map(|component| {
+            component
+                .into_iter()
+                .map(|function_index| functions[function_index].0)
+                .collect()
+        })
+        .collect()
+}
+
+fn collect_block_function_dependencies(
+    block: &Block,
+    hir: &crate::hir::ResolvedHir,
+    functions: &HashMap<crate::hir::DefId, usize>,
+    dependencies: &mut HashSet<usize>,
+) {
+    for statement in &block.stmts {
+        match statement {
+            Stmt::Let { init, .. } | Stmt::Expr(init) => {
+                collect_expr_function_dependencies(init, hir, functions, dependencies);
+            }
+            Stmt::Return(Some(value)) => {
+                collect_expr_function_dependencies(value, hir, functions, dependencies);
+            }
+            Stmt::While { cond, body } => {
+                collect_expr_function_dependencies(cond, hir, functions, dependencies);
+                collect_block_function_dependencies(body, hir, functions, dependencies);
+            }
+            Stmt::Loop { body } => {
+                collect_block_function_dependencies(body, hir, functions, dependencies);
+            }
+            Stmt::For { iter, body, .. } => {
+                collect_expr_function_dependencies(iter, hir, functions, dependencies);
+                collect_block_function_dependencies(body, hir, functions, dependencies);
+            }
+            Stmt::WhileLet {
+                pat, expr, body, ..
+            } => {
+                collect_pattern_function_dependencies(pat, hir, functions, dependencies);
+                collect_expr_function_dependencies(expr, hir, functions, dependencies);
+                collect_block_function_dependencies(body, hir, functions, dependencies);
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_expr_function_dependencies(tail, hir, functions, dependencies);
+    }
+}
+
+fn collect_expr_function_dependencies(
+    expression: &Expr,
+    hir: &crate::hir::ResolvedHir,
+    functions: &HashMap<crate::hir::DefId, usize>,
+    dependencies: &mut HashSet<usize>,
+) {
+    if let Some(crate::hir::ResolvedTarget::Item(definition)) =
+        hir.expression_targets.get(&expression.id)
+        && let Some(function) = functions.get(definition)
+    {
+        dependencies.insert(*function);
+    }
+
+    match &expression.kind {
+        ExprKind::Closure { body, .. } => match body {
+            ClosureBody::Expr(expression) => {
+                collect_expr_function_dependencies(expression, hir, functions, dependencies);
+            }
+            ClosureBody::Block(block) => {
+                collect_block_function_dependencies(block, hir, functions, dependencies);
+            }
+        },
+        ExprKind::Unary { expr, .. } | ExprKind::Try { expr } => {
+            collect_expr_function_dependencies(expr, hir, functions, dependencies);
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            collect_expr_function_dependencies(lhs, hir, functions, dependencies);
+            collect_expr_function_dependencies(rhs, hir, functions, dependencies);
+        }
+        ExprKind::Call { callee, args } => {
+            collect_expr_function_dependencies(callee, hir, functions, dependencies);
+            for argument in args {
+                collect_expr_function_dependencies(argument, hir, functions, dependencies);
+            }
+        }
+        ExprKind::MethodCall { recv, args, .. } => {
+            collect_expr_function_dependencies(recv, hir, functions, dependencies);
+            for argument in args {
+                collect_expr_function_dependencies(argument, hir, functions, dependencies);
+            }
+        }
+        ExprKind::Field { base, .. } => {
+            collect_expr_function_dependencies(base, hir, functions, dependencies);
+        }
+        ExprKind::StructLit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_function_dependencies(value, hir, functions, dependencies);
+            }
+        }
+        ExprKind::Match { scrut, arms } => {
+            collect_expr_function_dependencies(scrut, hir, functions, dependencies);
+            for arm in arms {
+                for pattern in &arm.pats {
+                    collect_pattern_function_dependencies(pattern, hir, functions, dependencies);
+                }
+                if let Some(guard) = &arm.guard {
+                    collect_expr_function_dependencies(guard, hir, functions, dependencies);
+                }
+                collect_expr_function_dependencies(&arm.body, hir, functions, dependencies);
+            }
+        }
+        ExprKind::Range { start, end, .. } => {
+            collect_expr_function_dependencies(start, hir, functions, dependencies);
+            collect_expr_function_dependencies(end, hir, functions, dependencies);
+        }
+        ExprKind::Index { base, index } => {
+            collect_expr_function_dependencies(base, hir, functions, dependencies);
+            collect_expr_function_dependencies(index, hir, functions, dependencies);
+        }
+        ExprKind::MacroCall { args, .. } => {
+            for argument in args {
+                collect_expr_function_dependencies(argument, hir, functions, dependencies);
+            }
+        }
+        ExprKind::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_function_dependencies(cond, hir, functions, dependencies);
+            collect_block_function_dependencies(then_block, hir, functions, dependencies);
+            if let Some(branch) = else_block {
+                collect_else_function_dependencies(branch, hir, functions, dependencies);
+            }
+        }
+        ExprKind::IfLet {
+            pat,
+            expr,
+            then_block,
+            else_block,
+        } => {
+            collect_pattern_function_dependencies(pat, hir, functions, dependencies);
+            collect_expr_function_dependencies(expr, hir, functions, dependencies);
+            collect_block_function_dependencies(then_block, hir, functions, dependencies);
+            if let Some(branch) = else_block {
+                collect_else_function_dependencies(branch, hir, functions, dependencies);
+            }
+        }
+        ExprKind::Block(block) => {
+            collect_block_function_dependencies(block, hir, functions, dependencies);
+        }
+        ExprKind::Assign { target, value } => {
+            collect_expr_function_dependencies(target, hir, functions, dependencies);
+            collect_expr_function_dependencies(value, hir, functions, dependencies);
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Path(_) => {}
+    }
+}
+
+fn collect_else_function_dependencies(
+    branch: &ElseBranch,
+    hir: &crate::hir::ResolvedHir,
+    functions: &HashMap<crate::hir::DefId, usize>,
+    dependencies: &mut HashSet<usize>,
+) {
+    match branch {
+        ElseBranch::Block(block) => {
+            collect_block_function_dependencies(block, hir, functions, dependencies);
+        }
+        ElseBranch::If(expression) => {
+            collect_expr_function_dependencies(expression, hir, functions, dependencies);
+        }
+    }
+}
+
+fn collect_pattern_function_dependencies(
+    pattern: &Pattern,
+    hir: &crate::hir::ResolvedHir,
+    functions: &HashMap<crate::hir::DefId, usize>,
+    dependencies: &mut HashSet<usize>,
+) {
+    match pattern {
+        Pattern::Literal(expression) => {
+            collect_expr_function_dependencies(expression, hir, functions, dependencies);
+        }
+        Pattern::Range { lo, hi, .. } => {
+            collect_expr_function_dependencies(lo, hir, functions, dependencies);
+            collect_expr_function_dependencies(hi, hir, functions, dependencies);
+        }
+        Pattern::TupleVariant { elems, .. } => {
+            for element in elems {
+                collect_pattern_function_dependencies(element, hir, functions, dependencies);
+            }
+        }
+        Pattern::StructVariant { fields, .. } => {
+            for (_, field) in fields {
+                collect_pattern_function_dependencies(field, hir, functions, dependencies);
+            }
+        }
+        Pattern::Wildcard | Pattern::Binding(..) | Pattern::Path { .. } => {}
+    }
+}
+
+struct FunctionComponents<'a> {
+    graph: &'a [Vec<usize>],
+    next_index: usize,
+    indices: Vec<Option<usize>>,
+    lowlinks: Vec<usize>,
+    stack: Vec<usize>,
+    on_stack: Vec<bool>,
+    components: Vec<Vec<usize>>,
+}
+
+impl<'a> FunctionComponents<'a> {
+    fn new(graph: &'a [Vec<usize>]) -> Self {
+        Self {
+            graph,
+            next_index: 0,
+            indices: vec![None; graph.len()],
+            lowlinks: vec![0; graph.len()],
+            stack: Vec::new(),
+            on_stack: vec![false; graph.len()],
+            components: Vec::new(),
+        }
+    }
+
+    fn run(mut self) -> Vec<Vec<usize>> {
+        for function in 0..self.graph.len() {
+            if self.indices[function].is_none() {
+                self.visit(function);
+            }
+        }
+        self.components
+    }
+
+    fn visit(&mut self, function: usize) {
+        let index = self.next_index;
+        self.next_index += 1;
+        self.indices[function] = Some(index);
+        self.lowlinks[function] = index;
+        self.stack.push(function);
+        self.on_stack[function] = true;
+
+        for dependency in self.graph[function].clone() {
+            if self.indices[dependency].is_none() {
+                self.visit(dependency);
+                self.lowlinks[function] = self.lowlinks[function].min(self.lowlinks[dependency]);
+            } else if self.on_stack[dependency] {
+                self.lowlinks[function] =
+                    self.lowlinks[function].min(self.indices[dependency].unwrap());
+            }
+        }
+
+        if self.lowlinks[function] != index {
+            return;
+        }
+        let mut component = Vec::new();
+        loop {
+            let member = self.stack.pop().expect("active function is on SCC stack");
+            self.on_stack[member] = false;
+            component.push(member);
+            if member == function {
+                break;
+            }
+        }
+        component.sort_unstable();
+        self.components.push(component);
     }
 }
 
@@ -2204,4 +3477,27 @@ fn lua_int_literal(s: &str) -> String {
         return v.to_string();
     }
     clean
+}
+
+fn rua_int_value(source: &str) -> Option<i64> {
+    let clean = source.replace('_', "");
+    let (digits, radix) = if let Some(digits) = clean
+        .strip_prefix("0b")
+        .or_else(|| clean.strip_prefix("0B"))
+    {
+        (digits, 2)
+    } else if let Some(digits) = clean
+        .strip_prefix("0o")
+        .or_else(|| clean.strip_prefix("0O"))
+    {
+        (digits, 8)
+    } else if let Some(digits) = clean
+        .strip_prefix("0x")
+        .or_else(|| clean.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else {
+        (clean.as_str(), 10)
+    };
+    i64::from_str_radix(digits, radix).ok()
 }

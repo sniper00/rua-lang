@@ -88,6 +88,12 @@ enum Ty {
         def: crate::hir::DefId,
         name: String,
     },
+    /// A user trait object. It stays non-concrete for compatibility checks but
+    /// carries identity so method calls use Rua's metatable dispatch.
+    Trait {
+        def: crate::hir::DefId,
+        name: String,
+    },
     /// `Vec<T>` / `[T]`.
     Vec(Box<Ty>),
     /// `Option<T>` (represented at runtime as pure nil, but typed here).
@@ -122,7 +128,7 @@ impl Ty {
     /// Concrete = we are sure what it is (so a mismatch is a real error). A
     /// generic parameter is *not* concrete: it stands for an unknown instantiation.
     fn is_concrete(&self) -> bool {
-        !matches!(self, Ty::Unknown | Ty::Generic { .. })
+        !matches!(self, Ty::Unknown | Ty::Generic { .. } | Ty::Trait { .. })
     }
     fn name(&self) -> String {
         match self {
@@ -132,6 +138,7 @@ impl Ty {
             Ty::Str => "String".into(),
             Ty::Unit => "()".into(),
             Ty::Named { name, .. } => name.clone(),
+            Ty::Trait { name, .. } => format!("dyn {name}"),
             Ty::Vec(t) => format!("Vec<{}>", t.name()),
             Ty::Option(t) => format!("Option<{}>", t.name()),
             Ty::Result(t, e) => format!("Result<{}, {}>", t.name(), e.name()),
@@ -598,11 +605,21 @@ pub struct TypeInfo {
     /// Method-call expressions where the receiver is `Option<T>` and the method
     /// is `map`, so codegen inlines the closure instead of emitting `:map()`.
     option_maps: std::collections::HashSet<ExprId>,
+    /// Unary/binary expressions proven to use primitive Lua operators rather
+    /// than user metamethods.
+    pure_operators: std::collections::HashSet<ExprId>,
+    user_methods: HashMap<ExprId, UserMethodDispatch>,
     result_tries: std::collections::HashSet<ExprId>,
     /// First closure encountered during type checking. The compiler entry point
     /// uses this as a temporary backend gate until fused closure codegen lands.
     first_closure: Option<SourceRange>,
     iter_plans: HashMap<ExprId, IterPlan>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UserMethodDispatch {
+    Static(crate::hir::DefId),
+    Dynamic,
 }
 
 impl TypeInfo {
@@ -624,6 +641,14 @@ impl TypeInfo {
 
     pub fn is_option_map(&self, expression: ExprId) -> bool {
         self.option_maps.contains(&expression)
+    }
+
+    pub fn is_pure_operator(&self, expression: ExprId) -> bool {
+        self.pure_operators.contains(&expression)
+    }
+
+    pub(crate) fn user_method(&self, expression: ExprId) -> Option<UserMethodDispatch> {
+        self.user_methods.get(&expression).copied()
     }
 
     pub fn is_result_try(&self, expression: ExprId) -> bool {
@@ -730,6 +755,8 @@ pub fn check_resolved_diagnostics(
             str_methods: tc.str_methods,
             str_concats: tc.str_concats,
             option_maps: tc.option_maps,
+            pure_operators: tc.pure_operators,
+            user_methods: tc.user_methods,
             result_tries: tc.result_tries,
             first_closure: tc.first_closure,
             iter_plans: tc.iter_plans,
@@ -773,6 +800,8 @@ struct Tc {
     str_concats: std::collections::HashSet<ExprId>,
     /// `Option::map` calls that need inline codegen.
     option_maps: std::collections::HashSet<ExprId>,
+    pure_operators: std::collections::HashSet<ExprId>,
+    user_methods: HashMap<ExprId, UserMethodDispatch>,
     result_tries: std::collections::HashSet<ExprId>,
     first_closure: Option<SourceRange>,
     iter_plans: HashMap<ExprId, IterPlan>,
@@ -798,6 +827,8 @@ impl Tc {
             str_methods: std::collections::HashSet::new(),
             str_concats: std::collections::HashSet::new(),
             option_maps: std::collections::HashSet::new(),
+            pure_operators: std::collections::HashSet::new(),
+            user_methods: HashMap::new(),
             result_tries: std::collections::HashSet::new(),
             first_closure: None,
             iter_plans: HashMap::new(),
@@ -1076,6 +1107,14 @@ impl Tc {
                         ) =>
                     {
                         self.named_type(definition)
+                    }
+                    Some(crate::hir::TypeTarget::Item(definition))
+                        if self.hir.definition(definition).kind == crate::hir::DefKind::Trait =>
+                    {
+                        Ty::Trait {
+                            def: definition,
+                            name: self.hir.definition(definition).name.clone(),
+                        }
                     }
                     Some(crate::hir::TypeTarget::Generic(id)) => Ty::Generic {
                         id,
@@ -2093,6 +2132,12 @@ impl Tc {
             }
             ExprKind::Unary { op, expr } => {
                 let t = self.infer(expr);
+                if matches!(
+                    (op, &t),
+                    (UnOp::Neg, Ty::I64 | Ty::F64) | (UnOp::Not, Ty::Bool)
+                ) {
+                    self.pure_operators.insert(e.id);
+                }
                 match op {
                     UnOp::Neg => {
                         if t.is_concrete() && !t.is_numeric() && !matches!(t, Ty::Named { .. }) {
@@ -2109,6 +2154,11 @@ impl Tc {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.infer(lhs);
                 let r = self.infer(rhs);
+                if matches!(l, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Str)
+                    && matches!(r, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Str)
+                {
+                    self.pure_operators.insert(e.id);
+                }
                 // Record `i64 / i64` and `i64 % i64` so codegen can emit the
                 // truncating integer helpers (`rt.idiv`/`rt.irem`).
                 if matches!(l, Ty::I64) && matches!(r, Ty::I64) {
@@ -2149,6 +2199,8 @@ impl Tc {
                         self.hir.associated_items.get(&(*owner, method.clone()))
                     && let Some(signature) = self.method_sigs.get(&definition)
                 {
+                    self.user_methods
+                        .insert(e.id, UserMethodDispatch::Static(definition));
                     let params = signature.params.clone();
                     let ret = signature.ret.clone();
                     let generics = signature.generics.clone();
@@ -2171,12 +2223,27 @@ impl Tc {
                     }
                     return ret;
                 }
+                if let Ty::Trait {
+                    def: trait_id,
+                    name: trait_name,
+                } = &rt
+                    && let Some(&definition) =
+                        self.hir.trait_items.get(&(*trait_id, method.clone()))
+                    && let Some(signature) = self.method_sigs.get(&definition)
+                {
+                    self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
+                    let params = signature.params.clone();
+                    let ret = signature.ret.clone();
+                    self.check_method_call(trait_name, method, &params, &arg_tys, args, sp);
+                    return ret;
+                }
                 // Receiver typed as a generic parameter: resolve the method via
                 // its trait bounds. If some bound trait declares the method, use
                 // that signature; otherwise stay silent (Unknown).
                 if let Ty::Generic { id, .. } = &rt
                     && let Some((tname, signature)) = self.resolve_generic_method(*id, method)
                 {
+                    self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
                     self.check_method_call(&tname, method, &signature.params, &arg_tys, args, sp);
                     if !signature.generics.is_empty() {
                         // Method-level generics: infer them from the call's

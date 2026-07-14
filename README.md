@@ -7,7 +7,7 @@ cargo build --release -p ruac -p rua-lsp --features lsp
 target/release/ruac build app.rua
 ```
 
-生成物面向 Lua 5.4/5.5，并在使用运行时能力时依赖 [rua_rt.lua](lualib/rua_rt.lua)。
+生成物面向 Lua 5.5，并在使用运行时能力时依赖 [rua_rt.lua](lualib/rua_rt.lua)。
 
 ## 语言语义
 

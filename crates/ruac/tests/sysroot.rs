@@ -160,8 +160,8 @@ fn compiler_project_api_loads_modules_without_filesystem_or_dense_ids() {
     let artifact =
         ruac::compile_project_artifact(&project, &provider).expect("compile in-memory project");
     let lua = artifact.source;
-    assert!(lua.contains("api.answer"), "{lua}");
-    assert!(lua.contains("local value = api.answer()"), "{lua}");
+    assert!(lua.contains("\napi.answer()\n"), "{lua}");
+    assert!(!lua.contains("local value"), "{lua}");
     assert!(
         artifact
             .source_map

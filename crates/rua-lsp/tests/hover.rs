@@ -35,6 +35,59 @@ fn hover_shows_fn_signature() {
 }
 
 #[test]
+fn hover_and_goto_work_for_unattached_workspace_file() {
+    let root_uri = uri("/test/main.rua");
+    let demo_uri = uri("/test/demo.rua");
+    let (source, offset) =
+        extract_marker("fn helper(value: i64) -> i64 { value }\nfn run() { hel$0per(42); }");
+    let declaration = source.find("helper").unwrap() as u32;
+    let mut srv = TestServer::new();
+    srv.open(&root_uri, "fn root() {}");
+    srv.open(&demo_uri, &source);
+
+    let position = srv.pp_at_offset(&demo_uri, offset).unwrap();
+    let analysis = srv.snapshot();
+    let hover = analysis.hover(position).expect("hover in unattached file");
+    assert!(hover.signature().contains("helper"));
+    let target = analysis
+        .goto_definition(position)
+        .expect("definition in unattached file");
+    assert_eq!(target.target_range().range.start(), declaration);
+}
+
+#[test]
+fn demo_hover_and_goto_cover_items_members_variants_and_locals() {
+    let root_uri = uri("/test/main.rua");
+    let demo_uri = uri("/test/demo.rua");
+    let source = include_str!("../../../tests/demo.rua");
+    let mut srv = TestServer::new();
+    srv.open(&root_uri, "fn root() {}");
+    srv.open(&demo_uri, source);
+    let analysis = srv.snapshot();
+
+    for (fragment, symbol) in [
+        ("describe_color(red)", "describe_color"),
+        ("p.translate(1, 2)", "translate"),
+        ("Color::Rgb(255, 128, 0)", "Rgb"),
+        ("red_name, rgb_name, message_score)", "message_score"),
+    ] {
+        let fragment_start = source.find(fragment).unwrap();
+        let symbol_offset = fragment.find(symbol).unwrap();
+        let position = srv
+            .pp_at_offset(&demo_uri, fragment_start + symbol_offset + 1)
+            .unwrap();
+        assert!(
+            analysis.hover(position).is_some(),
+            "missing hover for {symbol}"
+        );
+        assert!(
+            analysis.goto_definition(position).is_some(),
+            "missing definition for {symbol}"
+        );
+    }
+}
+
+#[test]
 fn hover_shows_method_signature() {
     let (source, offset) = extract_marker(
         "struct Point { x: i64 }\nimpl Point {\n    fn translate(self, dx: i64, dy: i64) -> Point { self }\n}\nfn main() { let p = Point { x: 0 }; p.trans$0late(1, 2); }",
@@ -82,6 +135,48 @@ fn hover_builtin_macro_uses_shared_documentation() {
         hover.documentation(),
         Some("Print a formatted line to standard output.")
     );
+}
+
+#[test]
+fn builtin_members_hover_and_resolve_to_shared_declarations() {
+    let source = concat!(
+        "fn use_option(value: Option<i64>) {\n",
+        "    let mapped = value.map(|item| item + 1);\n",
+        "    let present = Option::Some(1);\n",
+        "}\n",
+    );
+    let uri = uri("/test/builtin_member_navigation.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, source);
+    let analysis = srv.snapshot();
+
+    for (needle, expected_name, expected_documentation) in [
+        (
+            "map(|item|",
+            "map",
+            "Map an `Option<T>` to `Option<U>` by applying a function.",
+        ),
+        ("Some(1)", "Some", ""),
+    ] {
+        let offset = source.find(needle).unwrap() + 1;
+        let position = srv.pp_at_offset(&uri, offset).unwrap();
+        let hover = analysis.hover(position).expect("builtin member hover");
+        assert!(hover.signature().contains(expected_name), "{hover:?}");
+        if !expected_documentation.is_empty() {
+            assert_eq!(hover.documentation(), Some(expected_documentation));
+        }
+
+        let target = analysis
+            .goto_builtin_definition(position)
+            .expect("builtin declaration target");
+        assert_eq!(target.source_name(), "option.ruai");
+        let builtin = include_str!("../../../crates/rua-core/builtins/option.ruai");
+        let range = target.range();
+        assert_eq!(
+            &builtin[range.start() as usize..range.end() as usize],
+            expected_name
+        );
+    }
 }
 
 #[test]

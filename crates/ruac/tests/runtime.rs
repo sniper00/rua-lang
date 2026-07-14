@@ -180,6 +180,9 @@ fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
         "#,
     );
     assert_success(&output, "42\nboom\n10\necho:bad\n12\n", &lua);
+    assert!(lua.contains("local function host_fetch(ok)"), "{lua}");
+    assert!(lua.contains("local function host_echo(input)"), "{lua}");
+    assert!(lua.contains("function nested.host_nested(value)"), "{lua}");
 }
 
 #[test]
@@ -311,6 +314,212 @@ fn mutual_recursion_uses_one_lexical_binding_per_function() {
         "#,
     );
     assert_success(&output, "true\n", &lua);
+    assert!(
+        lua.lines().any(|line| line == "local is_even, is_odd"),
+        "{lua}"
+    );
+    assert!(lua.contains("\nfunction is_even(value)"), "{lua}");
+    assert!(lua.contains("\nfunction is_odd(value)"), "{lua}");
+    assert!(!lua.contains("local function is_even"), "{lua}");
+    assert!(!lua.contains("local function is_odd"), "{lua}");
+}
+
+#[test]
+fn acyclic_forward_reference_is_reordered_without_declaration() {
+    let (lua, output) = compile_and_run(
+        "acyclic-forward-reference",
+        r#"
+        fn caller() -> i64 { callee() }
+        fn independent() -> i64 { 7 }
+        fn callee() -> i64 { 42 }
+
+        println!("{} {}", caller(), independent());
+        "#,
+    );
+    assert_success(&output, "42 7\n", &lua);
+
+    let callee = lua
+        .find("---@return integer\nlocal function callee()")
+        .unwrap_or_else(|| panic!("callee annotation is detached from local function:\n{lua}"));
+    let caller = lua
+        .find("---@return integer\nlocal function caller()")
+        .unwrap_or_else(|| panic!("caller annotation is detached from local function:\n{lua}"));
+    assert!(
+        callee < caller,
+        "callee must be in scope before caller:\n{lua}"
+    );
+    assert!(!lua.lines().any(|line| line == "local caller, callee"));
+    assert!(!lua.lines().any(|line| line == "local caller"));
+}
+
+#[test]
+fn direct_recursion_uses_local_function_without_forward_declaration() {
+    let (lua, output) = compile_and_run(
+        "direct-recursion",
+        r#"
+        fn factorial(value: i64) -> i64 {
+            if value <= 1 { 1 } else { value * factorial(value - 1) }
+        }
+        println!("{}", factorial(5));
+        "#,
+    );
+    assert_success(&output, "120\n", &lua);
+    assert!(
+        lua.contains("---@return integer\nlocal function factorial(value)"),
+        "{lua}"
+    );
+    assert!(!lua.lines().any(|line| line == "local factorial"));
+}
+
+#[test]
+fn module_function_captures_root_local_function() {
+    let (lua, output) = compile_and_run(
+        "module-to-root-function",
+        r#"
+        mod api {
+            pub fn answer() -> i64 { root_answer() }
+        }
+        fn root_answer() -> i64 { 42 }
+
+        println!("{}", api::answer());
+        "#,
+    );
+    assert_success(&output, "42\n", &lua);
+    let root = lua.find("local function root_answer()").unwrap();
+    let module = lua.find("function api.answer()").unwrap();
+    assert!(
+        root < module,
+        "root local must precede module function:\n{lua}"
+    );
+}
+
+#[test]
+fn user_method_dispatch_is_not_shadowed_by_same_named_field() {
+    let (lua, output) = compile_and_run(
+        "field-method-collision",
+        r#"
+        trait Named { fn name(&self) -> String; }
+        struct Person { name: String }
+        impl Named for Person {
+            fn name(&self) -> String { self.name }
+        }
+
+        fn concrete(person: &Person) -> String { person.name() }
+        fn generic<T: Named>(value: T) -> String { value.name() }
+        fn dynamic(value: &dyn Named) -> String { value.name() }
+
+        let person = Person { name: "Rua" };
+        println!("{} {} {}", concrete(person), generic(person), dynamic(person));
+        "#,
+    );
+    assert_success(&output, "Rua Rua Rua\n", &lua);
+    assert!(lua.contains("Person.name(person)"), "{lua}");
+    assert!(lua.contains("getmetatable(value).name(value)"), "{lua}");
+    assert!(!lua.contains("person:name()"), "{lua}");
+    assert!(!lua.contains("value:name()"), "{lua}");
+}
+
+#[test]
+fn option_map_inlines_without_allocating_an_unused_closure() {
+    let (lua, output) = compile_and_run(
+        "option-map-inline",
+        r#"
+        let mapped = Option::Some(4).map(|value| value + 1);
+        match mapped {
+            Option::Some(value) => println!("{}", value),
+            Option::None => println!("none"),
+        }
+        "#,
+    );
+    assert_success(&output, "5\n", &lua);
+    assert!(!lua.contains("local function __t"), "{lua}");
+}
+
+#[test]
+fn returning_match_uses_direct_if_elseif_control_flow() {
+    let (lua, output) = compile_and_run(
+        "returning-match",
+        r#"
+        enum Color { Red, Green, Blue }
+        fn name(color: Color) -> String {
+            match color {
+                Color::Red => "red",
+                Color::Green => "green",
+                Color::Blue => "blue",
+            }
+        }
+        println!("{}", name(Color::Green));
+        "#,
+    );
+    assert_success(&output, "green\n", &lua);
+    assert!(lua.contains("local __t1 = color.tag"), "{lua}");
+    assert!(lua.contains("elseif __t1 == \"Green\" then"), "{lua}");
+    assert!(!lua.contains("== \"Blue\""), "{lua}");
+    assert!(!lua.contains("not __t"), "{lua}");
+}
+
+#[test]
+fn fused_iterator_uses_nested_guards_without_active_flag() {
+    let (lua, output) = compile_and_run(
+        "iterator-guards",
+        r#"
+        let total = vec![1, 2, 3, 4]
+            .iter()
+            .map(|value| value * 2)
+            .filter(|value| value > 4)
+            .fold(0, |sum, value| sum + value);
+        println!("{}", total);
+        "#,
+    );
+    assert_success(&output, "14\n", &lua);
+    assert!(
+        !lua.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("local __t")
+                && (line.ends_with(" = true") || line.ends_with(" = false"))
+        }),
+        "{lua}"
+    );
+}
+
+#[test]
+fn exact_size_collect_uses_lua_table_capacity_without_changing_vec_layout() {
+    let (lua, output) = compile_and_run(
+        "iterator-table-capacity",
+        r#"
+        let mapped = vec![1, 2, 3]
+            .iter()
+            .map(|value| value * 10)
+            .collect::<Vec<i64>>();
+        println!("{} {} {}", mapped.len(), mapped[0], mapped[2]);
+        "#,
+    );
+    assert_success(&output, "3 10 30\n", &lua);
+    assert!(
+        lua.contains("local __rua_table_create = table.create"),
+        "{lua}"
+    );
+    assert!(lua.contains("rt.vec(__rua_table_create("), "{lua}");
+}
+
+#[test]
+fn unused_iterator_with_capture_side_effect_is_not_eliminated() {
+    let (lua, output) = compile_and_run(
+        "iterator-effect-dce",
+        r#"
+        let mut calls = 0;
+        let unused = vec![1, 2, 3]
+            .iter()
+            .map(|value| {
+                calls = calls + 1;
+                value * 2
+            })
+            .collect::<Vec<i64>>();
+        println!("{}", calls);
+        "#,
+    );
+    assert_success(&output, "3\n", &lua);
+    assert!(lua.contains("calls = calls + 1"), "{lua}");
 }
 
 #[test]

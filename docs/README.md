@@ -16,7 +16,7 @@
 ## 当前特点
 
 - Rua 使用 Rust 风格语法和静态类型，但不引入所有权、借用或生命周期。
-- 源文件是可执行 chunk，没有特殊 `main`；生成物是可读的 Lua 5.4/5.5。
+- 源文件是可执行 chunk，没有特殊 `main`；生成物是可读的 Lua 5.5。
 - `Result<T, E>` 在 Rua 内部始终是一等 tagged value，Lua multi-return 只出现在显式 FFI adapter。
 - compiler 和 IDE 长期保留两套 parser，共享 lexer、稳定 ID、project contract 和 conformance corpus。
 - codegen 只消费 resolved identity、typed facts、backend layout 和结构化 Lua IR，不按字符串猜语义。

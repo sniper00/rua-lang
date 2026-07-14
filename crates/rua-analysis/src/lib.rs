@@ -35,12 +35,12 @@ pub use hir::{
     UnifyResult, VariantKind, VariantSignature, Visibility, WherePredicateData, unify,
 };
 pub use ide::{
-    Analysis, AnalysisHost, CallHierarchyItem, ClosureParameterInfo, CompletionInsert,
-    CompletionItem, CompletionKind, CompletionRelevance, DocumentSymbol, FileEdit, FilePosition,
-    FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile, ProjectId,
-    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget,
-    SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange,
-    TextEdit, TextRange, TypeHierarchyItem, WorkspaceSymbol,
+    Analysis, AnalysisHost, BuiltinDefinitionTarget, CallHierarchyItem, ClosureParameterInfo,
+    CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, DocumentSymbol,
+    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile,
+    ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError,
+    RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo,
+    SourceChange, TextEdit, TextRange, TypeHierarchyItem, TypeHint, WorkspaceSymbol,
 };
 pub use semantic::{LocalReference, Semantics};
 pub use vfs::{

@@ -2,7 +2,41 @@
 
 mod support;
 
-use support::{TestServer, uri};
+use support::{TestServer, extract_marker, uri};
+
+#[test]
+fn completions_offer_locals_in_unattached_workspace_file() {
+    let root_uri = uri("/test/main.rua");
+    let demo_uri = uri("/test/demo.rua");
+    let (source, offset) = extract_marker("fn run() { let local_value = 1; let other = loc$0; }");
+    let mut srv = TestServer::new();
+    srv.open(&root_uri, "fn root() {}");
+    srv.open(&demo_uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&demo_uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "local_value"),
+        "local binding missing from unattached-file completions: {items:?}"
+    );
+}
+
+#[test]
+fn completions_offer_option_map_member() {
+    let (source, offset) = extract_marker("fn run(value: Option<i64>) { let mapped = value.$0; }");
+    let uri = uri("/test/option_member.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "map"),
+        "Option<T>.map missing from member completions: {items:?}"
+    );
+}
 
 #[test]
 fn completions_trait_method_struct_parsed_correctly() {

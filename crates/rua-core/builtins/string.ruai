@@ -32,6 +32,24 @@ impl String {
     /// Return a copy of the string.
     pub fn clone(&self) -> String {}
 
+    /// Return the string with leading and trailing whitespace removed.
+    pub fn trim(&self) -> String {}
+
+    /// Return the string with leading whitespace removed.
+    pub fn trim_start(&self) -> String {}
+
+    /// Return the string with trailing whitespace removed.
+    pub fn trim_end(&self) -> String {}
+
+    /// Replace every occurrence of `from` with `to`.
+    pub fn replace(&self, from: &str, to: &str) -> String {}
+
+    /// Convert the string to uppercase.
+    pub fn to_uppercase(&self) -> String {}
+
+    /// Convert the string to lowercase.
+    pub fn to_lowercase(&self) -> String {}
+
     /// Repeat the string `n` times.
     pub fn repeat(&self, n: i64) -> String {}
 

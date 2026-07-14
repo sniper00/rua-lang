@@ -15,7 +15,7 @@ Status meanings:
 
 Current inventory:
 
-- Compile pass: 45 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
+- Compile pass: 46 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
 - Compile fail: 44 `.rua` / `.diag.golden` pairs plus shared code/file/range/argument manifests.
 - Phase 4A: 12 compile-pass and 9 compile-fail closure/iterator pairs.
 - Parser/range: 16 accept, 6 reject, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.

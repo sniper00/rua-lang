@@ -116,6 +116,30 @@ impl NavigationTarget {
     }
 }
 
+/// A declaration inside the configured builtin sysroot.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BuiltinDefinitionTarget {
+    source_name: String,
+    range: TextRange,
+}
+
+impl BuiltinDefinitionTarget {
+    pub fn new(source_name: impl Into<String>, range: TextRange) -> Self {
+        Self {
+            source_name: source_name.into(),
+            range,
+        }
+    }
+
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    pub const fn range(&self) -> TextRange {
+        self.range
+    }
+}
+
 /// Stable display data for hover. Markdown wrapping belongs to the LSP adapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HoverResult {
@@ -148,6 +172,41 @@ impl HoverResult {
 
     pub fn documentation(&self) -> Option<&str> {
         self.documentation.as_deref()
+    }
+}
+
+/// Protocol-neutral inferred type hint shown after a binding name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeHint {
+    position: FilePosition,
+    ty: String,
+    target: Option<FileRange>,
+}
+
+impl TypeHint {
+    pub fn new(position: FilePosition, ty: impl Into<String>) -> Self {
+        Self {
+            position,
+            ty: ty.into(),
+            target: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: FileRange) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    pub const fn position(&self) -> FilePosition {
+        self.position
+    }
+
+    pub fn ty(&self) -> &str {
+        &self.ty
+    }
+
+    pub const fn target(&self) -> Option<FileRange> {
+        self.target
     }
 }
 

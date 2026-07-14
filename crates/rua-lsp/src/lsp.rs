@@ -789,100 +789,55 @@ impl Server {
             return;
         };
 
-        let mut hints: Vec<InlayHint> = Vec::new();
-        let Some(project_id) = self.project_id_for_file(file_id) else {
-            let resp = Response::new_ok(id, hints);
+        let Some(project_file) = self.project_file(file_id) else {
+            let resp = Response::new_ok(id, Vec::<InlayHint>::new());
             let _ = self.connection.sender.send(Message::Response(resp));
             return;
         };
-        let Some(def_map) = analysis.def_map_for_project(project_id) else {
-            let resp = Response::new_ok(id, hints);
-            let _ = self.connection.sender.send(Message::Response(resp));
-            return;
-        };
+        let range_start = line_index.offset(
+            params.range.start.line as usize,
+            params.range.start.character as usize,
+            &source,
+        );
+        let range_end = line_index.offset(
+            params.range.end.line as usize,
+            params.range.end.character as usize,
+            &source,
+        );
 
-        for definition in def_map.definitions() {
-            if !definition.kind().is_body_owner() {
+        let mut hints = Vec::new();
+        for hint in analysis.inlay_hints(project_file) {
+            let offset = hint.position().offset as usize;
+            if offset < range_start || offset > range_end || offset > source.len() {
                 continue;
             }
-            let Some(body) = analysis.body(definition.id()) else {
-                continue;
-            };
-            let Some(source_map) = analysis.body_source_map(definition.id()) else {
-                continue;
-            };
-            let Some(inference) = analysis.infer(definition.id()) else {
-                continue;
-            };
-
-            // Type hints for let bindings: show `: Type` after the name.
-            // Skip parameters (they already have types in source) and let
-            // bindings that already have an explicit type annotation.
-            for (binding_id, binding) in body.bindings() {
-                // Parameters and closure parameters already have explicit types.
-                if matches!(
-                    binding.kind(),
-                    rua_analysis::BindingKind::Parameter
-                        | rua_analysis::BindingKind::ClosureParameter
-                        | rua_analysis::BindingKind::SelfParameter
-                ) {
-                    continue;
-                }
-                let Some(_name) = binding.name() else {
-                    continue;
-                };
-                let Some(ty) = inference.type_of_binding(binding_id) else {
-                    continue;
-                };
-                if ty.is_unknown() || ty.is_never() {
-                    continue;
-                }
-                let Some(fr) = source_map.binding_range(binding_id) else {
-                    continue;
-                };
-                let end = fr.range.end() as usize;
-                if end > source.len() {
-                    continue;
-                }
-                let (line, col) = line_index.line_col(end, &source);
-                let ty_str = ty.to_string();
-                // Make type hint clickable: if it's a named type, link to its definition.
-                let label = if let rua_analysis::Ty::Named(named) = ty {
-                    if let Some(def) = def_map.definition(named.definition()) {
-                        let def_uri = self
-                            .uri_for_file(def.file_id())
-                            .unwrap_or_else(|| uri.clone());
-                        let def_range = self
-                            .range_for_file(def.file_id(), def.name_range())
-                            .unwrap_or_else(|| {
-                                Range::new(Position::new(0, 0), Position::new(0, 0))
-                            });
-                        InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
-                            value: format!(": {ty_str}"),
-                            tooltip: None,
-                            location: Some(Location {
-                                uri: def_uri,
-                                range: def_range,
-                            }),
-                            command: None,
-                        }])
-                    } else {
-                        InlayHintLabel::String(format!(": {ty_str}"))
-                    }
-                } else {
-                    InlayHintLabel::String(format!(": {ty_str}"))
-                };
-                hints.push(InlayHint {
-                    position: Position::new(line as u32, col as u32),
-                    label,
-                    kind: Some(InlayHintKind::TYPE),
-                    padding_left: Some(true),
-                    padding_right: None,
+            let (line, col) = line_index.line_col(offset, &source);
+            let value = format!(": {}", hint.ty());
+            let location = hint.target().and_then(|target| {
+                Some(Location {
+                    uri: self.uri_for_file(target.file_id)?,
+                    range: self.range_for_file(target.file_id, target.range)?,
+                })
+            });
+            let label = match location {
+                Some(location) => InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
+                    value,
                     tooltip: None,
-                    text_edits: None,
-                    data: None,
-                });
-            }
+                    location: Some(location),
+                    command: None,
+                }]),
+                None => InlayHintLabel::String(value),
+            };
+            hints.push(InlayHint {
+                position: Position::new(line as u32, col as u32),
+                label,
+                kind: Some(InlayHintKind::TYPE),
+                padding_left: Some(true),
+                padding_right: None,
+                tooltip: None,
+                text_edits: None,
+                data: None,
+            });
         }
 
         hints.sort_by_key(|h| (h.position.line, h.position.character));
@@ -3099,6 +3054,9 @@ fn completion_to_lsp(
 
     // text_edit: use replacement_range to create a proper TextEdit that
     // replaces the partial prefix at the cursor.
+    let replacement_text = insert_text
+        .clone()
+        .unwrap_or_else(|| item.label().to_string());
     let text_edit = item.replacement_range().and_then(|range| {
         let start = range.start() as usize;
         let end = range.end() as usize;
@@ -3112,7 +3070,7 @@ fn completion_to_lsp(
                 start: Position::new(sl as u32, sc as u32),
                 end: Position::new(el as u32, ec as u32),
             },
-            new_text: item.label().to_string(),
+            new_text: replacement_text.clone(),
         }))
     });
 

@@ -144,6 +144,7 @@ pub(crate) enum TableField {
 pub(crate) enum UnaryOp {
     Neg,
     Not,
+    Len,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,24 +425,10 @@ impl Builder {
         self.statement(Statement::Local { names, values });
     }
 
-    pub(crate) fn local_table(&mut self, name: impl Into<String>) {
-        self.statement(Statement::Local {
-            names: vec![name.into()],
-            values: vec![Expr::Table(Vec::new())],
-        });
-    }
-
     pub(crate) fn assign(&mut self, target: Expr, value: Expr) {
         self.statement(Statement::Assign {
             targets: vec![target],
             values: vec![value],
-        });
-    }
-
-    pub(crate) fn assign_table(&mut self, target: Expr) {
-        self.statement(Statement::Assign {
-            targets: vec![target],
-            values: vec![Expr::Table(Vec::new())],
         });
     }
 
@@ -509,7 +496,6 @@ impl Builder {
         });
     }
 
-    #[cfg(test)]
     pub(crate) fn begin_else_if(&mut self, condition: Expr) {
         let Some(Frame::If {
             branches,
@@ -831,6 +817,7 @@ impl Printer {
                 let rendered = match op {
                     UnaryOp::Neg => format!("-{source}"),
                     UnaryOp::Not => format!("not {source}"),
+                    UnaryOp::Len => format!("#{source}"),
                 };
                 if 7 < parent_precedence {
                     format!("({rendered})")

@@ -5,6 +5,36 @@ mod support;
 use support::{TestServer, uri};
 
 #[test]
+fn inlay_hints_work_for_unattached_demo_file() {
+    let root_uri = uri("/test/main.rua");
+    let demo_uri = uri("/test/demo.rua");
+    let source = include_str!("../../../tests/demo.rua");
+    let mut srv = TestServer::new();
+    srv.open(&root_uri, "fn root() {}");
+    let file_id = srv.open(&demo_uri, source);
+
+    let hints = srv.snapshot().inlay_hints(rua_analysis::ProjectFile::new(
+        rua_analysis::ProjectId::new(0),
+        file_id,
+    ));
+    let red_name_end = source.find("let red_name =").unwrap() as u32 + "let red_name".len() as u32;
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.position().offset == red_name_end && hint.ty() == "String"),
+        "missing inferred String hint for red_name"
+    );
+
+    let doubled_end = source.find("let doubled:").unwrap() as u32 + "let doubled".len() as u32;
+    assert!(
+        hints
+            .iter()
+            .all(|hint| hint.position().offset != doubled_end),
+        "explicitly annotated binding must not get a duplicate hint"
+    );
+}
+
+#[test]
 fn inlay_hint_for_let_binding_with_struct_type() {
     let uri = uri("/test/inlay_struct.rua");
     let mut srv = TestServer::new();

@@ -47,10 +47,84 @@ pub enum BuiltinMemberId {
     StringTrim,
     StringTrimEnd,
     StringTrimStart,
+    OptionMap,
     OptionSome,
     OptionNone,
     ResultOk,
     ResultErr,
+}
+
+impl BuiltinMemberId {
+    pub const fn source_name(self) -> &'static str {
+        match self {
+            Self::VecNew
+            | Self::VecGet
+            | Self::VecLen
+            | Self::VecPop
+            | Self::VecPush
+            | Self::VecSet => "vec.ruai",
+            Self::HashMapNew
+            | Self::HashMapContainsKey
+            | Self::HashMapGet
+            | Self::HashMapInsert
+            | Self::HashMapLen
+            | Self::HashMapRemove => "hashmap.ruai",
+            Self::StringChars
+            | Self::StringClone
+            | Self::StringContains
+            | Self::StringEndsWith
+            | Self::StringIsEmpty
+            | Self::StringLen
+            | Self::StringRepeat
+            | Self::StringReplace
+            | Self::StringSplit
+            | Self::StringStartsWith
+            | Self::StringToLowercase
+            | Self::StringToOwned
+            | Self::StringToString
+            | Self::StringToUppercase
+            | Self::StringTrim
+            | Self::StringTrimEnd
+            | Self::StringTrimStart => "string.ruai",
+            Self::OptionMap | Self::OptionSome | Self::OptionNone => "option.ruai",
+            Self::ResultOk | Self::ResultErr => "result.ruai",
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::VecNew | Self::HashMapNew => "new",
+            Self::VecGet | Self::HashMapGet => "get",
+            Self::VecLen | Self::HashMapLen | Self::StringLen => "len",
+            Self::VecPop => "pop",
+            Self::VecPush => "push",
+            Self::VecSet => "set",
+            Self::HashMapContainsKey => "contains_key",
+            Self::HashMapInsert => "insert",
+            Self::HashMapRemove => "remove",
+            Self::StringChars => "chars",
+            Self::StringClone => "clone",
+            Self::StringContains => "contains",
+            Self::StringEndsWith => "ends_with",
+            Self::StringIsEmpty => "is_empty",
+            Self::StringRepeat => "repeat",
+            Self::StringReplace => "replace",
+            Self::StringSplit => "split",
+            Self::StringStartsWith => "starts_with",
+            Self::StringToLowercase => "to_lowercase",
+            Self::StringToOwned => "to_owned",
+            Self::StringToString => "to_string",
+            Self::StringToUppercase => "to_uppercase",
+            Self::StringTrim => "trim",
+            Self::StringTrimEnd => "trim_end",
+            Self::StringTrimStart => "trim_start",
+            Self::OptionMap => "map",
+            Self::OptionSome => "Some",
+            Self::OptionNone => "None",
+            Self::ResultOk => "Ok",
+            Self::ResultErr => "Err",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1471,6 +1545,16 @@ impl MemberIndex {
                 ),
             ],
             Ty::Primitive(super::PrimitiveTy::String) => builtin_string_methods(),
+            Ty::Option(item) => vec![builtin_method(
+                BuiltinMemberId::OptionMap,
+                "map",
+                vec![Ty::Closure(CallableTy::new(
+                    vec![(**item).clone()],
+                    Ty::Unknown,
+                ))],
+                Ty::Option(Box::new(Ty::Unknown)),
+                ReceiverKind::Value,
+            )],
             _ => Vec::new(),
         }
     }
@@ -1858,6 +1942,7 @@ fn builtin_templates() -> Vec<(BuiltinMemberId, Ty, CallableTy)> {
     let unknown = Ty::Unknown;
     let vec_ty = Ty::Vec(Box::new(unknown.clone()));
     let map_ty = Ty::HashMap(Box::new(unknown.clone()), Box::new(unknown.clone()));
+    let option_ty = Ty::Option(Box::new(unknown.clone()));
     let mut templates = vec![
         (
             B::VecNew,
@@ -1916,9 +2001,20 @@ fn builtin_templates() -> Vec<(BuiltinMemberId, Ty, CallableTy)> {
             CallableTy::new(vec![unknown.clone()], Ty::Option(Box::new(unknown.clone()))),
         ),
         (
+            B::OptionMap,
+            option_ty.clone(),
+            CallableTy::new(
+                vec![Ty::Closure(CallableTy::new(
+                    vec![unknown.clone()],
+                    unknown.clone(),
+                ))],
+                option_ty.clone(),
+            ),
+        ),
+        (
             B::OptionSome,
-            Ty::Option(Box::new(unknown.clone())),
-            CallableTy::new(vec![unknown.clone()], Ty::Option(Box::new(unknown.clone()))),
+            option_ty.clone(),
+            CallableTy::new(vec![unknown.clone()], option_ty),
         ),
         (
             B::ResultOk,
