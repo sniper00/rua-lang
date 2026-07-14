@@ -7,6 +7,10 @@
 //! AST. Single-string compiles use an empty root path and fall back to the old
 //! `line: message` form.
 
+use std::ops::Deref;
+
+use rua_core::{DiagnosticCode, DiagnosticSeverity, FileId, StructuredDiagnostic, TextRange};
+
 /// A single diagnostic: which file/span it refers to, plus the message.
 ///
 /// The byte-offset range (`start`..`start+len`) is the **preferred** position
@@ -21,22 +25,38 @@
 /// Span-less diagnostics (`bare`) have `start = len = line = file = 0`.
 #[derive(Debug, Clone)]
 pub struct Diag {
-    pub file: u32,
-    /// Byte offset of the start of the diagnostic range in the source.
-    pub start: usize,
-    /// Byte length of the diagnostic range (0 for point / unknown).
-    pub len: usize,
+    pub diagnostic: StructuredDiagnostic,
     /// 1-based line number (redundant convenience for CLI rendering).
     pub line: usize,
     pub msg: String,
 }
 
+impl Deref for Diag {
+    type Target = StructuredDiagnostic;
+
+    fn deref(&self) -> &Self::Target {
+        &self.diagnostic
+    }
+}
+
 impl Diag {
-    pub fn new(file: u32, start: usize, len: usize, line: usize, msg: String) -> Self {
+    pub fn new(
+        code: DiagnosticCode,
+        file: u32,
+        start: usize,
+        len: usize,
+        line: usize,
+        msg: String,
+    ) -> Self {
+        let diagnostic = StructuredDiagnostic::new(
+            code,
+            Some(FileId::new(file)),
+            Some(TextRange::at(start as u32, len as u32)),
+        )
+        .with_argument("message", &msg)
+        .with_argument("line", line.to_string());
         Diag {
-            file,
-            start,
-            len,
+            diagnostic,
             line,
             msg,
         }
@@ -44,21 +64,56 @@ impl Diag {
 
     /// A diagnostic with no source location (e.g. duplicate-definition errors,
     /// which have no span to point at).
-    pub fn bare(msg: String) -> Self {
+    pub fn bare(code: DiagnosticCode, msg: String) -> Self {
+        let diagnostic = StructuredDiagnostic::new(code, None, None).with_argument("message", &msg);
         Diag {
-            file: 0,
-            start: 0,
-            len: 0,
+            diagnostic,
             line: 0,
             msg,
         }
+    }
+
+    pub fn from_structured(
+        diagnostic: StructuredDiagnostic,
+        line: usize,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            diagnostic,
+            line,
+            msg: message.into(),
+        }
+    }
+
+    pub fn file_index(&self) -> Option<u32> {
+        self.diagnostic.file.map(FileId::index)
+    }
+
+    pub fn start(&self) -> usize {
+        self.diagnostic
+            .range
+            .map_or(0, |range| range.start() as usize)
+    }
+
+    pub fn len(&self) -> usize {
+        self.diagnostic
+            .range
+            .map_or(0, |range| range.len() as usize)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub const fn severity(&self) -> DiagnosticSeverity {
+        self.diagnostic.code.severity()
     }
 
     /// Render as `path:line: msg`, degrading gracefully when the file path is
     /// empty (in-memory input) or the line is unknown (`0`).
     pub fn render(&self, files: &[String]) -> String {
         let path = files
-            .get(self.file as usize)
+            .get(self.file_index().unwrap_or(0) as usize)
             .map(String::as_str)
             .unwrap_or("");
         match (path.is_empty(), self.line) {

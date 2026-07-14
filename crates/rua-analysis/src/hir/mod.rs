@@ -4,6 +4,7 @@
 //! with `ruac` is maintained through conformance tests.
 
 pub mod body;
+mod cfg;
 mod def_map;
 pub mod infer;
 mod item_tree;
@@ -18,11 +19,12 @@ pub use body::{
     Condition, Expr, ExprId, Literal, LiteralKind, MatchArm, NameRef, NameRefId, NameRefKind, Pat,
     PatId, PatternField, Statement, StructField, UnaryOp,
 };
+pub use cfg::{ControlFlowGraph, StatementId};
 pub use def_map::{
     DefId, DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, MemberId,
     ModuleData, ModuleId, ResolveStrategy,
 };
-pub(crate) use def_map::{IdentityContext, IdentityInterner};
+pub(crate) use def_map::{IdentityContext, IdentityInterner, IdentityLease};
 pub use infer::{
     CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource,
     TypeMismatchContext,
@@ -34,13 +36,13 @@ pub use item_tree::{
 };
 pub(crate) use member::CallableRequirement;
 pub use member::{
-    BuiltinMemberId, BuiltinType, MemberCandidate, MemberIndex, MemberKind, MemberOrigin,
-    MemberResolution, MemberTarget, TraitBound,
+    BuiltinMemberId, BuiltinType, ImplementationData, MemberCandidate, MemberIndex, MemberKind,
+    MemberOrigin, MemberResolution, MemberTarget, TraitBound,
 };
 pub use module_resolution::module_file_candidates;
 pub use scope::{
-    BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
-    LocalUseKind, ScopeData, ScopeId, ScopeKind,
+    BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult,
+    LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,
 };
 pub use ty::{
     CallableTy, GenericParamId, GenericParamTy, NamedTy, NamedTypeResolver, PrimitiveTy,

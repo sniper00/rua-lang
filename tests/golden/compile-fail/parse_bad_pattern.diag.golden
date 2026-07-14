@@ -1,1 +1,1 @@
-<golden>/compile-fail/parse_bad_pattern.rua: 3: expected pattern, found `=>`
+<golden>/compile-fail/parse_bad_pattern.rua:3: parse error: expected pattern, found `=>`

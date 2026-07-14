@@ -1102,7 +1102,7 @@ fn ruai_member_lookup_cache_invalidates_on_declaration_signature_change() {
 }
 
 #[test]
-fn member_parity_unambiguous_field_and_method_targets_match_compiler() {
+fn member_targets_resolve_to_exact_native_definitions() {
     const SOURCE: &str = r#"
 struct Item {
     value: i64,
@@ -1118,32 +1118,26 @@ fn parity() -> i64 {
 }
 "#;
     let fixture = fixture(SOURCE, "parity");
-    let compiler = ruac::member_index(SOURCE);
     let (compiler_diagnostics, _) = ruac::check_diags(SOURCE);
     assert!(compiler_diagnostics.is_empty());
     assert!(fixture.inference.diagnostics().is_empty());
 
-    for (marker, name_ref_kind, native_kind, compiler_kind) in [
+    for (marker, name_ref_kind, native_kind, expected_definition) in [
         (
             "/*field_parity*/",
             NameRefKind::Field,
             MemberKind::Field,
-            ruac::typeck::MemberKind::Field,
+            "value",
         ),
         (
             "/*method_parity*/",
             NameRefKind::Method,
             MemberKind::Method,
-            ruac::typeck::MemberKind::Method,
+            "read",
         ),
     ] {
-        let offset = marker_offset(SOURCE, marker);
         let native = resolution_at(&fixture, marker, name_ref_kind);
-        let compiler = compiler
-            .at(0, offset as usize)
-            .unwrap_or_else(|| panic!("compiler member resolution at {marker}"));
         assert_eq!(native.kind(), native_kind);
-        assert_eq!(compiler.kind, compiler_kind);
         let MemberTarget::Definition(target) = native.target() else {
             panic!("user member must resolve to a definition");
         };
@@ -1151,11 +1145,11 @@ fn parity() -> i64 {
             .def_map
             .definition(target)
             .expect("native target definition");
+        let range = definition.name_range();
         assert_eq!(
-            definition.name_range().start() as usize,
-            compiler.target_start
+            &SOURCE[range.start() as usize..range.end() as usize],
+            expected_definition
         );
-        assert_eq!(definition.name_range().len() as usize, compiler.target_len);
-        assert_eq!(definition.file_id().index(), compiler.target_file);
+        assert_eq!(definition.file_id(), fixture.file_id);
     }
 }

@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn completions_trait_method_struct_parsed_correctly() {
@@ -21,7 +21,11 @@ fn completions_trait_method_struct_parsed_correctly() {
 
     // Parse and def_map must be clean
     let parse = analysis.parse(file_id);
-    assert!(parse.errors().is_empty(), "parse errors: {:?}", parse.errors());
+    assert!(
+        parse.errors().is_empty(),
+        "parse errors: {:?}",
+        parse.errors()
+    );
 
     let def_map = analysis.def_map(file_id);
     let names: Vec<&str> = def_map.definitions().map(|d| d.name()).collect();
@@ -100,10 +104,15 @@ fn completions_enum_variant_match_body_parsed() {
 
     // The match expression should be findable in the body
     let has_match = def_map.definitions().any(|d| {
-        if matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method)
-            && let Some(body) = analysis.body(d.id()) {
-                return body.exprs().any(|(_, e)| matches!(e, rua_analysis::Expr::Match { .. }));
-            }
+        if matches!(
+            d.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) && let Some(body) = analysis.body(d.id())
+        {
+            return body
+                .exprs()
+                .any(|(_, e)| matches!(e, rua_analysis::Expr::Match { .. }));
+        }
         false
     });
     assert!(has_match, "match expression should be in the body");
@@ -111,7 +120,10 @@ fn completions_enum_variant_match_body_parsed() {
     // Completions inside the match body should at minimum return keywords
     let pp = srv.pp(&uri, 1, 55).unwrap();
     let items = analysis.completions(pp);
-    assert!(!items.is_empty(), "completions in match body should not be empty");
+    assert!(
+        !items.is_empty(),
+        "completions in match body should not be empty"
+    );
 }
 
 #[test]

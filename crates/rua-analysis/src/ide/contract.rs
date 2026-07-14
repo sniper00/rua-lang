@@ -201,8 +201,7 @@ pub enum MacroDelimiter {
 ///
 /// Previously these were 14 hardcoded magic integers scattered across
 /// `scope_completions()`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CompletionRelevance {
     pub base: u8,
     pub exact_type_match: bool,
@@ -216,36 +215,134 @@ impl CompletionRelevance {
     // ── Category constructors (one per completion source) ──────────────
 
     const DEFAULT: Self = Self {
-        base: 0, exact_type_match: false, type_name_match: false,
-        is_local: false, is_from_this_crate: false, is_deprecated: false,
+        base: 0,
+        exact_type_match: false,
+        type_name_match: false,
+        is_local: false,
+        is_from_this_crate: false,
+        is_deprecated: false,
     };
 
     /// Construct a relevance with just a base score, for tests.
     pub const fn from_score(base: u8) -> Self {
-        Self { base, ..Self::DEFAULT }
+        Self {
+            base,
+            ..Self::DEFAULT
+        }
     }
 
-    pub const fn keyword() -> Self { Self { base: 50, ..Self::DEFAULT } }
-    pub const fn snippet() -> Self { Self { base: 51, ..Self::DEFAULT } }
-    pub const fn builtin_type() -> Self { Self { base: 40, ..Self::DEFAULT } }
-    pub const fn builtin_type_pos() -> Self { Self { base: 90, ..Self::DEFAULT } }
+    pub const fn keyword() -> Self {
+        Self {
+            base: 50,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn snippet() -> Self {
+        Self {
+            base: 51,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn builtin_type() -> Self {
+        Self {
+            base: 40,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn builtin_type_pos() -> Self {
+        Self {
+            base: 90,
+            ..Self::DEFAULT
+        }
+    }
     pub const fn local(usage: u8) -> Self {
         let extra = if usage > 5 { 5 } else { usage };
-        Self { base: 95 + extra, is_local: true, ..Self::DEFAULT }
+        Self {
+            base: 95 + extra,
+            is_local: true,
+            ..Self::DEFAULT
+        }
     }
-    pub const fn self_keyword() -> Self { Self { base: 96, is_local: true, ..Self::DEFAULT } }
-    pub const fn member() -> Self { Self { base: 90, ..Self::DEFAULT } }
-    pub const fn same_module() -> Self { Self { base: 85, is_from_this_crate: true, ..Self::DEFAULT } }
-    pub const fn cross_module() -> Self { Self { base: 75, ..Self::DEFAULT } }
-    pub const fn postfix() -> Self { Self { base: 85, ..Self::DEFAULT } }
-    pub const fn match_variant() -> Self { Self { base: 93, ..Self::DEFAULT } }
-    pub const fn struct_field() -> Self { Self { base: 93, ..Self::DEFAULT } }
-    pub const fn iflet_variant() -> Self { Self { base: 94, ..Self::DEFAULT } }
-    pub const fn path_member() -> Self { Self { base: 80, ..Self::DEFAULT } }
-    pub const fn path_variant() -> Self { Self { base: 85, ..Self::DEFAULT } }
-    pub const fn builtin_const() -> Self { Self { base: 35, ..Self::DEFAULT } }
-    pub const fn builtin_macro() -> Self { Self { base: 20, ..Self::DEFAULT } }
-    pub const fn arithmetic_num() -> Self { Self { base: 88, ..Self::DEFAULT } }
+    pub const fn self_keyword() -> Self {
+        Self {
+            base: 96,
+            is_local: true,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn member() -> Self {
+        Self {
+            base: 90,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn same_module() -> Self {
+        Self {
+            base: 85,
+            is_from_this_crate: true,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn cross_module() -> Self {
+        Self {
+            base: 75,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn postfix() -> Self {
+        Self {
+            base: 85,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn match_variant() -> Self {
+        Self {
+            base: 93,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn struct_field() -> Self {
+        Self {
+            base: 93,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn iflet_variant() -> Self {
+        Self {
+            base: 94,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn path_member() -> Self {
+        Self {
+            base: 80,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn path_variant() -> Self {
+        Self {
+            base: 85,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn builtin_const() -> Self {
+        Self {
+            base: 35,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn builtin_macro() -> Self {
+        Self {
+            base: 20,
+            ..Self::DEFAULT
+        }
+    }
+    pub const fn arithmetic_num() -> Self {
+        Self {
+            base: 88,
+            ..Self::DEFAULT
+        }
+    }
 
     // ── Modifiers ──────────────────────────────────────────────────────
 
@@ -267,20 +364,32 @@ impl CompletionRelevance {
     /// Resolve all dimensions into a comparable integer score.
     pub fn score(&self) -> u16 {
         let mut s = self.base as u16;
-        if self.exact_type_match { s += 10; }
-        if self.type_name_match { s += 5; }
-        if self.is_local { s += 2; }
-        if self.is_from_this_crate { s += 3; }
-        if self.is_deprecated { s = s.saturating_sub(20); }
+        if self.exact_type_match {
+            s += 10;
+        }
+        if self.type_name_match {
+            s += 5;
+        }
+        if self.is_local {
+            s += 2;
+        }
+        if self.is_from_this_crate {
+            s += 3;
+        }
+        if self.is_deprecated {
+            s = s.saturating_sub(20);
+        }
         s
     }
 
     /// Return a copy with the base score increased by `boost` (saturating at 255).
     pub fn with_boost(self, boost: u16) -> Self {
-        Self { base: self.base.saturating_add(boost as u8), ..self }
+        Self {
+            base: self.base.saturating_add(boost as u8),
+            ..self
+        }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionItem {
@@ -292,6 +401,7 @@ pub struct CompletionItem {
     insert: Option<CompletionInsert>,
     replacement_range: Option<TextRange>,
     target: Option<FileRange>,
+    candidate_ty: Option<crate::hir::Ty>,
     relevance: CompletionRelevance,
     deprecated: bool,
     /// If set, the LSP client should add this import statement.
@@ -309,6 +419,7 @@ impl CompletionItem {
             insert: None,
             replacement_range: None,
             target: None,
+            candidate_ty: None,
             relevance: CompletionRelevance::default(),
             deprecated: false,
             import_path: None,
@@ -342,6 +453,16 @@ impl CompletionItem {
 
     pub const fn with_target(mut self, target: FileRange) -> Self {
         self.target = Some(target);
+        self
+    }
+
+    pub const fn with_optional_target(mut self, target: Option<FileRange>) -> Self {
+        self.target = target;
+        self
+    }
+
+    pub fn with_candidate_ty(mut self, candidate_ty: crate::hir::Ty) -> Self {
+        self.candidate_ty = Some(candidate_ty);
         self
     }
 
@@ -385,6 +506,10 @@ impl CompletionItem {
 
     pub const fn target(&self) -> Option<FileRange> {
         self.target
+    }
+
+    pub fn candidate_ty(&self) -> Option<&crate::hir::Ty> {
+        self.candidate_ty.as_ref()
     }
 
     pub fn relevance(&self) -> u16 {
@@ -643,15 +768,20 @@ impl std::error::Error for RenameError {}
 /// Protocol-neutral item for call hierarchy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallHierarchyItem {
+    pub project_id: ProjectId,
+    pub target: crate::hir::DefId,
     pub name: String,
     pub kind: crate::hir::DefKind,
     pub file_id: crate::vfs::FileId,
     pub range: TextRange,
+    pub call_sites: Vec<FileRange>,
 }
 
 /// Protocol-neutral item for type hierarchy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeHierarchyItem {
+    pub project_id: ProjectId,
+    pub target: crate::hir::DefId,
     pub name: String,
     pub kind: crate::hir::DefKind,
     pub file_id: crate::vfs::FileId,

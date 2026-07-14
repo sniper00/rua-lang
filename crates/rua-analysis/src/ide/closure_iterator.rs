@@ -1,6 +1,6 @@
 //! Protocol-neutral closure and iterator IDE facts, powered by native inference.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rua_syntax::{
     AstNode, Named, SyntaxKind,
@@ -9,7 +9,7 @@ use rua_syntax::{
 
 use crate::{
     BaseDb,
-    hir::{BindingKind, DefKind, Expr, LocalBindingId},
+    hir::{BindingKind, DefMap, Expr, LocalBindingId},
     semantic::Semantics,
     vfs::FileId,
 };
@@ -42,15 +42,18 @@ impl ClosureParameterInfo {
     }
 }
 
-pub(super) fn closure_parameters(db: &Rc<BaseDb>, file_id: FileId) -> Vec<ClosureParameterInfo> {
-    let def_map = db.def_map(file_id);
+pub(super) fn closure_parameters(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    file_id: FileId,
+) -> Vec<ClosureParameterInfo> {
     let mut result = Vec::new();
 
     for definition in def_map.definitions() {
         if definition.file_id() != file_id {
             continue;
         }
-        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
+        if !definition.kind().is_body_owner() {
             continue;
         }
         let Some(body) = db.body(definition.id()) else {
@@ -91,15 +94,18 @@ pub(super) fn closure_parameters(db: &Rc<BaseDb>, file_id: FileId) -> Vec<Closur
     result
 }
 
-pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticToken> {
+pub(super) fn semantic_tokens(
+    db: &Arc<BaseDb>,
+    def_map: std::sync::Arc<DefMap>,
+    file_id: FileId,
+) -> Vec<SemanticToken> {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
     let mut tokens = Vec::new();
 
     // Closure parameter declarations and references — powered by native local
-    // resolution instead of rua_syntax::nameres::references_at.
-    let def_map = db.def_map(file_id);
-    let semantics = Semantics::new(Rc::clone(db), def_map.clone());
+    // resolution instead of scanning identifier text.
+    let semantics = Semantics::new(Arc::clone(db), def_map.clone());
 
     for closure in root.descendants().filter_map(ClosureExpr::cast) {
         for param in closure.params() {
@@ -108,14 +114,11 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
                 let definition_file_range = FileRange::new(file_id, param_range);
                 // Find the matching local binding target by scanning the file's
                 // body data for a binding whose source range matches this parameter.
-                if let Some(target) = find_closure_param_target(
-                    db,
-                    file_id,
-                    definition_file_range,
-                ) {
+                if let Some(target) =
+                    find_closure_param_target(db, &def_map, file_id, definition_file_range)
+                {
                     let include_declaration = true;
-                    let references =
-                        semantics.local_references(target, include_declaration);
+                    let references = semantics.local_references(target, include_declaration);
                     for reference in references {
                         let modifiers = if reference == definition_file_range {
                             SemanticTokenModifiers::DECLARATION
@@ -181,11 +184,8 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
     }
 
     // Emit builtin type tokens with defaultLibrary modifier.
-    const BUILTIN_TYPES: &[SyntaxKind] = &[
-        SyntaxKind::KwTrue,
-        SyntaxKind::KwFalse,
-        SyntaxKind::KwSelf,
-    ];
+    const BUILTIN_TYPES: &[SyntaxKind] =
+        &[SyntaxKind::KwTrue, SyntaxKind::KwFalse, SyntaxKind::KwSelf];
     for token in root.descendants_with_tokens().filter_map(|el| match el {
         rowan::NodeOrToken::Token(tok) if BUILTIN_TYPES.contains(&tok.kind()) => Some(tok),
         _ => None,
@@ -200,10 +200,12 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
 
     // Emit variable/parameter declaration and reference tokens.
     for definition in def_map.definitions() {
-        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
+        if !definition.kind().is_body_owner() {
             continue;
         }
-        let Some(body) = db.body(definition.id()) else { continue };
+        let Some(body) = db.body(definition.id()) else {
+            continue;
+        };
         let Some(source_map) = db.body_source_map(definition.id()) else {
             continue;
         };
@@ -211,7 +213,9 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
             continue;
         };
         for (binding_id, binding) in body.bindings() {
-            let Some(_name) = binding.name() else { continue };
+            let Some(_name) = binding.name() else {
+                continue;
+            };
             if _name.starts_with('_') {
                 continue;
             }
@@ -273,15 +277,15 @@ pub(super) fn semantic_tokens(db: &Rc<BaseDb>, file_id: FileId) -> Vec<SemanticT
 /// range by scanning function bodies in the file.
 fn find_closure_param_target(
     db: &BaseDb,
+    def_map: &DefMap,
     file_id: FileId,
     definition_range: FileRange,
 ) -> Option<LocalBindingId> {
-    let def_map = db.def_map(file_id);
     for definition in def_map.definitions() {
         if definition.file_id() != file_id {
             continue;
         }
-        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
+        if !definition.kind().is_body_owner() {
             continue;
         }
         let body = db.body(definition.id())?;

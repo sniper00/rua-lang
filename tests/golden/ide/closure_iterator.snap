@@ -17,8 +17,8 @@ token: Parameter 85..89 text="item" declaration=false
 token: Number 92..93 text="1" declaration=false
 token: Method 104..109 text="count" declaration=false
 query: item at 85
-completion: item "closure parameter item: i64"
-definition: 79..83 "closure parameter item: i64"
+completion: item Some("item: i64")
+definition: 79..83 Some("let item: i64")
 reference: 79..83 "item"
 reference: 85..89 "item"
 rename: 79..83 "item" -> "element"

@@ -9,6 +9,9 @@ use std::{
     sync::Arc,
 };
 
+pub use rua_core::{FileId, ProjectId, SourceRootId};
+pub use rua_project::SourceRootKind;
+
 /// Logical path within a source root. Construction is lexical and performs no
 /// filesystem access, so virtual and unsaved files follow the same rules.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -51,48 +54,6 @@ impl VfsPath {
 impl<P: AsRef<Path>> From<P> for VfsPath {
     fn from(path: P) -> Self {
         Self::new(path)
-    }
-}
-
-/// Stable identity of a file for the lifetime of an analysis session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FileId(u32);
-
-impl FileId {
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    pub const fn index(self) -> u32 {
-        self.0
-    }
-}
-
-/// Stable identity of a group of files sharing resolution rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SourceRootId(u32);
-
-impl SourceRootId {
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    pub const fn index(self) -> u32 {
-        self.0
-    }
-}
-
-/// Stable identity of a workspace project for the lifetime of an analysis session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectId(u32);
-
-impl ProjectId {
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    pub const fn index(self) -> u32 {
-        self.0
     }
 }
 
@@ -166,20 +127,6 @@ impl ProjectData {
 pub enum FileKind {
     Source,
     Declaration,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceRootKind {
-    Workspace,
-    Library,
-    Std,
-    Virtual,
-}
-
-impl SourceRootKind {
-    pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::Library | Self::Std)
-    }
 }
 
 /// A set of files sharing module resolution and editability rules.
@@ -380,7 +327,15 @@ impl Vfs {
     }
 
     pub fn set_file_text(&mut self, file_id: FileId, text: impl Into<Arc<str>>) {
-        self.file_texts.insert(file_id, text.into());
+        let text = text.into();
+        if self
+            .file_texts
+            .get(&file_id)
+            .is_some_and(|old| old == &text)
+        {
+            return;
+        }
+        self.file_texts.insert(file_id, text);
         self.file_kinds.entry(file_id).or_insert(FileKind::Source);
         self.bump_file_revision(file_id);
     }

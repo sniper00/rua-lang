@@ -1,0 +1,26 @@
+//! Builtin `Result<T, E>` — represents success or failure.
+//!
+//! `Ok(T)` wraps a success value; `Err(E)` wraps an error.
+//! At runtime, both variants use Rua's first-class tagged `Result` value.
+
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    /// Map a `Result<T, E>` to `Result<U, E>` by applying a function to the `Ok` value.
+    pub fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {}
+
+    /// Extract the `Ok` value, panicking if `Err`.
+    pub fn unwrap(self) -> T {}
+
+    /// Extract the `Ok` value, returning `default` if `Err`.
+    pub fn unwrap_or(self, default: T) -> T {}
+
+    /// Returns true if the result is `Ok`.
+    pub fn is_ok(self) -> bool {}
+
+    /// Returns true if the result is `Err`.
+    pub fn is_err(self) -> bool {}
+}

@@ -1,150 +1,28 @@
 //! Unified protocol-neutral diagnostics and compiler-oracle reconciliation.
 
-use std::fmt;
+use std::sync::Arc;
 
 use crate::{
     BaseDb,
     base::{FileRange, TextRange},
-    hir::{DefKind, InferenceDiagnostic, TypeMismatchContext},
-    vfs::FileId,
+    hir::{
+        Body, BodyResolution, BodySourceMap, Condition, DefKind, DefMap, Expr, InferenceDiagnostic,
+        LocalBindingId, LocalResolveResult, LocalUseKind, Statement, TypeMismatchContext,
+    },
+    semantic::ReferenceIndex,
+    vfs::{FileId, FileKind},
+};
+use rua_syntax::{
+    AstNode, Named,
+    ast::{Block as SyntaxBlock, Item as SyntaxItem},
 };
 
-// ---------------------------------------------------------------------------
-// DiagnosticCode — stable numeric identifiers
-// ---------------------------------------------------------------------------
-
-/// Stable analysis-owned diagnostic identifier with structured numeric codes.
-///
-/// Ranges:
-/// - Parse errors:   0001–0099
-/// - Name errors:    0100–0199
-/// - Type errors:    0200–0299
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum DiagnosticCode {
-    // Parse errors (0001–0099)
-    ParseUnexpectedToken = 1,
-    ParseUnterminatedString = 2,
-    ParseUnterminatedComment = 3,
-    ParseExpectedItem = 4,
-    ParseMissingDelimiter = 5,
-
-    // Name resolution errors (0100–0199)
-    NameUnresolved = 100,
-    NameDuplicateDefinition = 101,
-    NamePrivateAccess = 102,
-    NameModuleNotFound = 103,
-    NameAmbiguousImport = 104,
-
-    // Type errors (0200–0299)
-    TypeMismatch = 200,
-    TypeExpectedBool = 201,
-    TypeNotCallable = 202,
-    TypeArgumentCount = 203,
-    TypeNotIterable = 204,
-    TypeInvalidUnary = 205,
-    TypeInvalidBinary = 206,
-    TypeInvalidTry = 207,
-    TypeUnsatisfiedTraitBound = 208,
-    TypeUnknownField = 209,
-    TypeUnknownMethod = 210,
-    TypeMissingMatchArm = 211,
-
-    // Lint warnings (0300–0399)
-    LintUnusedVariable = 300,
-    LintRedundantMut = 301,
-    LintUnreachableCode = 302,
-    LintUnusedFunction = 303,
-    /// Suspicious infinite loop: condition may never change.
-    LintInfiniteLoop = 304,
-}
-
-impl DiagnosticCode {
-    /// Stable string identifier, e.g. `"E0001"`.
-    pub fn error_code(self) -> &'static str {
-        match self {
-            Self::ParseUnexpectedToken => "E0001",
-            Self::ParseUnterminatedString => "E0002",
-            Self::ParseUnterminatedComment => "E0003",
-            Self::ParseExpectedItem => "E0004",
-            Self::ParseMissingDelimiter => "E0005",
-            Self::NameUnresolved => "E0100",
-            Self::NameDuplicateDefinition => "E0101",
-            Self::NamePrivateAccess => "E0102",
-            Self::NameModuleNotFound => "E0103",
-            Self::NameAmbiguousImport => "E0104",
-            Self::TypeMismatch => "E0200",
-            Self::TypeExpectedBool => "E0201",
-            Self::TypeNotCallable => "E0202",
-            Self::TypeArgumentCount => "E0203",
-            Self::TypeNotIterable => "E0204",
-            Self::TypeInvalidUnary => "E0205",
-            Self::TypeInvalidBinary => "E0206",
-            Self::TypeInvalidTry => "E0207",
-            Self::TypeUnsatisfiedTraitBound => "E0208",
-            Self::TypeUnknownField => "E0209",
-            Self::TypeUnknownMethod => "E0210",
-            Self::TypeMissingMatchArm => "E0211",
-            Self::LintUnusedVariable => "W0300",
-            Self::LintRedundantMut => "W0301",
-            Self::LintUnreachableCode => "W0302",
-            Self::LintUnusedFunction => "W0303",
-            Self::LintInfiniteLoop => "W0304",
-        }
-    }
-
-    pub fn severity(self) -> DiagnosticSeverity {
-        match self {
-            Self::LintUnusedVariable
-            | Self::LintRedundantMut
-            | Self::LintUnreachableCode
-            | Self::LintUnusedFunction
-            | Self::LintInfiniteLoop => DiagnosticSeverity::Warning,
-            Self::ParseUnexpectedToken
-            | Self::ParseUnterminatedString
-            | Self::ParseUnterminatedComment
-            | Self::ParseExpectedItem
-            | Self::ParseMissingDelimiter
-            | Self::NameUnresolved
-            | Self::NameDuplicateDefinition
-            | Self::NamePrivateAccess
-            | Self::NameModuleNotFound
-            | Self::NameAmbiguousImport
-            | Self::TypeMismatch
-            | Self::TypeExpectedBool
-            | Self::TypeNotCallable
-            | Self::TypeArgumentCount
-            | Self::TypeNotIterable
-            | Self::TypeInvalidUnary
-            | Self::TypeInvalidBinary
-            | Self::TypeInvalidTry
-            | Self::TypeUnsatisfiedTraitBound
-            | Self::TypeUnknownField
-            | Self::TypeUnknownMethod
-            | Self::TypeMissingMatchArm => DiagnosticSeverity::Error,
-        }
-    }
-}
-
-impl fmt::Display for DiagnosticCode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.error_code())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Supporting types
-// ---------------------------------------------------------------------------
+pub use rua_core::{DiagnosticCode, DiagnosticSeverity};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DiagnosticOrigin {
     FastAnalysis,
     Compiler,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -174,6 +52,7 @@ impl DiagnosticRelated {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DiagnosticSource {
     Parse,
+    Lint,
     Type,
 }
 
@@ -271,111 +150,6 @@ impl Diagnostic {
 }
 
 // ---------------------------------------------------------------------------
-// Infinite loop lint (W0304) — source-based heuristic
-// ---------------------------------------------------------------------------
-
-/// Emit W0304 for suspicious loop patterns detectable from source text:
-///  - `loop { ... }` blocks that contain no `break` statement.
-///  - `while let Pat = var { ... }` where `var` never appears as the
-///    left-hand side of an assignment inside the loop body.
-fn add_infinite_loop_lint(file_id: FileId, text: &str, diagnostics: &mut Vec<Diagnostic>) {
-    // Find `loop {` blocks with no `break`.
-    for (line_idx, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(lp) = trimmed.find("loop {") {
-            // Scan forward from the `loop {` opening brace.
-            let brace_col = lp + "loop ".len();
-            let block_start = line_offset(text, line_idx) + brace_col;
-            if !scan_block_from(text, block_start, "break") {
-                let offset = line_offset(text, line_idx) + lp;
-                diagnostics.push(
-                    fast_diag(
-                        file_id,
-                        TextRange::new(offset as u32, (offset + 4) as u32),
-                        "`loop` without `break` may run forever",
-                    )
-                    .with_code(DiagnosticCode::LintInfiniteLoop),
-                );
-                return;
-            }
-        }
-    }
-
-    // Find `while let Pat = var` where var is never assigned in the body.
-    for (line_idx, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(wl) = trimmed.find("while let ") {
-            let rest = &trimmed[wl + "while let ".len()..];
-            if let Some(eq_pos) = rest.find('=') {
-                let rhs = rest[eq_pos + 1..].trim();
-                let scrutinee = rhs.strip_prefix("mut ").unwrap_or(rhs)
-                    .split([' ', '{'])
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if !scrutinee.is_empty() {
-                    let brace_off = rest[eq_pos..].find('{').map(|p| eq_pos + p);
-                    if let Some(bp) = brace_off {
-                        let block_start = line_offset(text, line_idx) + wl + bp;
-                        if !scan_block_from(text, block_start, scrutinee) {
-                            let offset = line_offset(text, line_idx) + wl;
-                            diagnostics.push(
-                                fast_diag(
-                                    file_id,
-                                    TextRange::new(offset as u32, (offset + 9) as u32),
-                                    format!(
-                                        "`while let` loop: `{scrutinee}` is never updated in the body, loop may run forever"
-                                    ),
-                                )
-                                .with_code(DiagnosticCode::LintInfiniteLoop),
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Scan from byte offset `open_brace` (pointing at `{`) through balanced
-/// braces looking for `needle` as a standalone word. Returns true if found
-/// before the matching `}`.
-fn scan_block_from(text: &str, open_brace: usize, needle: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut depth = 0u32;
-    let mut block_start = open_brace;
-    let mut i = open_brace;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => {
-                if depth == 0 { block_start = i; }
-                depth += 1;
-            }
-            b'}' => {
-                if depth == 0 { return false; }
-                depth -= 1;
-                if depth == 0 {
-                    // Check the block body between `{` and `}`.
-                    let body = &text[block_start + 1..i];
-                    return body.lines().any(|line| {
-                        rua_syntax::text::word_boundary_find(line.trim(), needle).is_some()
-                    });
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Byte offset of line N in source text.
-fn line_offset(text: &str, target: usize) -> usize {
-    text.lines().take(target).map(|l| l.len() + 1).sum()
-}
-
-// ---------------------------------------------------------------------------
 // Normalization and suppression
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
@@ -402,9 +176,7 @@ pub fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
             ))
     });
     diagnostics.dedup_by(|left, right| {
-        left.range == right.range
-            && left.code == right.code
-            && left.source == right.source
+        left.range == right.range && left.code == right.code && left.source == right.source
     });
 }
 
@@ -442,7 +214,9 @@ pub fn suppress_cascade(diagnostics: &mut Vec<Diagnostic>, text: &str) {
         if d.source == DiagnosticSource::Parse {
             return true;
         }
-        !parse_error_lines.iter().any(|&line| line == line_of(d.range.range.start()))
+        !parse_error_lines
+            .iter()
+            .any(|&line| line == line_of(d.range.range.start()))
     });
 }
 
@@ -457,10 +231,20 @@ fn fast_diag(
     range: impl Into<TextRange>,
     message: impl Into<String>,
 ) -> Diagnostic {
-    Diagnostic::new(file_id, range.into(), message, DiagnosticOrigin::FastAnalysis)
+    Diagnostic::new(
+        file_id,
+        range.into(),
+        message,
+        DiagnosticOrigin::FastAnalysis,
+    )
+    .with_source(DiagnosticSource::Lint)
 }
 
-pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> {
+pub(crate) fn fast_diagnostics(
+    db: &Arc<BaseDb>,
+    def_map: Arc<DefMap>,
+    file_id: FileId,
+) -> Vec<Diagnostic> {
     let Some(text) = db.file_text(file_id) else {
         return Vec::new();
     };
@@ -475,32 +259,33 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                 TextRange::new(offset, offset),
                 format!("parse error: {}", error.message),
             )
-            .with_code(parse_error_code(&error.message))
+            .with_code(error.code)
             .with_source(DiagnosticSource::Parse)
         })
         .collect();
 
     let mut diagnostics = parse_diagnostics;
+    if db.file_kind(file_id) == Some(FileKind::Declaration) {
+        diagnostics.extend(declaration_file_diagnostics(db, file_id));
+    }
 
     // Type diagnostics from inference.
-    let def_map = db.def_map(file_id);
     for definition in def_map.definitions() {
         if definition.file_id() != file_id {
             continue;
         }
-        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
+        if !definition.kind().is_body_owner() {
             continue;
         }
         if let Some(source_map) = db.body_source_map(definition.id())
-            && let Some(inference) = db.infer(definition.id()) {
-                for inf_diag in inference.diagnostics() {
-                    if let Some(diag) =
-                        convert_inference_diagnostic(file_id, inf_diag, &source_map)
-                    {
-                        diagnostics.push(diag);
-                    }
+            && let Some(inference) = db.infer(definition.id())
+        {
+            for inf_diag in inference.diagnostics() {
+                if let Some(diag) = convert_inference_diagnostic(file_id, inf_diag, &source_map) {
+                    diagnostics.push(diag);
                 }
             }
+        }
 
         // Lint: unused variables and redundant-mut.
         if let Some(body) = db.body(definition.id())
@@ -525,17 +310,11 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                             if lid.binding() == binding_id
                     )
                 });
-                if !is_used
-                    && let Some(fr) = source_map.binding_range(binding_id)
-                {
+                if !is_used && let Some(fr) = source_map.binding_range(binding_id) {
                     let name = binding.name().unwrap_or("?");
                     diagnostics.push(
-                        fast_diag(
-                            file_id,
-                            fr.range,
-                            format!("unused variable `{name}`"),
-                        )
-                        .with_code(DiagnosticCode::LintUnusedVariable),
+                        fast_diag(file_id, fr.range, format!("unused variable `{name}`"))
+                            .with_code(DiagnosticCode::LintUnusedVariable),
                     );
                 }
             }
@@ -589,17 +368,13 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                         body.exprs().any(|(_eid, expr)| {
                             let (receiver, method) = match expr {
                                 crate::hir::Expr::MethodCall {
-                                    receiver,
-                                    method,
-                                    ..
+                                    receiver, method, ..
                                 } => (*receiver, *method),
                                 _ => return false,
                             };
                             // Check that the receiver path resolves to our binding.
                             let receiver_path = match body.expr(receiver) {
-                                Some(crate::hir::Expr::Path(path)) if path.len() == 1 => {
-                                    path[0]
-                                }
+                                Some(crate::hir::Expr::Path(path)) if path.len() == 1 => path[0],
                                 _ => return false,
                             };
                             if !matches!(
@@ -610,9 +385,7 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                                 return false;
                             }
                             // Resolve the method to see if it takes &mut self.
-                            let Some(receiver_ty) =
-                                inference.type_of_expr(receiver)
-                            else {
+                            let Some(receiver_ty) = inference.type_of_expr(receiver) else {
                                 return false;
                             };
                             let Some(ref_info) = body.name_ref(method) else {
@@ -622,18 +395,15 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                                 return false;
                             };
                             let member_index = db.member_index(file_id);
-                            let Some(method_res) = member_index
-                                .resolve_method(receiver_ty, method_name)
+                            let Some(method_res) =
+                                member_index.resolve_method(receiver_ty, method_name)
                             else {
                                 return false;
                             };
-                            method_res.receiver()
-                                == Some(crate::hir::ReceiverKind::MutRef)
+                            method_res.receiver() == Some(crate::hir::ReceiverKind::MutRef)
                         })
                     }));
-                if !has_mut_method_call
-                    && let Some(fr) = source_map.binding_range(binding_id)
-                {
+                if !has_mut_method_call && let Some(fr) = source_map.binding_range(binding_id) {
                     diagnostics.push(
                         fast_diag(
                             file_id,
@@ -647,43 +417,30 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                     );
                 }
             }
+
+            add_control_flow_lints(file_id, &body, &source_map, &resolution, &mut diagnostics);
         }
     }
 
-    // Cross-file lint: unused functions. Skip if there's only one function
-    // in the project (likely a test/entry point).
-    let total_defs = def_map
-        .definitions()
-        .filter(|d| matches!(d.kind(), DefKind::Function | DefKind::Method))
-        .count();
-    if total_defs > 1 {
-        for definition in def_map.definitions() {
+    let reference_index =
+        ReferenceIndex::build_cancellable(Arc::clone(db), Arc::clone(&def_map), &mut || false)
+            .unwrap_or_default();
+
+    // Cross-file lint: unused private functions. A recursive call is owned by
+    // the function itself and therefore does not make that function reachable.
+    for definition in def_map.definitions() {
         if definition.kind() != DefKind::Function {
             continue;
         }
-        if matches!(
-            definition.visibility(),
-            crate::hir::Visibility::Public
-        ) || definition.name() == "main" {
+        if matches!(definition.visibility(), crate::hir::Visibility::Public) {
             continue;
         }
-        // Check if any other body references this function by name.
-        // TODO: use DefMap-based cross-file resolution instead of string
-        // matching.  Currently a local variable that shadows the function
-        // name in another body will incorrectly suppress the warning
-        // (false negative).  Requires per-file DefMap name-resolution
-        // queries on each NameRef to distinguish function references from
-        // same-named locals.
         let name = definition.name();
-        let is_referenced = def_map.definitions().any(|d| {
-            if !matches!(d.kind(), DefKind::Function | DefKind::Method) {
-                return false;
-            }
-            let Some(body) = db.body(d.id()) else { return false };
-            body.name_refs()
-                .any(|(_nrid, nr)| nr.name() == Some(name))
-        });
-        if !is_referenced {
+        let is_used = reference_index
+            .occurrences(definition.id())
+            .iter()
+            .any(|occurrence| occurrence.owner() != definition.id());
+        if !is_used {
             diagnostics.push(
                 fast_diag(
                     definition.file_id(),
@@ -693,61 +450,250 @@ pub(crate) fn fast_diagnostics(db: &BaseDb, file_id: FileId) -> Vec<Diagnostic> 
                 .with_code(DiagnosticCode::LintUnusedFunction),
             );
         }
-        }
-    }
-
-    // Per-file lint: unreachable code after return/break/continue.
-    if let Some(ref text) = db.file_text(file_id) {
-        for (line_idx, line) in text.lines().enumerate() {
-            let trimmed = line.trim();
-            for keyword in &["return", "break", "continue"] {
-                // Find the keyword as a standalone word (not inside an
-                // identifier like `return_value` or a string literal).
-                let pos = match rua_syntax::text::word_boundary_find(trimmed, keyword) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let after = trimmed[pos + keyword.len()..].trim();
-                if let Some(semi_pos) = after.find(';') {
-                    let rest = after[semi_pos + 1..].trim();
-                    if !rest.is_empty() && !rest.starts_with("//") {
-                        let line_offset = text
-                            .lines()
-                            .take(line_idx)
-                            .map(|l| l.len() + 1)
-                            .sum::<usize>();
-                        let byte_offset =
-                            line_offset + pos + keyword.len() + after[..semi_pos].len();
-                        let end_offset = byte_offset
-                            + 1
-                            + rest.len()
-                            + (line.len() - trimmed.len());
-                        diagnostics.push(
-                            fast_diag(
-                                file_id,
-                                TextRange::new(
-                                    byte_offset as u32,
-                                    end_offset.min(text.len()) as u32,
-                                ),
-                                format!("unreachable code after `{keyword}`"),
-                            )
-                            .with_code(DiagnosticCode::LintUnreachableCode),
-                        );
-                    }
-                    break; // one diag per line
-                }
-            }
-        }
-    }
-
-    // Per-file lint: suspicious infinite loops (W0304).
-    if let Some(ref text) = db.file_text(file_id) {
-        add_infinite_loop_lint(file_id, text, &mut diagnostics);
     }
 
     normalize_diagnostics(&mut diagnostics);
     suppress_cascade(&mut diagnostics, &text);
     diagnostics
+}
+
+fn declaration_file_diagnostics(db: &Arc<BaseDb>, file_id: FileId) -> Vec<Diagnostic> {
+    let parsed = db.parse(file_id);
+    let tree = &parsed.tree;
+    let mut diagnostics = Vec::new();
+    if let Some(statement) = tree.stmts().next() {
+        diagnostics.push(invalid_declaration_diag(
+            file_id,
+            syntax_node_range(statement.syntax()),
+            "declaration files cannot contain top-level executable statements",
+        ));
+    }
+    collect_declaration_item_diagnostics(file_id, tree.items(), &mut diagnostics);
+    diagnostics
+}
+
+fn collect_declaration_item_diagnostics(
+    file_id: FileId,
+    items: impl Iterator<Item = SyntaxItem>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for item in items {
+        match item {
+            SyntaxItem::Fn(function) => {
+                if function.body().is_some_and(syntax_block_has_body) {
+                    diagnostics.push(invalid_declaration_diag(
+                        file_id,
+                        named_range(&function),
+                        format!(
+                            "function `{}` in a declaration file must have an empty body",
+                            function.name().map_or_else(
+                                || "<missing>".to_string(),
+                                |name| name.text().to_string(),
+                            )
+                        ),
+                    ));
+                }
+            }
+            SyntaxItem::Impl(implementation) => {
+                for method in implementation.methods() {
+                    if method.body().is_some_and(syntax_block_has_body) {
+                        diagnostics.push(invalid_declaration_diag(
+                            file_id,
+                            named_range(&method),
+                            format!(
+                                "method `{}` in a declaration file must have an empty body",
+                                method.name().map_or_else(
+                                    || "<missing>".to_string(),
+                                    |name| name.text().to_string(),
+                                )
+                            ),
+                        ));
+                    }
+                }
+            }
+            SyntaxItem::Trait(trait_decl) => {
+                for method in trait_decl.methods() {
+                    if method.default_body().is_some_and(syntax_block_has_body) {
+                        diagnostics.push(invalid_declaration_diag(
+                            file_id,
+                            named_range(&method),
+                            format!(
+                                "trait method `{}` in a declaration file must have an empty body",
+                                method.name().map_or_else(
+                                    || "<missing>".to_string(),
+                                    |name| name.text().to_string(),
+                                )
+                            ),
+                        ));
+                    }
+                }
+            }
+            SyntaxItem::Mod(module) if !module.is_file() => {
+                if let Some(statement) = module.stmts().next() {
+                    diagnostics.push(invalid_declaration_diag(
+                        file_id,
+                        syntax_node_range(statement.syntax()),
+                        format!(
+                            "module `{}` in a declaration file cannot contain executable statements",
+                            module.name().map_or_else(
+                                || "<missing>".to_string(),
+                                |name| name.text().to_string(),
+                            )
+                        ),
+                    ));
+                }
+                collect_declaration_item_diagnostics(file_id, module.items(), diagnostics);
+            }
+            SyntaxItem::Struct(_)
+            | SyntaxItem::Enum(_)
+            | SyntaxItem::Extern(_)
+            | SyntaxItem::Mod(_)
+            | SyntaxItem::Use(_) => {}
+        }
+    }
+}
+
+fn syntax_block_has_body(block: SyntaxBlock) -> bool {
+    block.stmts().next().is_some()
+}
+
+fn named_range(item: &impl Named) -> TextRange {
+    item.name()
+        .map(|name| rowan_range(name.text_range()))
+        .unwrap_or_else(|| syntax_node_range(item.syntax()))
+}
+
+fn syntax_node_range(node: &rua_syntax::SyntaxNode) -> TextRange {
+    rowan_range(node.text_range())
+}
+
+fn rowan_range(range: rowan::TextRange) -> TextRange {
+    TextRange::new(range.start().into(), range.end().into())
+}
+
+fn invalid_declaration_diag(
+    file_id: FileId,
+    range: TextRange,
+    message: impl Into<String>,
+) -> Diagnostic {
+    fast_diag(file_id, range, message)
+        .with_code(DiagnosticCode::NameInvalidDeclaration)
+        .with_source(DiagnosticSource::Parse)
+}
+
+fn add_control_flow_lints(
+    file_id: FileId,
+    body: &Body,
+    source_map: &BodySourceMap,
+    resolution: &BodyResolution,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let cfg = crate::hir::ControlFlowGraph::build(body);
+    let mut unreachable = cfg
+        .unreachable_statements()
+        .filter_map(|statement_id| {
+            let statement = statement_by_id(body, statement_id)?;
+            Some((statement_range(statement, source_map)?, statement_id))
+        })
+        .collect::<Vec<_>>();
+    unreachable.sort_by_key(|(range, _)| (range.start(), range.end()));
+    for (range, _) in unreachable {
+        diagnostics.push(
+            fast_diag(file_id, range, "unreachable code")
+                .with_code(DiagnosticCode::LintUnreachableCode),
+        );
+    }
+
+    for (_, loop_body) in cfg.infinite_loops() {
+        if let Some(range) = source_map.expr_range(loop_body) {
+            diagnostics.push(
+                fast_diag(
+                    file_id,
+                    range.range,
+                    "`loop` without an exit may run forever",
+                )
+                .with_code(DiagnosticCode::LintInfiniteLoop),
+            );
+        }
+    }
+
+    for (_, expression) in body.exprs() {
+        let Expr::Block(block) = expression else {
+            continue;
+        };
+        for statement in block.statements() {
+            let Statement::While {
+                condition: Condition::Let { scrutinee, .. },
+                body: loop_body,
+            } = statement
+            else {
+                continue;
+            };
+            let Some(binding) = local_binding_for_expr(body, resolution, *scrutinee) else {
+                continue;
+            };
+            let Some(loop_range) = source_map.expr_range(*loop_body) else {
+                continue;
+            };
+            let updated = resolution.uses_for(binding).any(|local_use| {
+                local_use.kind() == LocalUseKind::Write
+                    && source_map
+                        .name_ref_range(local_use.name_ref())
+                        .is_some_and(|range| {
+                            range.file_id == loop_range.file_id
+                                && loop_range.range.contains_range(range.range)
+                        })
+            });
+            if !updated && let Some(range) = source_map.expr_range(*scrutinee) {
+                diagnostics.push(
+                    fast_diag(
+                        file_id,
+                        range.range,
+                        "`while let` scrutinee is never updated in the loop body",
+                    )
+                    .with_code(DiagnosticCode::LintInfiniteLoop),
+                );
+            }
+        }
+    }
+}
+
+fn statement_by_id(body: &Body, statement: crate::hir::StatementId) -> Option<&Statement> {
+    let Expr::Block(block) = body.expr(statement.block())? else {
+        return None;
+    };
+    block.statements().get(statement.index())
+}
+
+fn local_binding_for_expr(
+    body: &Body,
+    resolution: &BodyResolution,
+    expression: crate::hir::ExprId,
+) -> Option<LocalBindingId> {
+    let Expr::Path(path) = body.expr(expression)? else {
+        return None;
+    };
+    let name_ref = path.last().copied()?;
+    match resolution.resolve(name_ref)? {
+        LocalResolveResult::Resolved(binding) => Some(binding),
+        LocalResolveResult::Ambiguous | LocalResolveResult::NonLocal => None,
+    }
+}
+
+fn statement_range(statement: &Statement, source_map: &BodySourceMap) -> Option<TextRange> {
+    let range = match statement {
+        Statement::Let { binding, .. } | Statement::For { binding, .. } => {
+            source_map.binding_range(*binding)?
+        }
+        Statement::Expr { expr, .. } => source_map.expr_range(*expr)?,
+        Statement::Return { value: Some(expr) } => source_map.expr_range(*expr)?,
+        Statement::While { body, .. } | Statement::Loop { body } => source_map.expr_range(*body)?,
+        Statement::Return { value: None }
+        | Statement::Missing
+        | Statement::Break
+        | Statement::Continue => return None,
+    };
+    Some(range.range)
 }
 
 fn convert_inference_diagnostic(
@@ -842,6 +788,18 @@ fn convert_inference_diagnostic(
                 range,
             )
         }
+        InferenceDiagnostic::ImmutableAssignment {
+            target,
+            binding: _,
+            name,
+        } => {
+            let range = expr_range(*target, source_map)?;
+            (
+                DiagnosticCode::TypeImmutableAssignment,
+                format!("cannot assign to immutable binding `{name}`"),
+                range,
+            )
+        }
     };
     Some(
         fast_diag(file_id, range, message)
@@ -857,12 +815,10 @@ fn inference_source_range(
 ) -> Option<TextRange> {
     match source {
         crate::hir::InferenceSource::Expr(expr) => expr_range(expr, source_map),
-        crate::hir::InferenceSource::Binding(binding) => source_map
-            .binding_range(binding)
-            .map(|fr| fr.range),
-        crate::hir::InferenceSource::Pattern(pat) => {
-            source_map.pat_range(pat).map(|fr| fr.range)
+        crate::hir::InferenceSource::Binding(binding) => {
+            source_map.binding_range(binding).map(|fr| fr.range)
         }
+        crate::hir::InferenceSource::Pattern(pat) => source_map.pat_range(pat).map(|fr| fr.range),
     }
 }
 
@@ -885,21 +841,6 @@ fn mismatch_context_label(context: TypeMismatchContext) -> std::borrow::Cow<'sta
         TypeMismatchContext::Branch => " in branch".into(),
         TypeMismatchContext::RangeBound => " in range bound".into(),
         TypeMismatchContext::Index => " in index".into(),
-    }
-}
-
-
-fn parse_error_code(message: &str) -> DiagnosticCode {
-    if message.contains("unterminated") && message.contains("comment") {
-        DiagnosticCode::ParseUnterminatedComment
-    } else if message.contains("unterminated") {
-        DiagnosticCode::ParseUnterminatedString
-    } else if message.contains("missing") || message.contains("unclosed") {
-        DiagnosticCode::ParseMissingDelimiter
-    } else if message.contains("expected") {
-        DiagnosticCode::ParseExpectedItem
-    } else {
-        DiagnosticCode::ParseUnexpectedToken
     }
 }
 

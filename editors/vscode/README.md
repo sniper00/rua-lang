@@ -42,6 +42,7 @@ If `rua-lsp` is on your `PATH`, the default (`rua-lsp`) just works.
 cd editors/vscode
 npm install
 npm run compile      # or: npm run watch
+npm run test-extension
 ```
 
 Press **F5** ("Run Rua Extension") to launch an Extension Development Host, then
@@ -60,6 +61,11 @@ npm run package      # produces rua-lang-<version>.vsix
 | `rua.server.path` | `rua-lsp` | Path to the server (absolute, `${workspaceFolder}`-relative, or on PATH). |
 | `rua.server.args` | `[]` | Extra args passed to the server. |
 | `rua.trace.server` | `off` | Trace JSON-RPC traffic (`off`/`messages`/`verbose`). |
+| `rua.library` | `[]` | Additional `.ruai` files or directories. |
+| `rua.libraryMounts` | `{}` | Logical module name to `.ruai` file/directory mapping. |
+| `rua.sysroot` | empty | Optional Rua sysroot path. |
+
+`rua.library`, `rua.libraryMounts`, and `rua.sysroot` are resource-scoped, so each workspace folder can provide independent values. `${workspaceFolder}` is expanded against that folder before initialization and dynamic configuration notifications. One client serves all workspace folders. Restart waits for the server child process `close` event before disposing its output channel and watcher; the Extension Host test covers initial settings, live changes, restart disposal, and a two-root workspace.
 
 ## Commands
 

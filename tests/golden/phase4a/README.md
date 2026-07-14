@@ -10,5 +10,5 @@ cover inference, capture, escape, source, predicate, argument, and collect
 boundaries. Iterator pass cases also assert one fused loop, no coroutine or
 legacy iterator calls, and no per-item Lua closure.
 
-The accepted behavior and unsupported boundary are defined in
-`docs/rua-closure-iterator-rfc.md`.
+The current language contract is defined in
+[`docs/rua-design.md`](../../../docs/rua-design.md).

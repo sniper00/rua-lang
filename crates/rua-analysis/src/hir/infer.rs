@@ -1,11 +1,13 @@
 //! Native, error-tolerant type inference over lowered bodies.
 
+use rua_core::{BuiltinId, BuiltinMacroLowering, builtin_macro, builtin_type, builtin_value};
+
 use super::{
     BinaryOp, BindingId, BindingKind, Body, BodyId, BodyResolution, CallableRequirement,
     CallableSignature, CallableTy, Condition, DefId, DefKind, DefMap, Definition, Expr, ExprId,
     ItemSignature, LiteralKind, LocalResolveResult, MatchArm, MemberIndex, MemberKind,
-    MemberResolution, MemberTarget, NameRefId, Pat, PatId, ResolveStrategy, Statement,
-    StructField, Substitution, Ty, TypeRef, UnaryOp, unify,
+    MemberResolution, MemberTarget, NameRefId, Pat, PatId, ResolveStrategy, Statement, StructField,
+    Substitution, Ty, TypeRef, UnaryOp, unify,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,6 +73,11 @@ pub enum InferenceDiagnostic {
         call: ExprId,
         actual: Ty,
         trait_id: DefId,
+    },
+    ImmutableAssignment {
+        target: ExprId,
+        binding: BindingId,
+        name: String,
     },
 }
 
@@ -327,11 +334,12 @@ impl<'a> InferenceContext<'a> {
                 let inferred = self.infer_path(&path, expected);
                 if inferred.is_unknown()
                     && matches!(expected, Some(Ty::Option(_)))
-                    && path_display(self.body, &path) == "None"
+                    && builtin_constructor_id(self.body, &path)
+                        == Some(BuiltinId::VariantOptionNone)
                     && self.is_unshadowed_path(&path)
                 {
                     let ty = expected.cloned().unwrap_or(Ty::Unknown);
-                    self.record_builtin_associated(&path, "None", &ty);
+                    self.record_builtin_associated(&path, BuiltinId::VariantOptionNone, &ty);
                     ty
                 } else {
                     inferred
@@ -570,9 +578,8 @@ impl<'a> InferenceContext<'a> {
             }
             Pat::TupleVariant { path, subpatterns } => {
                 let narrowed = self.resolve_variant_payload(path, expected);
-                let narrowed_fields = narrowed.unwrap_or_else(|| {
-                    vec![Ty::Unknown; subpatterns.len()]
-                });
+                let narrowed_fields =
+                    narrowed.unwrap_or_else(|| vec![Ty::Unknown; subpatterns.len()]);
                 for (index, subpattern) in subpatterns.iter().enumerate() {
                     let field_ty = narrowed_fields.get(index).cloned().unwrap_or(Ty::Unknown);
                     self.infer_pattern_with_narrow(*subpattern, &field_ty);
@@ -635,9 +642,9 @@ impl<'a> InferenceContext<'a> {
             }
             Ty::Named(payload_named) => {
                 let mut field_types = Vec::new();
-                let candidates =
-                    self.member_index
-                        .field_candidates(&Ty::Named(payload_named.clone()));
+                let candidates = self
+                    .member_index
+                    .field_candidates(&Ty::Named(payload_named.clone()));
                 for candidate in candidates {
                     if candidate.kind() == MemberKind::Field {
                         field_types.push(candidate.ty().clone());
@@ -720,13 +727,12 @@ impl<'a> InferenceContext<'a> {
                     return lhs_ty.join(&rhs_ty);
                 }
                 if is_incompatible_arithmetic(&lhs_ty, &rhs_ty, op) {
-                    self.diagnostics
-                        .push(InferenceDiagnostic::InvalidBinary {
-                            expr: expr_id,
-                            lhs: lhs_ty.clone(),
-                            rhs: rhs_ty.clone(),
-                            op,
-                        });
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: lhs_ty.clone(),
+                        rhs: rhs_ty.clone(),
+                        op,
+                    });
                 }
                 Ty::Unknown
             }
@@ -747,13 +753,12 @@ impl<'a> InferenceContext<'a> {
                     || rhs_ty.is_never()
                     || (lhs_ty.is_numeric() && rhs_ty.is_numeric()))
                 {
-                    self.diagnostics
-                        .push(InferenceDiagnostic::InvalidBinary {
-                            expr: expr_id,
-                            lhs: lhs_ty.clone(),
-                            rhs: rhs_ty.clone(),
-                            op,
-                        });
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: lhs_ty.clone(),
+                        rhs: rhs_ty.clone(),
+                        op,
+                    });
                 }
                 Ty::BOOL
             }
@@ -777,6 +782,17 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn infer_assign_expr(&mut self, target: ExprId, value: ExprId) -> Ty {
+        if let Some(binding_id) = self.assigned_local_binding(target)
+            && let Some(binding) = self.body.binding(binding_id)
+            && !binding.is_mutable()
+        {
+            self.diagnostics
+                .push(InferenceDiagnostic::ImmutableAssignment {
+                    target,
+                    binding: binding_id,
+                    name: binding.name().unwrap_or("<missing>").to_string(),
+                });
+        }
         let target_ty = self.infer_expr(target, None);
         let value_ty = self.infer_expr(value, Some(&target_ty));
         self.report_mismatch(
@@ -789,6 +805,23 @@ impl<'a> InferenceContext<'a> {
             Ty::Never
         } else {
             Ty::UNIT
+        }
+    }
+
+    fn assigned_local_binding(&self, target: ExprId) -> Option<BindingId> {
+        let mut current = target;
+        loop {
+            match self.body.expr(current)? {
+                Expr::Field { base, .. } | Expr::Index { base, .. } => current = *base,
+                Expr::Path(path) if path.len() == 1 => {
+                    let LocalResolveResult::Resolved(local) = self.resolution.resolve(path[0])?
+                    else {
+                        return None;
+                    };
+                    return Some(local.binding());
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -984,14 +1017,15 @@ impl<'a> InferenceContext<'a> {
         let explicit_return = self.closure_returns.pop().unwrap_or(Ty::Never);
         self.return_ty = outer_return;
         if let Some(expected_return) = expected_return.as_ref()
-            && !actual_return.is_never() {
-                self.report_mismatch(
-                    InferenceSource::Expr(body),
-                    expected_return,
-                    &actual_return,
-                    TypeMismatchContext::ClosureReturn,
-                );
-            }
+            && !actual_return.is_never()
+        {
+            self.report_mismatch(
+                InferenceSource::Expr(body),
+                expected_return,
+                &actual_return,
+                TypeMismatchContext::ClosureReturn,
+            );
+        }
         let inferred_return = explicit_return.join(&actual_return);
         // Prefer the inferred return type when the expected type is Unknown.
         let proclaimed_return = match expected_return {
@@ -1146,24 +1180,22 @@ impl<'a> InferenceContext<'a> {
         else {
             return self.infer_unresolved_member_call(call, args);
         };
-        let resolution =
-            self.member_index
-                .resolve_method_in(&receiver_ty, name, self.owner.id());
+        let resolution = self
+            .member_index
+            .resolve_method_in(&receiver_ty, name, self.owner.id());
         let Some(resolution) = resolution else {
             // Fallback: Vec -> Iterator conversion methods.
             if let Ty::Vec(item) = &receiver_ty
-                && let Some(result) =
-                    self.infer_vec_to_iterator(call, item, name, args)
-                {
-                    return result;
-                }
+                && let Some(result) = self.infer_vec_to_iterator(call, item, name, args)
+            {
+                return result;
+            }
             // Fallback: iterator adapter methods not yet in the member index.
             if let Ty::Iterator(item) = &receiver_ty
-                && let Some(result) =
-                    self.infer_iterator_adapter(call, item, name, args, expected)
-                {
-                    return result;
-                }
+                && let Some(result) = self.infer_iterator_adapter(call, item, name, args, expected)
+            {
+                return result;
+            }
             return self.infer_unresolved_member_call(call, args);
         };
         let Ty::Function(callable) = resolution.ty() else {
@@ -1247,43 +1279,37 @@ impl<'a> InferenceContext<'a> {
             }
             "any" | "all" => {
                 if let [predicate] = args {
-                    let pred_closure_ty = Ty::Closure(CallableTy::new(
-                        vec![item.clone()],
-                        Ty::BOOL,
-                    ));
+                    let pred_closure_ty =
+                        Ty::Closure(CallableTy::new(vec![item.clone()], Ty::BOOL));
                     self.infer_expr(*predicate, Some(&pred_closure_ty));
                 }
                 Ty::BOOL
             }
             "find" => {
                 if let [predicate] = args {
-                    let pred_closure_ty = Ty::Closure(CallableTy::new(
-                        vec![item.clone()],
-                        Ty::BOOL,
-                    ));
+                    let pred_closure_ty =
+                        Ty::Closure(CallableTy::new(vec![item.clone()], Ty::BOOL));
                     self.infer_expr(*predicate, Some(&pred_closure_ty));
                 }
                 Ty::Option(Box::new(item.clone()))
             }
-            "fold" => {
-                match args {
-                    [init, closure] => {
-                        let init_ty = self.infer_expr(*init, None);
-                        let fold_closure_ty = Ty::Closure(CallableTy::new(
-                            vec![init_ty.clone(), item.clone()],
-                            init_ty.clone(),
-                        ));
-                        self.infer_expr(*closure, Some(&fold_closure_ty));
-                        init_ty
-                    }
-                    _ => {
-                        for arg in args {
-                            self.infer_expr(*arg, None);
-                        }
-                        return Some(Ty::Unknown);
-                    }
+            "fold" => match args {
+                [init, closure] => {
+                    let init_ty = self.infer_expr(*init, None);
+                    let fold_closure_ty = Ty::Closure(CallableTy::new(
+                        vec![init_ty.clone(), item.clone()],
+                        init_ty.clone(),
+                    ));
+                    self.infer_expr(*closure, Some(&fold_closure_ty));
+                    init_ty
                 }
-            }
+                _ => {
+                    for arg in args {
+                        self.infer_expr(*arg, None);
+                    }
+                    return Some(Ty::Unknown);
+                }
+            },
             // Collectors / terminal adapters.
             "collect" => {
                 for arg in args {
@@ -1296,7 +1322,11 @@ impl<'a> InferenceContext<'a> {
                 if let [arg] = args {
                     let pred_closure_ty = Ty::Closure(CallableTy::new(
                         vec![item.clone()],
-                        if method_name == "filter" { Ty::BOOL } else { Ty::Unknown },
+                        if method_name == "filter" {
+                            Ty::BOOL
+                        } else {
+                            Ty::Unknown
+                        },
                     ));
                     self.infer_expr(*arg, Some(&pred_closure_ty));
                 }
@@ -1306,10 +1336,8 @@ impl<'a> InferenceContext<'a> {
             "map" => {
                 if let [closure] = args {
                     // Infer the closure with expected type: |T| -> ?
-                    let map_closure_ty = Ty::Closure(CallableTy::new(
-                        vec![item.clone()],
-                        Ty::Unknown,
-                    ));
+                    let map_closure_ty =
+                        Ty::Closure(CallableTy::new(vec![item.clone()], Ty::Unknown));
                     let closure_ty = self.infer_expr(*closure, Some(&map_closure_ty));
                     // Extract the closure's return type as the new item type.
                     let new_item = match &closure_ty {
@@ -1326,10 +1354,8 @@ impl<'a> InferenceContext<'a> {
             // filter_map: extract Option<U>'s U as new item type.
             "filter_map" => {
                 if let [closure] = args {
-                    let map_closure_ty = Ty::Closure(CallableTy::new(
-                        vec![item.clone()],
-                        Ty::Unknown,
-                    ));
+                    let map_closure_ty =
+                        Ty::Closure(CallableTy::new(vec![item.clone()], Ty::Unknown));
                     let closure_ty = self.infer_expr(*closure, Some(&map_closure_ty));
                     let new_item = match &closure_ty {
                         Ty::Closure(callable) | Ty::Function(callable) => {
@@ -1575,10 +1601,12 @@ impl<'a> InferenceContext<'a> {
             return None;
         }
 
-        let name = path_display(self.body, &path);
-        let expected_arity = match name.as_str() {
-            "Some" | "Ok" | "Err" => 1,
-            "Vec::new" | "HashMap::new" => 0,
+        let builtin = builtin_constructor_id(self.body, &path)?;
+        let expected_arity = match builtin {
+            BuiltinId::VariantOptionSome
+            | BuiltinId::VariantResultOk
+            | BuiltinId::VariantResultErr => 1,
+            BuiltinId::AssociatedVecNew | BuiltinId::AssociatedHashMapNew => 0,
             _ => return None,
         };
         if args.len() != expected_arity {
@@ -1590,8 +1618,8 @@ impl<'a> InferenceContext<'a> {
                 expected: expected_arity,
                 actual: args.len(),
             });
-            let owner_ty = builtin_constructor_owner(&name, expected);
-            self.record_builtin_associated(&path, &name, &owner_ty);
+            let owner_ty = builtin_constructor_owner(builtin, expected);
+            self.record_builtin_associated(&path, builtin, &owner_ty);
             self.set_expr(callee, Ty::Unknown);
             return Some(CallInfo {
                 target: CallTarget::Builtin,
@@ -1601,8 +1629,8 @@ impl<'a> InferenceContext<'a> {
             });
         }
 
-        let (parameters, return_type) = match (name.as_str(), args) {
-            ("Some", [argument]) => {
+        let (parameters, return_type) = match (builtin, args) {
+            (BuiltinId::VariantOptionSome, [argument]) => {
                 let expected_item = match expected {
                     Some(Ty::Option(item)) => Some((**item).clone()),
                     _ => None,
@@ -1612,10 +1640,14 @@ impl<'a> InferenceContext<'a> {
                 let item = prefer_expected_if_unknown(actual, expected_item);
                 (vec![item.clone()], Ty::Option(Box::new(item)))
             }
-            ("Ok", [argument]) => self.infer_result_constructor(true, *argument, expected),
-            ("Err", [argument]) => self.infer_result_constructor(false, *argument, expected),
-            ("Vec::new", []) => (Vec::new(), Ty::Vec(Box::new(Ty::Unknown))),
-            ("HashMap::new", []) => (
+            (BuiltinId::VariantResultOk, [argument]) => {
+                self.infer_result_constructor(true, *argument, expected)
+            }
+            (BuiltinId::VariantResultErr, [argument]) => {
+                self.infer_result_constructor(false, *argument, expected)
+            }
+            (BuiltinId::AssociatedVecNew, []) => (Vec::new(), Ty::Vec(Box::new(Ty::Unknown))),
+            (BuiltinId::AssociatedHashMapNew, []) => (
                 Vec::new(),
                 Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
             ),
@@ -1626,7 +1658,7 @@ impl<'a> InferenceContext<'a> {
         } else {
             return_type
         };
-        self.record_builtin_associated(&path, &name, &return_type);
+        self.record_builtin_associated(&path, builtin, &return_type);
         self.set_expr(callee, Ty::Unknown);
         Some(CallInfo {
             target: CallTarget::Builtin,
@@ -1655,16 +1687,36 @@ impl<'a> InferenceContext<'a> {
         let actual = self.infer_expr(argument, expected_slot);
         self.report_argument_mismatch(argument, expected_slot, &actual);
         let (ok_def, err_def) = expected_parts.unwrap_or((Ty::Unknown, Ty::Unknown));
-        let slot = prefer_expected_if_unknown(actual, Some(if is_ok { ok_def.clone() } else { err_def.clone() }));
+        let slot = prefer_expected_if_unknown(
+            actual,
+            Some(if is_ok {
+                ok_def.clone()
+            } else {
+                err_def.clone()
+            }),
+        );
         if is_ok {
-            (vec![slot.clone()], Ty::Result(Box::new(slot), Box::new(err_def)))
+            (
+                vec![slot.clone()],
+                Ty::Result(Box::new(slot), Box::new(err_def)),
+            )
         } else {
-            (vec![slot.clone()], Ty::Result(Box::new(ok_def), Box::new(slot)))
+            (
+                vec![slot.clone()],
+                Ty::Result(Box::new(ok_def), Box::new(slot)),
+            )
         }
     }
 
-    fn record_builtin_associated(&mut self, path: &[NameRefId], name: &str, owner_ty: &Ty) {
-        let member_name = name.rsplit("::").next().unwrap_or(name);
+    fn record_builtin_associated(&mut self, path: &[NameRefId], builtin: BuiltinId, owner_ty: &Ty) {
+        let member_name = match builtin {
+            BuiltinId::VariantOptionSome => "Some",
+            BuiltinId::VariantOptionNone => "None",
+            BuiltinId::VariantResultOk => "Ok",
+            BuiltinId::VariantResultErr => "Err",
+            BuiltinId::AssociatedVecNew | BuiltinId::AssociatedHashMapNew => "new",
+            _ => return,
+        };
         let Some(resolution) = self
             .member_index
             .resolve_associated_ty(owner_ty, member_name)
@@ -1682,8 +1734,9 @@ impl<'a> InferenceContext<'a> {
             .name_ref(name_ref)
             .and_then(|name_ref| name_ref.name())
             .unwrap_or_default();
-        match name {
-            "vec" => {
+        let lowering = builtin_macro(name).map(|spec| spec.lowering);
+        match lowering {
+            Some(BuiltinMacroLowering::Vec) => {
                 let expected_item = match expected {
                     Some(Ty::Vec(item)) => Some((**item).clone()),
                     _ => None,
@@ -1709,27 +1762,27 @@ impl<'a> InferenceContext<'a> {
                     Ty::Vec(Box::new(item))
                 }
             }
-            "format" => {
+            Some(BuiltinMacroLowering::Format) => {
                 let mut diverges = false;
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
                 }
                 diverge_or(diverges, Ty::STRING)
             }
-            "panic" => {
+            Some(BuiltinMacroLowering::Panic) => {
                 for argument in args {
                     self.infer_expr(*argument, None);
                 }
                 Ty::Never
             }
-            "print" | "println" => {
+            Some(BuiltinMacroLowering::Print | BuiltinMacroLowering::Println) => {
                 let mut diverges = false;
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
                 }
                 diverge_or(diverges, Ty::UNIT)
             }
-            _ => {
+            Some(BuiltinMacroLowering::Passthrough) | None => {
                 let mut diverges = false;
                 for argument in args {
                     diverges |= self.infer_expr(*argument, None).is_never();
@@ -1745,11 +1798,17 @@ impl<'a> InferenceContext<'a> {
             .map(|name_ref| self.body.name_ref(*name_ref)?.name())
             .collect::<Option<Vec<_>>>()?;
         if names.first() == Some(&"self") {
-            self.def_map
-                .resolve_path(self.owner.module_id(), names.get(1..)?, ResolveStrategy::Unique)
+            self.def_map.resolve_path(
+                self.owner.module_id(),
+                names.get(1..)?,
+                ResolveStrategy::Unique,
+            )
         } else {
-            self.def_map
-                .resolve_path(self.owner.module_id(), &names, ResolveStrategy::LexicalUnique)
+            self.def_map.resolve_path(
+                self.owner.module_id(),
+                &names,
+                ResolveStrategy::LexicalUnique,
+            )
         }
     }
 
@@ -1970,25 +2029,40 @@ fn callable_signature(definition: &Definition) -> Option<&CallableSignature> {
     }
 }
 
-fn path_display(body: &Body, path: &[NameRefId]) -> String {
-    path.iter()
-        .filter_map(|name_ref| body.name_ref(*name_ref)?.name())
-        .collect::<Vec<_>>()
-        .join("::")
+fn builtin_constructor_id(body: &Body, path: &[NameRefId]) -> Option<BuiltinId> {
+    let names = path
+        .iter()
+        .map(|name_ref| body.name_ref(*name_ref)?.name())
+        .collect::<Option<Vec<_>>>()?;
+    match names.as_slice() {
+        [name] => builtin_value(name),
+        [owner, member] => match (builtin_type(owner), *member) {
+            (Some(BuiltinId::TypeOption), "Some") => Some(BuiltinId::VariantOptionSome),
+            (Some(BuiltinId::TypeOption), "None") => Some(BuiltinId::VariantOptionNone),
+            (Some(BuiltinId::TypeResult), "Ok") => Some(BuiltinId::VariantResultOk),
+            (Some(BuiltinId::TypeResult), "Err") => Some(BuiltinId::VariantResultErr),
+            (Some(BuiltinId::TypeVec), "new") => Some(BuiltinId::AssociatedVecNew),
+            (Some(BuiltinId::TypeHashMap), "new") => Some(BuiltinId::AssociatedHashMapNew),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
-fn builtin_constructor_owner(name: &str, expected: Option<&Ty>) -> Ty {
-    match name {
-        "Some" => match expected {
+fn builtin_constructor_owner(builtin: BuiltinId, expected: Option<&Ty>) -> Ty {
+    match builtin {
+        BuiltinId::VariantOptionSome | BuiltinId::VariantOptionNone => match expected {
             Some(Ty::Option(_)) => expected.cloned().unwrap_or(Ty::Unknown),
             _ => Ty::Option(Box::new(Ty::Unknown)),
         },
-        "Ok" | "Err" => match expected {
+        BuiltinId::VariantResultOk | BuiltinId::VariantResultErr => match expected {
             Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
             _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
         },
-        "Vec::new" => Ty::Vec(Box::new(Ty::Unknown)),
-        "HashMap::new" => Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+        BuiltinId::AssociatedVecNew => Ty::Vec(Box::new(Ty::Unknown)),
+        BuiltinId::AssociatedHashMapNew => {
+            Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown))
+        }
         _ => Ty::Unknown,
     }
 }

@@ -49,6 +49,8 @@ pub enum ItemSourceKind {
     TraitDefault,
     ImplMethod,
     Extern,
+    SyntheticFileChunk,
+    SyntheticInlineModuleChunk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -139,7 +141,8 @@ impl TypeRef {
     /// `Foo` from matching `FooBar` (unlike `contains`).
     pub fn name_matches(&self, name: &str) -> bool {
         self.syntax().is_some_and(|s| {
-            s == name || (s.starts_with(name) && s.as_bytes().get(name.len()).is_some_and(|c| *c == b'<'))
+            s == name
+                || (s.starts_with(name) && s.as_bytes().get(name.len()).is_some_and(|c| *c == b'<'))
         })
     }
 
@@ -381,6 +384,7 @@ impl SignatureFingerprint {
             visibility,
             source_kind,
             signature,
+            documentation,
             module_kind,
             imports,
             children,
@@ -391,6 +395,7 @@ impl SignatureFingerprint {
             visibility,
             source_kind,
             signature,
+            documentation,
             module_kind,
             imports,
             children
@@ -435,6 +440,7 @@ struct ItemFingerprintInput<'a> {
     visibility: Visibility,
     source_kind: ItemSourceKind,
     signature: &'a ItemSignature,
+    documentation: &'a Option<String>,
     module_kind: Option<ModuleKind>,
     imports: &'a [Import],
     children: &'a [ItemTreeItem],
@@ -492,6 +498,7 @@ pub struct ItemTreeItem {
     module_kind: Option<ModuleKind>,
     source_kind: ItemSourceKind,
     signature: ItemSignature,
+    documentation: Option<String>,
     signature_fingerprint: SignatureFingerprint,
     children: Vec<ItemTreeItem>,
     imports: Vec<Import>,
@@ -502,6 +509,7 @@ struct ItemTreeItemData {
     visibility: Visibility,
     source_kind: ItemSourceKind,
     signature: ItemSignature,
+    documentation: Option<String>,
     children: Vec<ItemTreeItem>,
 }
 
@@ -538,6 +546,10 @@ impl ItemTreeItem {
         &self.signature
     }
 
+    pub fn documentation(&self) -> Option<&str> {
+        self.documentation.as_deref()
+    }
+
     pub const fn signature_fingerprint(&self) -> SignatureFingerprint {
         self.signature_fingerprint
     }
@@ -557,6 +569,7 @@ impl ItemTreeItem {
             visibility: self.visibility,
             source_kind: self.source_kind,
             signature: &self.signature,
+            documentation: &self.documentation,
             module_kind: self.module_kind,
             imports: &self.imports,
             children: &self.children,
@@ -569,6 +582,7 @@ impl ItemTreeItem {
             visibility,
             source_kind,
             signature,
+            documentation,
             children,
         } = data;
         let signature_fingerprint = SignatureFingerprint::for_item(ItemFingerprintInput {
@@ -577,6 +591,7 @@ impl ItemTreeItem {
             visibility,
             source_kind,
             signature: &signature,
+            documentation: &documentation,
             module_kind: None,
             imports: &[],
             children: &children,
@@ -590,6 +605,7 @@ impl ItemTreeItem {
             module_kind: None,
             source_kind,
             signature,
+            documentation,
             signature_fingerprint,
             children,
             imports: Vec::new(),
@@ -664,6 +680,11 @@ impl ItemTree {
                     ) {
                         summary.module_kind = Some(module_kind);
                         summary.imports = module_imports;
+                        if module_kind == ModuleKind::Inline {
+                            summary.documentation =
+                                rua_syntax::symbols::module_documentation(item.syntax())
+                                    .or(summary.documentation);
+                        }
                         summary.refresh_signature_fingerprint();
                         summaries.push(summary);
                     }
@@ -884,6 +905,7 @@ impl ItemTree {
                 visibility: Visibility::Private,
                 source_kind: ItemSourceKind::Definition,
                 signature,
+                documentation: rua_syntax::symbols::documentation(item.syntax()),
                 children,
             },
         ))
@@ -928,6 +950,7 @@ impl ItemTree {
                 visibility,
                 source_kind,
                 signature,
+                documentation: rua_syntax::symbols::documentation(item.syntax()),
                 children,
             },
         ))
@@ -1430,6 +1453,37 @@ mod tests {
         assert_ne!(
             first.items()[0].signature_fingerprint(),
             changed.items()[0].signature_fingerprint()
+        );
+    }
+
+    #[test]
+    fn item_tree_attaches_only_semantic_documentation() {
+        let parsed = parse_source_file(
+            "// ordinary\nfn plain() {}\n/// Function docs.\nfn documented() {}\nstruct Point {\n    /// X docs.\n    x: i64,\n}\nenum Color {\n    /// Red docs.\n    Red,\n}\nimpl Point {\n    /// Method docs.\n    fn x(&self) -> i64 { self.x }\n}\nmod api {\n    //! Module docs.\n    fn call() {}\n}",
+        );
+        assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+        let tree = ItemTree::lower(parsed.tree());
+        assert_eq!(tree.items()[0].documentation(), None);
+        assert_eq!(tree.items()[1].documentation(), Some("Function docs."));
+        assert_eq!(
+            tree.items()[2].children()[0].documentation(),
+            Some("X docs.")
+        );
+        assert_eq!(
+            tree.items()[3].children()[0].documentation(),
+            Some("Red docs.")
+        );
+        assert_eq!(
+            tree.items()[4].children()[0].documentation(),
+            Some("Method docs.")
+        );
+        assert_eq!(tree.items()[5].documentation(), Some("Module docs."));
+
+        let changed = parse_source_file("/// Changed docs.\nfn documented() {}");
+        let unchanged = parse_source_file("/// Function docs.\nfn documented() {}");
+        assert_ne!(
+            ItemTree::lower(changed.tree()).items()[0].signature_fingerprint(),
+            ItemTree::lower(unchanged.tree()).items()[0].signature_fingerprint()
         );
     }
 

@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn semantic_tokens_include_variable_and_function_kinds() {
@@ -17,8 +17,7 @@ fn semantic_tokens_include_variable_and_function_kinds() {
     let tokens = srv.snapshot().semantic_tokens(file_id);
 
     // Should have tokens for functions, parameters, variables, keywords
-    let kinds: Vec<rua_analysis::SemanticTokenKind> =
-        tokens.iter().map(|t| t.kind()).collect();
+    let kinds: Vec<rua_analysis::SemanticTokenKind> = tokens.iter().map(|t| t.kind()).collect();
 
     let has_variable = kinds
         .iter()

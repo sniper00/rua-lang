@@ -1,122 +1,81 @@
-# Rua LSP 功能清单
+# Rua LSP 功能
 
-> 状态：S 级 + A 级 + B 级 + C 级 全部完成 ✅
-> 最后更新：2026-07-12
+`rua-lsp` 是 protocol adapter；语法、名称解析、类型推断和引用索引由长期 `rua-analysis::AnalysisHost` 提供。功能按当前 server capability 与端到端测试维护，不按历史阶段编号。
 
-本文档按 LSP 协议维度列出 Rua LSP 已实现的全部功能，作为 `rua-design.md` §8.1 P5e-C 的补充。
+## 1. 语言理解
 
-## 1. 补全 (textDocument/completion)
+| 能力 | 当前行为 |
+|---|---|
+| Hover | 显示 item、local、field、method、enum variant 和 builtin macro 的签名、类型与 API 文档 |
+| Definition | 导航到 local、module item、member、associated item、`.ruai` declaration 和 enum variant |
+| Implementation | 从 trait / trait method 定位具体 impl |
+| References | 基于 resolved identity 跨文件查找，不按同名文本匹配 |
+| Rename | 先验证全部目标，再原子生成 workspace edit；readonly library 或冲突时整体拒绝 |
+| Call hierarchy | prepare、incoming 和 outgoing calls |
+| Symbols | document symbol tree 与 workspace symbol search |
+| Highlight | 区分当前符号的 read/write occurrence |
 
-| 功能 | 说明 | 实现位置 |
-|------|------|---------|
-| 作用域补全 | locals + module items + keywords + builtins | `completion.rs:scope_completions` |
-| 成员补全 | `.` 后字段/方法，含类型推断 | `completion.rs:member_completions` |
-| 路径补全 | `::` 后模块成员 + enum variant | `completion.rs:path_completions` |
-| sortText 排序 | 按 relevance 降序：locals(95) > members(90) > module(85) > keywords(50) > builtins(20-40) | `lsp.rs:completion_to_lsp` |
-| textEdit 前缀替换 | 将 partial_range 转换为 LSP TextEdit | `lsp.rs:completion_to_lsp` |
-| filterText 宏过滤 | 宏补全 lookup 不含 `!`，输入 `println` 匹配 `println!` | `completion.rs` / `lsp.rs` |
-| 关键字上下文过滤 | 表达式位置（`=`, `return`, `(`, 运算符后）抑制 `fn`/`struct`/`enum` 等声明关键字 | `completion.rs:is_expression_context` |
-| 类型位置过滤 | `:` 后只显示类型名（struct/enum/trait/builtins） | `completion.rs:is_type_position` |
-| snippet 参数占位 | 函数补全生成 `${1:dx: i64}, ${2:dy: i64}$0` | `lsp.rs:completion_to_lsp` |
-| 参数名 | 从 `CallableSignature::params()` 提取原始参数名 | `completion.rs:member_completions` |
-| self 参数处理 | detail 显示 `&mut self`，snippet 不含 self | `completion.rs:member_completions` |
-| 文档注释 | 提取 `///` 前导注释 → `CompletionItem.documentation` | `completion.rs:extract_doc_comment` |
-| label_details | 结构化展示类型 + 来源描述（`fn`/`struct`/`method`/`local`） | `lsp.rs:completion_to_lsp` |
-| deprecated 标签 | 接线 `CompletionItemTag::DEPRECATED` | `lsp.rs:completion_to_lsp` |
-| isIncomplete | >100 项时返回 `CompletionList { is_incomplete: true }` | `lsp.rs:handle_completion` |
-| resolve provider | 注册 `completionItem/resolve`，按需懒加载文档 | `lsp.rs:handle_resolve_completion` |
-| match enum 补全 | `match c {` 内自动提示 enum variant | `completion.rs:match_scrutinee_enum` |
-| postfix 补全 | `.if` `.match` `.not` `.ref` `.while` 模板展开 | `completion.rs:postfix_templates` |
-| 关键字 snippet | `for`/`match`/`fn`/`struct` 等 11 个关键字展开为代码模板 | `completion.rs:keyword_snippet` |
-| 服务端前缀过滤 | 按已输入文本做 subsequence 模糊匹配，纯数字前缀不触发 | `completion.rs:is_subsequence` |
-| 类型匹配加权 | 推断光标处期望类型，匹配候选项 relevance +10 | `completion.rs:expected_type_at_cursor` |
-| 触发字符 | `.` `:` | `lsp.rs:CompletionOptions` |
+enum variant 在 declaration、constructor、qualified path、alias 和 match pattern 中使用同一 identity。function、method、trait item、extern、`.ruai` 和 `vec!` / `print!` / `println!` / `format!` / `panic!` 的文档来自统一 semantic record。
 
-## 2. 导航
+## 2. Completion 与签名
 
-| 功能 | 协议 | 说明 |
-|------|------|------|
-| Go to Definition | `textDocument/definition` | 条目定义 + 局部变量定义 |
-| Go to Implementation | `textDocument/implementation` | trait method → 所有 impl 块中的具体实现 |
-| References | `textDocument/references` | 局部变量引用查找 |
-| Document Symbol | `textDocument/documentSymbol` | 文档大纲树 |
-| Workspace Symbol | `workspace/symbol` | 跨文件模糊搜索符号（上限 50） |
-| Prepare Rename | `textDocument/prepareRename` | 检查光标位置是否可重命名 |
+- lexical local、module item、keyword、builtin、field、method、associated item 和 enum variant completion。
+- `.` member、`::` path、match/pattern、postfix 和关键字 snippet 上下文。
+- expected type 与作用域相关性排序、前缀 text edit、function 参数占位和 `self` 过滤。
+- completion item resolve 按需提供文档。
+- signature help 支持 `(`、`,` 触发与重触发。
 
-## 3. 悬停
+unknown member receiver 会返回空的 member context，避免在 `.` 后混入全局关键字噪音。
 
-| 功能 | 说明 |
-|------|------|
-| 条目 hover | markdown 代码块 + 签名 |
-| 局部变量 hover | 显示推断类型 `let name: Ty` |
-| 成员 hover | `receiver.field` / `receiver.method()` 类型 |
-| 文档注释 | `///` 文本在 hover 中渲染为 markdown |
-| 导航提示 | hover 底部显示 `F12 Go to Definition · Shift+F12 Find References` |
+## 3. Diagnostics 与语义显示
 
-## 4. 诊断
+| 能力 | 当前行为 |
+|---|---|
+| Diagnostics | parser、name resolution、type checking、trait/module、`.ruai` 和 control-flow diagnostics |
+| Lints | unused variable、redundant `mut`、unreachable code、unused function、infinite loop |
+| Semantic tokens | full 与 range token，包含 declaration、readonly、static、async 和 unused modifier |
+| Inlay hints | inferred binding type、parameter name、closure parameter/return 和 iterator chain type |
+| Code lens | definition reference count 与 type/trait implementation 信息 |
 
-| 功能 | 代码 | 说明 |
-|------|------|------|
-| Parse errors | E0001–E0005 | 解析错误（语法） |
-| Name errors | E0100–E0104 | 未解析名称、重复定义等 |
-| Type errors | E0200–E0210 | 类型不匹配、参数数量、trait bound 等 |
-| Unused variable | W0300 | 未使用局部变量警告 |
+diagnostic 使用稳定 code 和精确 source range；human message 不作为协议分类依据。打开文档发布带 version 的结果，过期 snapshot 不会覆盖新诊断。
 
-## 5. 编辑
+## 4. 编辑与重构
 
-| 功能 | 协议 | 说明 |
-|------|------|------|
-| Formatting | `textDocument/formatting` | 全文格式化 |
-| On-Type Formatting | `textDocument/onTypeFormatting` | Enter 续行 `/// ` + `{` 后缩进 |
-| Rename | `textDocument/rename` | 局部变量重命名 |
+| 协议能力 | 说明 |
+|---|---|
+| Full formatting | 格式化完整文档 |
+| Range formatting | 只格式化选定范围 |
+| On-type formatting | Enter 后延续 doc comment 或处理缩进 |
+| Selection range | 按 syntax tree 扩大选择范围 |
+| Folding range | block、item 和 doc comment folding |
+| Document link | 解析文档注释中的可导航引用 |
+| Code actions | fill match arms、generate trait impl members、extract variable、if-let 转 match |
 
-## 6. 代码操作 (Code Actions)
+formatter 写文件时使用临时文件与原子替换；LSP formatting 返回 text edit，不直接修改 editor buffer。
 
-| 功能 | 触发条件 | 说明 |
-|------|---------|------|
-| Fill match arms | 光标在 match 表达式上 | 生成缺失 enum variant 分支 |
-| Generate impl members | 光标在 `impl Trait for Type {}` 上 | 生成所有 trait 方法 stub |
-| Extract variable | 选中表达式 | 提取为 `let` 绑定 |
-| Replace if-let with match | 光标在 `if let` 表达式上 | 转换为 `match` 表达式 |
+## 5. Workspace 行为
 
-## 7. 语义增强
+- 支持 multi-root workspace、ad-hoc opened file、readonly `.ruai` library 和 logical library mount。
+- `didOpen` / `didChange` / `didClose` 保持 disk 与 overlay 分离，并拒绝倒退的 document version。
+- library configuration 与 watcher 更新按 project 隔离；删除 project/root 会回收 mapping 与 cache。
+- scan 识别 `.gitignore`、`.ignore`、`.ruaignore`，默认跳过 `.git`、`target` 和 `node_modules`。
+- references、workspace symbol 和扫描任务可取消；stale generation 返回 `ContentModified`。
+- 所有 LSP position 使用 UTF-16，语义引擎内部保持 UTF-8 byte range。
 
-| 功能 | 协议 | 说明 |
-|------|------|------|
-| Semantic Tokens | `textDocument/semanticTokens/full` | 语法高亮（16 token types + 5 modifiers 含 unused） |
-| Inlay Hints | `textDocument/inlayHint` | `let` 绑定类型标注 |
-| Document Highlight | `textDocument/documentHighlight` | 光标选中符号高亮所有出现 |
-| Signature Help | `textDocument/signatureHelp` | 参数提示，触发字符 `(` `,` |
-| Folding Range | `textDocument/foldingRange` | `{...}` 块 + `///` 注释块折叠 |
-| Document Link | `textDocument/documentLink` | `/// ` 中 `[...]` 引用创建可点击链接 |
+VS Code 配置和启动方式见[扩展说明](../editors/vscode/README.md)。
 
-## 8. 工程
+## 6. Advertised protocol capabilities
 
-| 功能 | 说明 |
-|------|------|
-| 文件监视 | `workspace/didChangeWatchedFiles` 监听库文件 |
-| 增量更新 | `didChange` 全量重建快照 |
-| 快照隔离 | `Analysis` 快照不受后续变更影响 |
-| 多文件 workspace | `WorkspaceFormat` 索引所有 `.rua`/`.ruai` |
+server initialize 当前声明：
 
-## 9. LSP 协议版本
+- full text synchronization
+- completion + completion resolve
+- hover, definition, implementation, references, prepare rename, rename
+- document/workspace symbol, document highlight, document link
+- call hierarchy, code lens
+- diagnostics publication
+- semantic tokens full/range, inlay hints, signature help
+- formatting, range formatting, on-type formatting
+- code actions, folding range, selection range
 
-支持的 LSP 3.17 能力：
-- `textDocumentSync` (Full)
-- `completionProvider` (trigger: `.` `:`, resolve: true)
-- `hoverProvider`
-- `definitionProvider`
-- `implementationProvider`
-- `referencesProvider`
-- `documentSymbolProvider`
-- `workspaceSymbolProvider`
-- `documentFormattingProvider`
-- `documentOnTypeFormattingProvider` (trigger: `\n`)
-- `documentHighlightProvider`
-- `documentLinkProvider`
-- `foldingRangeProvider`
-- `renameProvider` (prepare: true)
-- `signatureHelpProvider` (trigger: `(` `,`)
-- `inlayHintProvider`
-- `codeActionProvider`
-- `semanticTokensProvider` (full)
+协议生命周期、取消、multi-root 和真实编辑器启动由 `crates/rua-lsp/tests/` 与 `editors/vscode/src/test/` 覆盖。

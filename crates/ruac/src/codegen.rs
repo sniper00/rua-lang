@@ -9,26 +9,24 @@
 //!   struct        -> table + metatable (methods in `__index`)
 //!   enum variant  -> { tag = "Name", ... } + metatable
 //!   Option        -> pure nil: Some(v) => v, None => nil
-//!   Result        -> Ok(v) => { ok = v }, Err(e) => { err = e }
+//!   Result        -> first-class tagged runtime value
+
+use rua_core::{BuiltinMacroLowering, builtin_macro_by_id};
 
 use crate::ast::*;
-use crate::typeck::{
-    IterAdapterKind, IterConsumerKind, IterPlan, IterSourceKind, TypeInfo,
+use crate::backend_layout::BackendLayout;
+use crate::lua_ir::{
+    BinaryOp as LuaBinaryOp, Expr as LuaExpr, FunctionTarget, InlineStatement, TableField,
+    UnaryOp as LuaUnaryOp,
 };
+use crate::typeck::{IterAdapterKind, IterConsumerKind, IterPlan, IterSourceKind, TypeInfo};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 enum Dest {
     Discard,
-    Var(String),
+    Var(LuaExpr),
     Return,
-}
-
-#[derive(Clone, Copy)]
-enum VarShape {
-    Unit,
-    Tuple,
-    Struct,
 }
 
 struct IterCall<'a> {
@@ -59,134 +57,95 @@ enum IterLoopSource {
     },
 }
 
-/// Type/variant information gathered before codegen so paths like
-/// `Shape::Circle` and bare variants can be resolved without a type checker.
-struct Ctx {
-    structs: HashSet<String>,
-    /// enum name -> (variant name -> shape)
-    enums: HashMap<String, HashMap<String, VarShape>>,
-    /// variant name -> enum name (only for variants with a unique name)
-    variant_enum: HashMap<String, String>,
-}
-
-impl Ctx {
-    fn collect(prog: &Program) -> Ctx {
-        let mut structs = HashSet::new();
-        let mut enums: HashMap<String, HashMap<String, VarShape>> = HashMap::new();
-        let mut variant_enum: HashMap<String, String> = HashMap::new();
-        let mut ambiguous: HashSet<String> = HashSet::new();
-
-        // Types are keyed by simple name (root + all modules); cross-module
-        // references resolve via qualified `::` paths at the emit sites.
-        Self::collect_items(
-            &prog.items,
-            &mut structs,
-            &mut enums,
-            &mut variant_enum,
-            &mut ambiguous,
-        );
-        for a in ambiguous {
-            variant_enum.remove(&a);
-        }
-        Ctx {
-            structs,
-            enums,
-            variant_enum,
-        }
-    }
-
-    fn collect_items(
-        items: &[Item],
-        structs: &mut HashSet<String>,
-        enums: &mut HashMap<String, HashMap<String, VarShape>>,
-        variant_enum: &mut HashMap<String, String>,
-        ambiguous: &mut HashSet<String>,
-    ) {
-        for item in items {
-            match item {
-                Item::Struct(s) => {
-                    structs.insert(s.name.clone());
-                }
-                Item::Enum(e) => {
-                    let mut vs = HashMap::new();
-                    for v in &e.variants {
-                        let shape = match &v.kind {
-                            VariantKind::Unit => VarShape::Unit,
-                            VariantKind::Tuple(_) => VarShape::Tuple,
-                            VariantKind::Struct(_) => VarShape::Struct,
-                        };
-                        vs.insert(v.name.clone(), shape);
-                        if variant_enum.contains_key(&v.name) {
-                            ambiguous.insert(v.name.clone());
-                        } else {
-                            variant_enum.insert(v.name.clone(), e.name.clone());
-                        }
-                    }
-                    enums.insert(e.name.clone(), vs);
-                }
-                Item::Mod(m) => {
-                    Self::collect_items(&m.items, structs, enums, variant_enum, ambiguous);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Resolve a path to a user enum variant (not Option/Result built-ins).
-    fn resolve_variant(&self, segs: &[String]) -> Option<(String, String, VarShape)> {
-        if segs.len() >= 2 {
-            let en = &segs[segs.len() - 2];
-            let var = &segs[segs.len() - 1];
-            let shape = self.enums.get(en)?.get(var)?;
-            Some((en.clone(), var.clone(), *shape))
-        } else if segs.len() == 1 {
-            let var = &segs[0];
-            let en = self.variant_enum.get(var)?;
-            let shape = self.enums.get(en)?.get(var)?;
-            Some((en.clone(), var.clone(), *shape))
-        } else {
-            None
-        }
-    }
-}
-
 pub fn generate(
-    prog: &Program,
-    info: &TypeInfo,
+    program: &crate::typed_ir::TypedProgram,
     rules: &crate::builtins::CodegenRules,
 ) -> String {
+    generate_with_source_map(program, rules).source
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LuaSourceMapping {
+    pub generated_start: usize,
+    pub generated_end: usize,
+    pub source: crate::token::SourceRange,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedLua {
+    pub source: String,
+    pub source_map: Vec<LuaSourceMapping>,
+}
+
+pub fn generate_with_source_map(
+    program: &crate::typed_ir::TypedProgram,
+    rules: &crate::builtins::CodegenRules,
+) -> GeneratedLua {
+    let hir = program.hir();
     let mut cg = Codegen {
-        out: String::new(),
-        indent: 0,
-        tmp: 0,
-        ctx: Ctx::collect(prog),
+        lua: crate::lua_ir::Builder::new(),
         uses_rt: false,
         closure_return_targets: Vec::new(),
-        info,
+        program,
+        info: program.types(),
+        hir,
+        layout: BackendLayout::new(program),
+        current_module: hir.root,
         builtin_rules: rules,
     };
-    cg.gen_program(prog);
+    cg.gen_program(program.syntax());
 
-    let mut result = String::from("-- Generated by ruac (Rua -> Lua 5.5). Do not edit by hand.\n");
+    let mut prefix = String::from("-- Generated by ruac (Rua -> Lua 5.5). Do not edit by hand.\n");
     if cg.uses_rt {
-        result.push_str("local rt = require(\"rua_rt\")\n");
+        prefix.push_str("local rt = require(\"rua_rt\")\n");
+        prefix.push_str(&format!(
+            "assert(rt.ABI_VERSION == {}, \"incompatible rua_rt ABI\")\n",
+            rua_core::RUNTIME_ABI_VERSION
+        ));
     }
-    result.push_str(&cg.out);
-    result
+    let printed = crate::lua_ir::print_with_source_map(&cg.lua.finish());
+    let generated_offset = prefix.len();
+    let source_map = printed
+        .mappings
+        .into_iter()
+        .map(|mapping| LuaSourceMapping {
+            generated_start: generated_offset + mapping.generated_start,
+            generated_end: generated_offset + mapping.generated_end,
+            source: mapping.source,
+        })
+        .collect();
+    prefix.push_str(&printed.source);
+    GeneratedLua {
+        source: prefix,
+        source_map,
+    }
 }
 
 struct Codegen<'a> {
-    out: String,
-    indent: usize,
-    tmp: usize,
-    ctx: Ctx,
+    lua: crate::lua_ir::Builder,
     /// Set when any generated code references the `rua_rt` runtime shim.
     uses_rt: bool,
     /// Inlined iterator closure returns assign a local and jump out of the
     /// closure body instead of returning from the enclosing Rua function.
     closure_return_targets: Vec<(String, String)>,
+    program: &'a crate::typed_ir::TypedProgram,
     info: &'a TypeInfo,
+    hir: &'a crate::hir::ResolvedHir,
+    layout: BackendLayout,
+    current_module: crate::hir::ModuleId,
     builtin_rules: &'a crate::builtins::CodegenRules,
+}
+
+fn statement_source(statement: &Stmt) -> Option<crate::token::SourceRange> {
+    match statement {
+        Stmt::Let { name_span, .. } => Some(*name_span),
+        Stmt::Expr(expression) => Some(expression.span),
+        Stmt::Return(Some(expression)) => Some(expression.span),
+        Stmt::While { cond, .. } => Some(cond.span),
+        Stmt::For { var_span, .. } => Some(*var_span),
+        Stmt::WhileLet { expr, .. } => Some(expr.span),
+        Stmt::Return(None) | Stmt::Loop { .. } | Stmt::Break | Stmt::Continue => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,9 +154,11 @@ struct Codegen<'a> {
 
 fn type_to_emmylua(ty: &Type) -> String {
     match ty {
-        Type::Path { name, args } => {
+        Type::Path { name, args, .. } => {
             let base = match name.as_str() {
-                "i64" | "i8" | "i16" | "i32" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "integer",
+                "i64" | "i8" | "i16" | "i32" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+                    "integer"
+                }
                 "f64" | "f32" => "number",
                 "bool" => "boolean",
                 "String" | "str" => "string",
@@ -213,56 +174,67 @@ fn type_to_emmylua(ty: &Type) -> String {
                     }
                     "any|nil"
                 }
-                "Result" => {
-                    // Multi-return: Ok(v) returns bare v; Err(e) returns nil, e.
-                    let ok = args.first().map(type_to_emmylua).unwrap_or_else(|| "any".into());
-                    let err = args.get(1).map(type_to_emmylua).unwrap_or_else(|| "any".into());
-                    return format!("{ok}|nil, {err}|nil");
-                }
+                "Result" => "table",
                 "HashMap" => "table",
                 _ => name.as_str(),
             };
             base.to_string()
         }
         Type::Ref { inner, .. } => type_to_emmylua(inner),
+        Type::Function { params, ret } => {
+            let params = params.iter().map(type_to_emmylua).collect::<Vec<_>>();
+            format!("fun({}): {}", params.join(", "), type_to_emmylua(ret))
+        }
+        Type::Tuple(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(type_to_emmylua)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Type::Unit => "nil".into(),
-    }
-}
-
-fn emit_return_annotation(out: &mut String, ret: &Option<Type>) {
-    if let Some(r) = ret {
-        out.push_str(&format!("---@return {}\n", type_to_emmylua(r)));
     }
 }
 
 impl Codegen<'_> {
     fn emit_struct_annotation(&mut self, s: &StructDecl) {
-        self.out.push_str(&format!("---@class {}\n", s.name));
+        self.annotation(format!("---@class {}", s.name));
         if !s.generics.is_empty() {
             let gens: Vec<&str> = s.generics.iter().map(|g| g.name.as_str()).collect();
-            self.out.push_str(&format!("---@generic {}\n", gens.join(", ")));
+            self.annotation(format!("---@generic {}", gens.join(", ")));
         }
     }
 
     fn emit_fn_annotation(&mut self, f: &FnDecl) {
         if !f.generics.is_empty() {
             let gens: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
-            self.out.push_str(&format!("---@generic {}\n", gens.join(", ")));
+            self.annotation(format!("---@generic {}", gens.join(", ")));
         }
         // Parameter types are explicit in Rua source; only emit the return
         // annotation so LuaLS can infer the result type at call sites.
-        emit_return_annotation(&mut self.out, &f.ret);
+        if let Some(ret) = &f.ret {
+            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
+        }
     }
 
     fn block_has_continue(block: &Block) -> bool {
         for s in &block.stmts {
-            if matches!(s, Stmt::Continue) { return true; }
+            if matches!(s, Stmt::Continue) {
+                return true;
+            }
             match s {
-                Stmt::While { body, .. } | Stmt::Loop { body } | Stmt::WhileLet { body, .. } | Stmt::For { body, .. } => {
-                    if Self::block_has_continue(body) { return true; }
+                Stmt::While { body, .. }
+                | Stmt::Loop { body }
+                | Stmt::WhileLet { body, .. }
+                | Stmt::For { body, .. } => {
+                    if Self::block_has_continue(body) {
+                        return true;
+                    }
                 }
-                Stmt::Expr(e)
-                    if Self::expr_has_continue(e) => { return true; }
+                Stmt::Expr(e) if Self::expr_has_continue(e) => {
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -272,7 +244,11 @@ impl Codegen<'_> {
     fn expr_has_continue(expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Block(b) => Self::block_has_continue(b),
-            ExprKind::If { then_block, else_block, .. } => {
+            ExprKind::If {
+                then_block,
+                else_block,
+                ..
+            } => {
                 Self::block_has_continue(then_block)
                     || else_block.as_ref().is_some_and(|eb| match eb.as_ref() {
                         ElseBranch::Block(b) => Self::block_has_continue(b),
@@ -284,545 +260,680 @@ impl Codegen<'_> {
         }
     }
 
-    fn line(&mut self, s: &str) {
-        for _ in 0..self.indent {
-            self.out.push_str("    ");
-        }
-        self.out.push_str(s);
-        self.out.push('\n');
+    fn annotation(&mut self, source: impl Into<String>) {
+        self.lua.annotation(source);
+    }
+
+    fn local(&mut self, name: impl Into<String>, value: Option<LuaExpr>) {
+        self.lua
+            .local(vec![name.into()], value.into_iter().collect());
+    }
+
+    fn locals(&mut self, names: Vec<String>) {
+        self.lua.local(names, Vec::new());
+    }
+
+    fn assign(&mut self, target: LuaExpr, value: LuaExpr) {
+        self.lua.assign(target, value);
+    }
+
+    fn return_value(&mut self, value: LuaExpr) {
+        self.lua.return_values(vec![value]);
+    }
+
+    fn return_none(&mut self) {
+        self.lua.return_values(Vec::new());
+    }
+
+    fn expression_statement(&mut self, expression: LuaExpr) {
+        self.lua.expression(expression);
     }
 
     fn blank(&mut self) {
-        self.out.push('\n');
+        self.lua.blank();
     }
 
     fn fresh_tmp(&mut self) -> String {
-        self.tmp += 1;
-        format!("__t{}", self.tmp)
+        self.layout.fresh_temporary()
+    }
+
+    fn local_name(&self, name: &str) -> String {
+        self.layout.local_name(self.current_module, name)
     }
 
     // --- program ----------------------------------------------------------
 
-    /// Determine which function names need a `local` forward-declaration at
-    /// the top of this scope.  A forward-decl is only needed when a function or
-    /// module item calls a name that is defined later in the same scope (or
-    /// when two functions are mutually recursive).
-    fn names_needing_forward_decl(items: &[Item], mod_names: &[&str]) -> HashSet<String> {
-        // Index: simple name -> position in the items array.
-        let mut positions: HashMap<String, usize> = HashMap::new();
-        for (i, item) in items.iter().enumerate() {
-            let name = match item {
-                Item::Fn(f) => Some(f.name.as_str()),
-                Item::Struct(s) => Some(s.name.as_str()),
-                Item::Enum(e) => Some(e.name.as_str()),
-                _ => None,
-            };
-            if let Some(n) = name {
-                positions.insert(n.to_string(), i);
-            }
-        }
-        for n in mod_names {
-            positions.entry(n.to_string()).or_insert(usize::MAX);
-        }
-
-        fn callee_names_inner(expr: &Expr, out: &mut HashSet<String>) {
-            match &expr.kind {
-                ExprKind::Call { callee, args } => {
-                    if let ExprKind::Path(segs) = &callee.kind
-                        && segs.len() == 1
-                    {
-                        out.insert(segs[0].clone());
-                    }
-                    callee_names_inner(callee, out);
-                    for a in args { callee_names_inner(a, out); }
-                }
-                ExprKind::MethodCall { recv, args, .. } => {
-                    callee_names_inner(recv, out);
-                    for a in args { callee_names_inner(a, out); }
-                }
-                ExprKind::Closure { body, .. } => match body {
-                    ClosureBody::Expr(e) => callee_names_inner(e, out),
-                    ClosureBody::Block(b) => callee_names_block(b, out),
-                },
-                ExprKind::If { cond, then_block, else_block } => {
-                    callee_names_inner(cond, out);
-                    callee_names_block(then_block, out);
-                    if let Some(eb) = else_block {
-                        match eb.as_ref() {
-                            ElseBranch::Block(b) => callee_names_block(b, out),
-                            ElseBranch::If(e) => callee_names_inner(e, out),
-                        }
-                    }
-                }
-                ExprKind::Match { scrut, arms } => {
-                    callee_names_inner(scrut, out);
-                    for arm in arms { callee_names_inner(&arm.body, out); }
-                }
-                ExprKind::Block(b) => callee_names_block(b, out),
-                ExprKind::Assign { target, value } => {
-                    callee_names_inner(target, out);
-                    callee_names_inner(value, out);
-                }
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    callee_names_inner(lhs, out);
-                    callee_names_inner(rhs, out);
-                }
-                ExprKind::Unary { expr, .. } => callee_names_inner(expr, out),
-                ExprKind::Try { expr } => callee_names_inner(expr, out),
-                ExprKind::Field { base, .. } => callee_names_inner(base, out),
-                ExprKind::Index { base, index } => {
-                    callee_names_inner(base, out);
-                    callee_names_inner(index, out);
-                }
-                ExprKind::Range { start, end, .. } => {
-                    callee_names_inner(start, out);
-                    callee_names_inner(end, out);
-                }
-                ExprKind::StructLit { fields, .. } => {
-                    for (_, v) in fields { callee_names_inner(v, out); }
-                }
-                ExprKind::IfLet { expr, then_block, else_block, .. } => {
-                    callee_names_inner(expr, out);
-                    callee_names_block(then_block, out);
-                    if let Some(eb) = else_block {
-                        match eb.as_ref() {
-                            ElseBranch::Block(b) => callee_names_block(b, out),
-                            ElseBranch::If(e) => callee_names_inner(e, out),
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        fn callee_names_block(b: &crate::ast::Block, out: &mut HashSet<String>) {
-            for s in &b.stmts {
-                match s {
-                    crate::ast::Stmt::Let { init, .. } => callee_names_inner(init, out),
-                    crate::ast::Stmt::Expr(e) => callee_names_inner(e, out),
-                    crate::ast::Stmt::Return(Some(e)) => callee_names_inner(e, out),
-                    _ => {}
-                }
-            }
-            if let Some(ref tail) = b.tail {
-                callee_names_inner(tail, out);
-            }
-        }
-
-        // For each function body, collect all callee names, and mark any that
-        // are defined LATER in the item list as needing a forward decl.
-        let mut needed: HashSet<String> = HashSet::new();
-        for (i, item) in items.iter().enumerate() {
-            if let Item::Fn(f) = item {
-                let mut called: HashSet<String> = HashSet::new();
-                callee_names_block(&f.body, &mut called);
-                for name in &called {
-                    if let Some(&pos) = positions.get(name) {
-                        if pos > i || pos == usize::MAX {
-                            needed.insert(name.clone());
-                        }
-                    }
-                }
-            }
-        }
-        needed
-    }
-
     fn gen_program(&mut self, prog: &Program) {
-        // Declaration-only (`.ruai`) modules emit nothing and are not locals:
-        // references to them resolve to host-provided globals (e.g. `moon`).
-        let mod_names: Vec<&str> = prog
+        if prog.is_decl {
+            return;
+        }
+        // Every root callable gets exactly one lexical binding. Definitions
+        // below assign to these bindings, which makes forward and mutual
+        // recursion identical and avoids `local function` shadowing.
+        let fn_names: Vec<String> = prog
             .items
             .iter()
-            .filter_map(|i| match i {
-                Item::Mod(m) if !m.is_decl => Some(m.name.as_str()),
+            .enumerate()
+            .filter_map(|(item_index, item)| match item {
+                Item::Fn(_) => self
+                    .layout
+                    .definition(self.program.item_definition(self.hir.root, item_index))
+                    .map(ToString::to_string),
                 _ => None,
             })
             .collect();
-
-        // Only emit forward declarations for functions/modules that are
-        // actually referenced before their definition in the source.
-        let needed = Self::names_needing_forward_decl(&prog.items, &mod_names);
-        let fn_names: Vec<&str> = prog
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Fn(f) if needed.contains(f.name.as_str()) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        let mod_names_needed: Vec<&str> = mod_names
-            .iter()
-            .filter(|n| needed.contains(**n))
-            .copied()
-            .collect();
-        let mut all: Vec<&str> = Vec::new();
-        all.extend(&fn_names);
-        all.extend(&mod_names_needed);
-        if !all.is_empty() {
-            self.line(&format!("local {}", all.join(", ")));
+        if !fn_names.is_empty() {
+            self.locals(fn_names);
         }
 
         // Class tables (with `__index`) for structs and enums so their values
         // can carry methods. Each is self-contained: @class annotation + local table.
-        for item in &prog.items {
+        for (item_index, item) in prog.items.iter().enumerate() {
             match item {
                 Item::Struct(s) => {
+                    let definition = self.program.item_definition(self.hir.root, item_index);
+                    let place = self.layout.definition(definition).unwrap().clone();
                     self.emit_struct_annotation(s);
                     for field in &s.fields {
-                        self.line(&format!(
+                        self.annotation(format!(
                             "---@field {} {}",
                             field.name,
                             type_to_emmylua(&field.ty)
                         ));
                     }
-                    self.line(&format!("local {0} = {{}}", s.name));
-                    self.line(&format!("{0}.__index = {0}", s.name));
+                    self.lua.local_table(place.to_string());
+                    self.assign(place.field("__index").expression(), place.expression());
                 }
                 Item::Enum(e) => {
-                    self.line(&format!("---@class {0}", e.name));
-                    self.line(&format!("local {0} = {{}}", e.name));
-                    self.line(&format!("{0}.__index = {0}", e.name));
+                    let definition = self.program.item_definition(self.hir.root, item_index);
+                    let place = self.layout.definition(definition).unwrap().clone();
+                    self.annotation(format!("---@class {0}", e.name));
+                    self.lua.local_table(place.to_string());
+                    self.assign(place.field("__index").expression(), place.expression());
                 }
                 _ => {}
-            }
-        }
-
-        // Extern stubs: for each `extern "lua" { fn name(...) }`, emit a
-        // local fallback so the generated code runs standalone without the
-        // host providing these functions.
-        for item in &prog.items {
-            if let Item::Extern(eb) = item {
-                for f in &eb.fns {
-                    self.line(&format!(
-                        "local {0} = {0} or function(...) end",
-                        f.name
-                    ));
-                }
             }
         }
 
         // Trait table across all scopes (root + modules), keyed by simple name,
         // for resolving inherited default methods in `impl Trait for Type`.
-        let mut traits: HashMap<&str, &TraitDecl> = HashMap::new();
-        collect_traits(&prog.items, &mut traits);
+        let mut traits = HashMap::new();
+        collect_traits(&prog.items, self.hir.root, self.program, &mut traits);
 
-        // Emit modules before top-level functions so their `local mod = {}`
-        // table is visible to functions defined later in the file.
-        for item in &prog.items {
+        // Phase 1: allocate every module/type table.
+        for (item_index, item) in prog.items.iter().enumerate() {
             if let Item::Mod(m) = item
-                && !m.is_decl {
-                    self.gen_mod(m, &traits);
-                }
-        }
-        for item in &prog.items {
-            if let Item::Fn(f) = item {
-                self.gen_free_fn(f);
+                && !m.is_decl
+            {
+                let module = self.program.child_module(self.hir.root, item_index);
+                self.declare_mod(m, module);
             }
         }
-        self.gen_impls(&prog.items, &traits);
+        // Nested extern places live under their owning module table, so all
+        // runtime module places must exist before extern bindings are emitted.
+        self.bind_externs(&prog.items, self.hir.root);
+        // Phase 2: define every callable against its preallocated place.
+        for (item_index, item) in prog.items.iter().enumerate() {
+            if let Item::Mod(m) = item
+                && !m.is_decl
+            {
+                let module = self.program.child_module(self.hir.root, item_index);
+                self.define_mod(m, &traits, module);
+                self.publish_mod(m, module);
+            }
+        }
+        for (item_index, item) in prog.items.iter().enumerate() {
+            if let Item::Fn(f) = item {
+                let definition = self.program.item_definition(self.hir.root, item_index);
+                self.gen_free_fn(f, definition);
+            }
+        }
+        self.gen_impls(&prog.items, &traits, self.hir.root);
+        // Phase 3: execute initializers in observable source order.
+        self.init_entries(&prog.source_order, &prog.items, &prog.chunk, self.hir.root);
 
-        // Emit a return table exporting all top-level public functions so the
-        // generated Lua module can be `require()`d from Lua side.
-        let pub_fns: Vec<&str> = prog
+        // Export every public runtime item after chunk initialization.
+        let exports: Vec<(String, LuaExpr)> = prog
             .items
             .iter()
-            .filter_map(|i| match i {
-                Item::Fn(f) if f.is_pub => Some(f.name.as_str()),
+            .enumerate()
+            .filter_map(|(item_index, item)| match item {
+                Item::Fn(f) if f.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(self.hir.root, item_index))
+                    .map(|place| (f.name.clone(), place.expression())),
+                Item::Struct(s) if s.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(self.hir.root, item_index))
+                    .map(|place| (s.name.clone(), place.expression())),
+                Item::Enum(e) if e.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(self.hir.root, item_index))
+                    .map(|place| (e.name.clone(), place.expression())),
+                Item::Mod(m) if m.is_pub && !m.is_decl => self
+                    .layout
+                    .module(self.program.child_module(self.hir.root, item_index))
+                    .map(|place| (m.name.clone(), place.expression())),
                 _ => None,
             })
             .collect();
-        if !pub_fns.is_empty() {
+        if !exports.is_empty() {
             self.blank();
-            self.line("return {");
-            self.indent += 1;
-            for name in &pub_fns {
-                self.line(&format!("{name} = {name},"));
-            }
-            self.indent -= 1;
-            self.line("}");
-        }
-
-        if prog
-            .items
-            .iter()
-            .any(|i| matches!(i, Item::Fn(f) if f.name == "main" && f.params.is_empty()))
-        {
-            self.blank();
-            self.line("main()");
+            self.lua.return_table(exports);
         }
     }
 
-    /// Emit an inline module as a Lua table with methods assigned directly as
-    /// table fields (`function mod.fn()`), so no local stubs or do-block are
-    /// needed.  Cross-module calls go through the table (`mod::item` →
-    /// `mod.item`).
-    fn gen_mod(&mut self, m: &ModDecl, traits: &HashMap<&str, &TraitDecl>) {
+    fn bind_externs(&mut self, items: &[Item], module: crate::hir::ModuleId) {
+        let previous_module = self.current_module;
+        self.current_module = module;
+        for (item_index, item) in items.iter().enumerate() {
+            match item {
+                Item::Extern(block) => {
+                    for (function_index, function) in block.fns.iter().enumerate() {
+                        let definition =
+                            self.program
+                                .extern_function(module, item_index, function_index);
+                        if block.abi == "lua-result" {
+                            self.bind_result_extern(function, definition);
+                        } else {
+                            self.bind_plain_extern(function, definition);
+                        }
+                    }
+                }
+                Item::Mod(child) if !child.is_decl => {
+                    let child_module = self.program.child_module(module, item_index);
+                    self.bind_externs(&child.items, child_module);
+                }
+                _ => {}
+            }
+        }
+        self.current_module = previous_module;
+    }
+
+    fn bind_plain_extern(&mut self, function: &ExternFn, definition: crate::hir::DefId) {
+        let place = self.layout.definition(definition).unwrap().clone();
+        let ambient = LuaExpr::name("_G").index(LuaExpr::string(&function.name));
+        let missing = LuaExpr::string(&format!("missing Lua extern `{}`", function.name));
+        self.local(
+            place.to_string(),
+            Some(LuaExpr::name("assert").call(vec![ambient, missing])),
+        );
+    }
+
+    fn bind_result_extern(&mut self, function: &ExternFn, definition: crate::hir::DefId) {
+        self.uses_rt = true;
+        self.lua.push_anchor(function.name_span);
+        let host = self.fresh_tmp();
+        let ambient = LuaExpr::name("_G").index(LuaExpr::string(&function.name));
+        let missing = LuaExpr::string(&format!("missing Lua extern `{}`", function.name));
+        self.local(
+            &host,
+            Some(LuaExpr::name("assert").call(vec![ambient, missing])),
+        );
+
+        let params = function
+            .params
+            .iter()
+            .map(|parameter| self.local_name(&parameter.name))
+            .collect::<Vec<_>>();
+        self.lua.begin_function(
+            self.layout.callable_target(definition, false),
+            params.clone(),
+        );
+        let mut host_args = Vec::new();
+        for (parameter, parameter_name) in function.params.iter().zip(params) {
+            if self
+                .hir
+                .type_is_builtin(&parameter.ty, rua_core::BuiltinId::TypeResult)
+            {
+                let ok = self.fresh_tmp();
+                let error = self.fresh_tmp();
+                self.lua.local(vec![ok.clone(), error.clone()], Vec::new());
+                self.lua.begin_if(
+                    LuaExpr::name(&parameter_name)
+                        .field("tag")
+                        .binary(LuaBinaryOp::Eq, LuaExpr::string("ok")),
+                );
+                self.assign(
+                    LuaExpr::name(&ok),
+                    LuaExpr::name(&parameter_name).field("value"),
+                );
+                self.lua.begin_else();
+                self.assign(
+                    LuaExpr::name(&error),
+                    LuaExpr::name(&parameter_name).field("value"),
+                );
+                self.lua.end_block();
+                host_args.extend([LuaExpr::name(ok), LuaExpr::name(error)]);
+            } else {
+                host_args.push(LuaExpr::name(parameter_name));
+            }
+        }
+
+        let value = self.fresh_tmp();
+        let error = self.fresh_tmp();
+        self.lua.local(
+            vec![value.clone(), error.clone()],
+            vec![LuaExpr::name(host).call(host_args)],
+        );
+        self.lua
+            .begin_if(LuaExpr::name(&error).binary(LuaBinaryOp::Ne, LuaExpr::Nil));
+        self.lua
+            .return_values(vec![rt_call("result_err", vec![LuaExpr::name(&error)])]);
+        self.lua.end_block();
+        self.lua
+            .return_values(vec![rt_call("result_ok", vec![LuaExpr::name(&value)])]);
+        self.lua.end_block();
+        self.lua.pop_anchor();
+    }
+
+    fn declare_mod(&mut self, m: &ModDecl, module: crate::hir::ModuleId) {
+        let place = self
+            .layout
+            .module(module)
+            .expect("runtime module has a backend place")
+            .clone();
         self.blank();
-        self.line(&format!("---@class {}", m.name));
-        self.line(&format!("local {} = {{}}", m.name));
+        self.annotation(format!("---@class {place}"));
+        if self.hir.module(module).parent == Some(self.hir.root) {
+            self.lua.local_table(place.to_string());
+        } else {
+            self.lua.assign_table(place.expression());
+        }
 
         // Class tables for module-local structs/enums.
-        for item in &m.items {
+        for (item_index, item) in m.items.iter().enumerate() {
             match item {
-                Item::Struct(s) => {
-                    self.line(&format!(
-                        "local {0} = {{}}; {0}.__index = {0}",
-                        s.name
-                    ));
+                Item::Struct(_) => {
+                    let definition = self.program.item_definition(module, item_index);
+                    let type_place = self.layout.definition(definition).unwrap().clone();
+                    self.lua.assign_table(type_place.expression());
+                    self.assign(
+                        type_place.field("__index").expression(),
+                        type_place.expression(),
+                    );
                 }
-                Item::Enum(e) => {
-                    self.line(&format!(
-                        "local {0} = {{}}; {0}.__index = {0}",
-                        e.name
-                    ));
+                Item::Enum(_) => {
+                    let definition = self.program.item_definition(module, item_index);
+                    let type_place = self.layout.definition(definition).unwrap().clone();
+                    self.lua.assign_table(type_place.expression());
+                    self.assign(
+                        type_place.field("__index").expression(),
+                        type_place.expression(),
+                    );
                 }
                 _ => {}
             }
         }
 
-        // Emit functions as `function mod.name(...)` — direct table assignment.
-        for item in &m.items {
+        for (item_index, item) in m.items.iter().enumerate() {
+            if let Item::Mod(child) = item
+                && !child.is_decl
+            {
+                let child_module = self.program.child_module(module, item_index);
+                self.declare_mod(child, child_module);
+            }
+        }
+    }
+
+    fn define_mod(
+        &mut self,
+        m: &ModDecl,
+        traits: &HashMap<crate::hir::DefId, &TraitDecl>,
+        module: crate::hir::ModuleId,
+    ) {
+        let previous_module = self.current_module;
+        self.current_module = module;
+        for (item_index, item) in m.items.iter().enumerate() {
             match item {
                 Item::Fn(f) => {
+                    let definition = self.program.item_definition(module, item_index);
+                    let place = self.layout.definition(definition).unwrap().clone();
+                    self.lua.push_anchor(f.name_span);
                     self.blank();
                     self.emit_fn_annotation(f);
-                    let params: Vec<&str> =
-                        f.params.iter().map(|p| p.name.as_str()).collect();
-                    self.line(&format!(
-                        "function {}.{}({})",
-                        m.name,
-                        f.name,
-                        params.join(", ")
-                    ));
-                    self.indent += 1;
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|parameter| self.local_name(&parameter.name))
+                        .collect();
+                    self.lua.begin_function(place.function_target(), params);
                     self.gen_block_to(&f.body, &Dest::Return);
-                    self.indent -= 1;
-                    self.line("end");
+                    self.lua.end_block();
+                    self.lua.pop_anchor();
                 }
-                Item::Mod(md) if !md.is_decl => self.gen_mod(md, traits),
+                Item::Mod(md) if !md.is_decl => {
+                    let child = self.program.child_module(module, item_index);
+                    self.define_mod(md, traits, child);
+                }
                 _ => {}
             }
         }
-        self.gen_impls(&m.items, traits);
+        self.gen_impls(&m.items, traits, module);
+        self.current_module = previous_module;
+    }
+
+    fn init_entries(
+        &mut self,
+        order: &[ChunkEntry],
+        items: &[Item],
+        chunk: &Block,
+        module: crate::hir::ModuleId,
+    ) {
+        let previous_module = self.current_module;
+        self.current_module = module;
+        for entry in order {
+            match *entry {
+                ChunkEntry::Statement(index) => self.gen_stmt(&chunk.stmts[index]),
+                ChunkEntry::Item(index) => {
+                    if let Item::Mod(child_decl) = &items[index]
+                        && !child_decl.is_decl
+                    {
+                        let child = self.program.child_module(module, index);
+                        self.init_entries(
+                            &child_decl.source_order,
+                            &child_decl.items,
+                            &child_decl.chunk,
+                            child,
+                        );
+                    }
+                }
+            }
+        }
+        self.current_module = previous_module;
+    }
+
+    fn publish_mod(&mut self, declaration: &ModDecl, module: crate::hir::ModuleId) {
+        let module_place = self.layout.module(module).unwrap().clone();
+        for (item_index, item) in declaration.items.iter().enumerate() {
+            let exported = match item {
+                Item::Fn(function) if function.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(module, item_index))
+                    .map(|place| (function.name.as_str(), place.clone())),
+                Item::Struct(structure) if structure.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(module, item_index))
+                    .map(|place| (structure.name.as_str(), place.clone())),
+                Item::Enum(enumeration) if enumeration.is_pub => self
+                    .layout
+                    .definition(self.program.item_definition(module, item_index))
+                    .map(|place| (enumeration.name.as_str(), place.clone())),
+                Item::Mod(child) if child.is_pub && !child.is_decl => self
+                    .layout
+                    .module(self.program.child_module(module, item_index))
+                    .map(|place| (child.name.as_str(), place.clone())),
+                _ => None,
+            };
+            if let Some((name, place)) = exported {
+                let encoded = self.layout.member_name(name);
+                let canonical = module_place.field(&encoded);
+                if place != canonical || encoded != name {
+                    self.assign(
+                        module_place.expression().index(LuaExpr::string(name)),
+                        place.expression(),
+                    );
+                }
+            }
+            if let Item::Mod(child) = item
+                && !child.is_decl
+            {
+                let child_module = self.program.child_module(module, item_index);
+                self.publish_mod(child, child_module);
+            }
+        }
     }
 
     /// Emit all `impl` blocks in `items` (methods, operator aliases, inherited
     /// trait defaults). The type's class table is a same-scope local, so
     /// `function Type.method(...)` binds correctly at root or inside a module.
-    fn gen_impls(&mut self, items: &[Item], traits: &HashMap<&str, &TraitDecl>) {
-        for item in items {
+    fn gen_impls(
+        &mut self,
+        items: &[Item],
+        traits: &HashMap<crate::hir::DefId, &TraitDecl>,
+        module: crate::hir::ModuleId,
+    ) {
+        let previous_module = self.current_module;
+        self.current_module = module;
+        for (item_index, item) in items.iter().enumerate() {
             if let Item::Impl(im) = item {
-                let mut overridden: HashSet<&str> = HashSet::new();
-                for m in &im.methods {
-                    overridden.insert(m.name.as_str());
-                    self.gen_method(&im.type_name, m);
-                    if let Some(tr) = &im.trait_name
-                        && let Some(meta) = op_alias(tr, &m.name) {
-                            self.line(&format!("{0}.{1} = {0}.{2}", im.type_name, meta, m.name));
-                        }
+                let implementation = self.program.implementation(module, item_index);
+                let type_place = self
+                    .target_place(crate::hir::ResolvedTarget::Item(implementation.owner))
+                    .expect("resolved impl owner has a backend place");
+                let mut overridden = HashSet::new();
+                for (method_index, m) in im.methods.iter().enumerate() {
+                    let definition =
+                        self.program
+                            .implementation_method(module, item_index, method_index);
+                    if let Some(origin) = self
+                        .hir
+                        .trait_method_implementations
+                        .get(&definition)
+                        .copied()
+                    {
+                        overridden.insert(origin);
+                    }
+                    self.gen_method(m, definition);
+                    if let Some(trait_target) = self.hir.method_traits.get(&definition).copied()
+                        && let Some(meta) = op_alias(trait_target, &m.name)
+                    {
+                        let source = self
+                            .layout
+                            .definition(definition)
+                            .expect("typed method has a backend place")
+                            .expression();
+                        self.assign(type_place.field(meta).expression(), source);
+                    }
                 }
-                if let Some(tr) = &im.trait_name
-                    && let Some(td) = traits.get(tr.as_str()) {
-                        for tm in &td.methods {
-                            if tm.default.is_some() && !overridden.contains(tm.name.as_str()) {
-                                self.gen_trait_default(&im.type_name, tm);
-                                if let Some(meta) = op_alias(tr, &tm.name) {
-                                    self.line(&format!(
-                                        "{0}.{1} = {0}.{2}",
-                                        im.type_name, meta, tm.name
-                                    ));
-                                }
+                if let Some(crate::hir::TraitTarget::Item(trait_id)) = implementation.trait_target
+                    && let Some(td) = traits.get(&trait_id)
+                {
+                    for (method_index, tm) in td.methods.iter().enumerate() {
+                        let origin = self.program.trait_method(trait_id, method_index);
+                        if tm.default.is_some() && !overridden.contains(&origin) {
+                            let definition =
+                                self.program.inherited_method(implementation.owner, origin);
+                            self.gen_trait_default(tm, definition);
+                            let meta = self
+                                .hir
+                                .method_traits
+                                .get(&definition)
+                                .copied()
+                                .and_then(|trait_target| op_alias(trait_target, &tm.name));
+                            if let Some(meta) = meta {
+                                let source = self
+                                    .layout
+                                    .definition(definition)
+                                    .expect("inherited method has a backend place")
+                                    .expression();
+                                self.assign(type_place.field(meta).expression(), source);
                             }
                         }
                     }
+                }
             }
         }
+        self.current_module = previous_module;
     }
 
-    fn gen_free_fn(&mut self, f: &FnDecl) {
+    fn gen_free_fn(&mut self, f: &FnDecl, definition: crate::hir::DefId) {
+        self.lua.push_anchor(f.name_span);
         self.blank();
         self.emit_fn_annotation(f);
-        let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-        self.line(&format!("local function {}({})", f.name, params.join(", ")));
-        self.indent += 1;
+        let params = f
+            .params
+            .iter()
+            .map(|parameter| self.local_name(&parameter.name))
+            .collect();
+        let place = self.layout.definition(definition).unwrap().clone();
+        self.lua.begin_function(place.function_target(), params);
         self.gen_block_to(&f.body, &Dest::Return);
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
+        self.lua.pop_anchor();
     }
 
-    fn gen_method(&mut self, type_name: &str, m: &FnDecl) {
+    fn gen_method(&mut self, m: &FnDecl, definition: crate::hir::DefId) {
+        self.lua.push_anchor(m.name_span);
         self.blank();
         // Return annotation so LuaLS can infer result types.
         if let Some(ret) = &m.ret {
-            self.line(&format!("---@return {}", type_to_emmylua(ret)));
+            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
         }
-        let params: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
-        // `:` gives an implicit `self`; `.` for associated functions.
-        let sep = if m.has_self { ":" } else { "." };
-        self.line(&format!(
-            "function {}{}{}({})",
-            type_name,
-            sep,
-            m.name,
-            params.join(", ")
-        ));
-        self.indent += 1;
+        let params = m
+            .params
+            .iter()
+            .map(|parameter| self.local_name(&parameter.name))
+            .collect();
+        let target = self.layout.callable_target(definition, m.has_self);
+        self.lua.begin_function(target, params);
         self.gen_block_to(&m.body, &Dest::Return);
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
+        self.lua.pop_anchor();
     }
 
-    fn gen_trait_default(&mut self, type_name: &str, tm: &TraitMethod) {
+    fn gen_trait_default(&mut self, tm: &TraitMethod, definition: crate::hir::DefId) {
+        self.lua.push_anchor(tm.name_span);
         self.blank();
         // Emit param/return annotations
         let skip_self = if tm.has_self { 1 } else { 0 };
         for p in tm.params.iter().skip(skip_self) {
-            self.line(&format!(
-                "---@param {} {}",
-                p.name,
-                type_to_emmylua(&p.ty)
-            ));
+            self.annotation(format!("---@param {} {}", p.name, type_to_emmylua(&p.ty)));
         }
         if let Some(ret) = &tm.ret {
-            self.line(&format!("---@return {}", type_to_emmylua(ret)));
+            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
         }
-        let params: Vec<&str> = tm.params.iter().map(|p| p.name.as_str()).collect();
-        let sep = if tm.has_self { ":" } else { "." };
-        self.line(&format!(
-            "function {}{}{}({})",
-            type_name,
-            sep,
-            tm.name,
-            params.join(", ")
-        ));
-        self.indent += 1;
+        let params = tm
+            .params
+            .iter()
+            .map(|parameter| self.local_name(&parameter.name))
+            .collect();
+        let target = self.layout.callable_target(definition, tm.has_self);
+        self.lua.begin_function(target, params);
         // `default` is guaranteed Some by the caller.
         if let Some(body) = &tm.default {
             self.gen_block_to(body, &Dest::Return);
         }
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
+        self.lua.pop_anchor();
     }
 
     // --- statements --------------------------------------------------------
 
-    fn gen_stmt(&mut self, s: &Stmt) {
+    fn gen_stmt(&mut self, statement: &Stmt) {
+        let anchor = statement_source(statement);
+        if let Some(source) = anchor {
+            self.lua.push_anchor(source);
+        }
+        self.gen_stmt_inner(statement);
+        if anchor.is_some() {
+            self.lua.pop_anchor();
+        }
+    }
+
+    fn gen_stmt_inner(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, init, ty, .. } => {
+                let local = self.local_name(name);
                 // EmmyLua type annotation for explicitly typed bindings
                 if let Some(ty_ann) = ty {
-                    self.line(&format!("---@type {}", type_to_emmylua(ty_ann)));
+                    self.annotation(format!("---@type {}", type_to_emmylua(ty_ann)));
                 }
                 if let ExprKind::Closure { params, body, .. } = &init.kind {
-                    self.gen_closure_local(name, params, body);
+                    self.gen_closure_local(&local, params, body);
                 } else if let ExprKind::Try { expr } = &init.kind {
-                    // let v = expr? : generate nil-check directly with target name.
                     let v = self.gen_inline(expr);
-                    let may_multi = matches!(
-                        &expr.kind,
-                        ExprKind::Call { .. } | ExprKind::MethodCall { .. }
-                    );
-                    if may_multi {
-                        let err_name = self.fresh_tmp();
-                        self.line(&format!("local {}, {} = {}", name, err_name, v));
-                        self.line(&format!(
-                            "if {} ~= nil then return nil, {} end",
-                            err_name, err_name
-                        ));
+                    if self.info.is_result_try(init.id) {
+                        let result = self.fresh_tmp();
+                        self.local(&result, Some(v));
+                        self.lua.compact_if(
+                            LuaExpr::name(&result)
+                                .field("tag")
+                                .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
+                            vec![InlineStatement::return_value(LuaExpr::name(&result))],
+                        );
+                        self.local(&local, Some(LuaExpr::name(&result).field("value")));
                     } else {
-                        self.line(&format!("local {} = {}", name, v));
+                        self.local(&local, Some(v));
+                        self.lua.compact_if(
+                            LuaExpr::name(&local).binary(LuaBinaryOp::Eq, LuaExpr::Nil),
+                            vec![InlineStatement::return_nil()],
+                        );
                     }
-                    self.line(&format!("if {} == nil then return nil end", name));
-                } else if self
-                    .info
-                    .iter_plan(init.span.file, init.span.start, init.span.len)
-                    .is_some()
-                    || needs_hoist(init)
-                {
-                    self.line(&format!("local {}", name));
-                    self.gen_expr_to(init, &Dest::Var(name.clone()));
+                } else if self.info.iter_plan(init.id).is_some() || needs_hoist(init) {
+                    self.local(&local, None);
+                    self.gen_expr_to(init, &Dest::Var(LuaExpr::name(local)));
                 } else {
                     let v = self.gen_inline(init);
-                    self.line(&format!("local {} = {}", name, v));
+                    self.local(&local, Some(v));
                 }
             }
             Stmt::Expr(e) => self.gen_expr_to(e, &Dest::Discard),
             Stmt::Return(opt) => {
                 if let Some((target, label)) = self.closure_return_targets.last().cloned() {
                     match opt {
-                        Some(e) => self.gen_expr_to(e, &Dest::Var(target)),
-                        None => self.line(&format!("{} = nil", target)),
+                        Some(e) => self.gen_expr_to(e, &Dest::Var(LuaExpr::name(&target))),
+                        None => self.assign(LuaExpr::name(target), LuaExpr::Nil),
                     }
-                    self.line(&format!("goto {}", label));
+                    self.lua.goto(label);
                     return;
                 }
-                self.line("do");
-                self.indent += 1;
+                self.lua.begin_do();
                 match opt {
                     Some(e) => self.gen_expr_to(e, &Dest::Return),
-                    None => self.line("return"),
+                    None => self.return_none(),
                 }
-                self.indent -= 1;
-                self.line("end");
+                self.lua.end_block();
             }
             Stmt::While { cond, body } => {
                 let c = self.gen_inline(cond);
-                self.line(&format!("while {} do", c));
-                self.indent += 1;
+                self.lua.begin_while(c);
                 self.gen_block_to(body, &Dest::Discard);
-                if Self::block_has_continue(body) { self.line("::continue::"); }
-                self.indent -= 1;
-                self.line("end");
+                if Self::block_has_continue(body) {
+                    self.lua.label("continue");
+                }
+                self.lua.end_block();
             }
             Stmt::Loop { body } => {
-                self.line("while true do");
-                self.indent += 1;
+                self.lua.begin_while(LuaExpr::Bool(true));
                 self.gen_block_to(body, &Dest::Discard);
-                if Self::block_has_continue(body) { self.line("::continue::"); }
-                self.indent -= 1;
-                self.line("end");
+                if Self::block_has_continue(body) {
+                    self.lua.label("continue");
+                }
+                self.lua.end_block();
             }
-            Stmt::For { var, iter, body, .. } => self.gen_for(var, iter, body),
+            Stmt::For {
+                var, iter, body, ..
+            } => self.gen_for(var, iter, body),
             Stmt::WhileLet { pat, expr, body } => {
-                self.line("while true do");
-                self.indent += 1;
+                self.lua.begin_while(LuaExpr::Bool(true));
                 let m = self.fresh_tmp();
                 let s = self.gen_inline(expr);
-                self.line(&format!("local {} = {}", m, s));
+                self.local(&m, Some(s));
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, &m, "\"\"", &mut tests, &mut binds);
-                let cond = if tests.is_empty() {
-                    "true".to_string()
-                } else {
-                    tests.join(" and ")
-                };
-                self.line(&format!("if {} then", cond));
-                self.indent += 1;
+                self.pat_test(pat, LuaExpr::name(&m), &mut tests, &mut binds);
+                self.lua.begin_if(and_all(tests));
                 for (name, subj) in &binds {
-                    self.line(&format!("local {} = {}", name, subj));
+                    self.local(self.local_name(name), Some(subj.clone()));
                 }
                 self.gen_block_to(body, &Dest::Discard);
-                self.indent -= 1;
-                self.line("else");
-                self.indent += 1;
-                self.line("break");
-                self.indent -= 1;
-                self.line("end");
-                if Self::block_has_continue(body) { self.line("::continue::"); }
-                self.indent -= 1;
-                self.line("end");
+                self.lua.begin_else();
+                self.lua.break_statement();
+                self.lua.end_block();
+                if Self::block_has_continue(body) {
+                    self.lua.label("continue");
+                }
+                self.lua.end_block();
             }
-            Stmt::Break => self.line("break"),
-            Stmt::Continue => self.line("goto continue"),
+            Stmt::Break => self.lua.break_statement(),
+            Stmt::Continue => self.lua.goto("continue"),
         }
     }
 
     fn gen_for(&mut self, var: &str, iter: &Expr, body: &Block) {
-        if let Some(plan) = self
-            .info
-            .iter_plan(iter.span.file, iter.span.start, iter.span.len)
+        let variable = self.local_name(var);
+        if let Some(plan) = self.info.iter_plan(iter.id)
             && (!plan.adapters.is_empty()
                 || matches!(
                     plan.source.kind,
@@ -830,7 +941,7 @@ impl Codegen<'_> {
                 ))
             && let Some(chain) = extract_iter_chain(iter, plan, false)
         {
-            self.gen_iter_loop(&chain, plan, Some((var, body)), &Dest::Discard);
+            self.gen_iter_loop(&chain, plan, Some((&variable, body)), &Dest::Discard);
             return;
         }
         if let ExprKind::Range {
@@ -845,83 +956,90 @@ impl Codegen<'_> {
                 e
             } else if let ExprKind::Int(n) = &end.kind {
                 // Compile-time constant: `0..5` → `0, 4`
-                n.parse::<i64>().ok().map(|v| (v - 1).to_string()).unwrap_or_else(|| format!("{} - 1", e))
+                n.parse::<i64>()
+                    .ok()
+                    .map(|v| LuaExpr::integer((v - 1).to_string()))
+                    .unwrap_or_else(|| e.clone().binary(LuaBinaryOp::Sub, LuaExpr::integer("1")))
             } else {
-                format!("{} - 1", e)
+                e.binary(LuaBinaryOp::Sub, LuaExpr::integer("1"))
             };
-            self.line(&format!("for {} = {}, {} do", var, s, stop));
-            self.indent += 1;
+            self.lua.begin_numeric_for(&variable, s, stop);
             self.gen_block_to(body, &Dest::Discard);
-            if Self::block_has_continue(body) { self.line("::continue::"); }
-            self.indent -= 1;
-            self.line("end");
+            if Self::block_has_continue(body) {
+                self.lua.label("continue");
+            }
+            self.lua.end_block();
         } else {
             // General iterable: a Vec `{ [0..n-1], n = len }`.
             let it = self.gen_inline(iter);
             let holder = self.fresh_tmp();
-            self.line(&format!("local {} = {}", holder, it));
+            self.local(&holder, Some(it));
             let idx = self.fresh_tmp();
-            self.line(&format!("for {} = 0, {}.n - 1 do", idx, holder));
-            self.indent += 1;
-            self.line(&format!("local {} = {}[{}]", var, holder, idx));
+            self.lua.begin_numeric_for(
+                &idx,
+                LuaExpr::integer("0"),
+                LuaExpr::name(&holder)
+                    .field("n")
+                    .binary(LuaBinaryOp::Sub, LuaExpr::integer("1")),
+            );
+            self.local(
+                &variable,
+                Some(LuaExpr::name(&holder).index(LuaExpr::name(&idx))),
+            );
             self.gen_block_to(body, &Dest::Discard);
-            if Self::block_has_continue(body) { self.line("::continue::"); }
-            self.indent -= 1;
-            self.line("end");
+            if Self::block_has_continue(body) {
+                self.lua.label("continue");
+            }
+            self.lua.end_block();
         }
     }
 
     fn gen_closure_local(&mut self, name: &str, params: &[ClosureParam], body: &ClosureBody) {
         let params = params
             .iter()
-            .map(|param| param.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.line(&format!("local function {name}({params})"));
-        self.indent += 1;
+            .map(|param| self.local_name(&param.name))
+            .collect::<Vec<_>>();
+        self.lua.begin_function(FunctionTarget::local(name), params);
         match body {
             ClosureBody::Expr(expr) => self.gen_expr_to(expr, &Dest::Return),
             ClosureBody::Block(block) => self.gen_block_to(block, &Dest::Return),
         }
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
     }
 
-    fn gen_closure_value(&mut self, params: &[ClosureParam], body: &ClosureBody) -> String {
+    fn gen_closure_value(&mut self, params: &[ClosureParam], body: &ClosureBody) -> LuaExpr {
         let local = self.fresh_tmp();
         self.gen_closure_local(&local, params, body);
-        local
+        LuaExpr::name(local)
     }
 
-    fn gen_inlined_closure(&mut self, closure: &Expr, inputs: &[String]) -> String {
+    fn gen_inlined_closure(&mut self, closure: &Expr, inputs: &[LuaExpr]) -> LuaExpr {
         let ExprKind::Closure { params, body, .. } = &closure.kind else {
-            return "nil".to_string();
+            return LuaExpr::Nil;
         };
         let result = self.fresh_tmp();
-        let done = matches!(body, ClosureBody::Block(_))
-            .then(|| format!("{}_done", self.fresh_tmp()));
-        self.line(&format!("local {}", result));
-        self.line("do");
-        self.indent += 1;
+        let done =
+            matches!(body, ClosureBody::Block(_)).then(|| format!("{}_done", self.fresh_tmp()));
+        self.local(&result, None);
+        self.lua.begin_do();
         for (param, input) in params.iter().zip(inputs) {
-            self.line(&format!("local {} = {}", param.name, input));
+            self.local(self.local_name(&param.name), Some(input.clone()));
         }
         match body {
-            ClosureBody::Expr(expr) => self.gen_expr_to(expr, &Dest::Var(result.clone())),
+            ClosureBody::Expr(expr) => self.gen_expr_to(expr, &Dest::Var(LuaExpr::name(&result))),
             ClosureBody::Block(block) => {
                 let done = done.as_ref().unwrap();
                 self.closure_return_targets
                     .push((result.clone(), done.clone()));
-                self.gen_block_to(block, &Dest::Var(result.clone()));
+                self.gen_block_to(block, &Dest::Var(LuaExpr::name(&result)));
                 self.closure_return_targets.pop();
             }
         }
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
         if let Some(done) = done {
-            self.line(&format!("::{}::", done));
+            self.lua.label(done);
         }
-        result
+        LuaExpr::name(result)
     }
 
     fn gen_iter_loop(
@@ -938,22 +1056,20 @@ impl Codegen<'_> {
                 };
                 let start_value = self.gen_inline(start);
                 let start_local = self.fresh_tmp();
-                self.line(&format!("local {} = {}", start_local, start_value));
+                self.local(&start_local, Some(start_value));
                 let end_value = self.gen_inline(end);
                 let end_local = self.fresh_tmp();
-                self.line(&format!("local {} = {}", end_local, end_value));
+                self.local(&end_local, Some(end_value));
                 IterLoopSource::Range {
                     start: start_local,
                     end: end_local,
                     inclusive: plan.source.kind == IterSourceKind::InclusiveRange,
                 }
             }
-            IterSourceKind::Vec
-            | IterSourceKind::VecIter
-            | IterSourceKind::VecIntoIter => {
+            IterSourceKind::Vec | IterSourceKind::VecIter | IterSourceKind::VecIntoIter => {
                 let value = self.gen_inline(chain.source);
                 let holder = self.fresh_tmp();
-                self.line(&format!("local {} = {}", holder, value));
+                self.local(&holder, Some(value));
                 IterLoopSource::Vec { holder }
             }
         };
@@ -964,7 +1080,7 @@ impl Codegen<'_> {
             match adapter.kind {
                 IterAdapterKind::Enumerate => {
                     let counter = self.fresh_tmp();
-                    self.line(&format!("local {} = 0", counter));
+                    self.local(&counter, Some(LuaExpr::integer("0")));
                     state.counter = Some(counter);
                 }
                 IterAdapterKind::Skip | IterAdapterKind::Take => {
@@ -972,11 +1088,11 @@ impl Codegen<'_> {
                         .args
                         .first()
                         .map(|arg| self.gen_inline(arg))
-                        .unwrap_or_else(|| "0".to_string());
+                        .unwrap_or_else(|| LuaExpr::integer("0"));
                     let limit = self.fresh_tmp();
-                    self.line(&format!("local {} = {}", limit, limit_value));
+                    self.local(&limit, Some(limit_value));
                     let counter = self.fresh_tmp();
-                    self.line(&format!("local {} = 0", counter));
+                    self.local(&counter, Some(LuaExpr::integer("0")));
                     state.limit = Some(limit);
                     state.counter = Some(counter);
                 }
@@ -990,7 +1106,16 @@ impl Codegen<'_> {
             IterConsumerKind::CollectVec => {
                 self.uses_rt = true;
                 let result = self.fresh_tmp();
-                self.line(&format!("local {} = rt.vec({{ n = 0 }})", result));
+                self.local(
+                    &result,
+                    Some(rt_call(
+                        "vec",
+                        vec![LuaExpr::named_table(vec![(
+                            "n".into(),
+                            LuaExpr::integer("0"),
+                        )])],
+                    )),
+                );
                 Some(result)
             }
             IterConsumerKind::Fold => {
@@ -998,29 +1123,25 @@ impl Codegen<'_> {
                     .consumer_args
                     .first()
                     .map(|arg| self.gen_inline(arg))
-                    .unwrap_or_else(|| "nil".to_string());
+                    .unwrap_or(LuaExpr::Nil);
                 let result = self.fresh_tmp();
-                self.line(&format!("local {} = {}", result, init));
+                self.local(&result, Some(init));
                 Some(result)
             }
             IterConsumerKind::Count => {
                 let result = self.fresh_tmp();
-                self.line(&format!("local {} = 0", result));
+                self.local(&result, Some(LuaExpr::integer("0")));
                 Some(result)
             }
             IterConsumerKind::Any | IterConsumerKind::All => {
                 let result = self.fresh_tmp();
-                let initial = if plan.consumer == IterConsumerKind::All {
-                    "true"
-                } else {
-                    "false"
-                };
-                self.line(&format!("local {} = {}", result, initial));
+                let initial = plan.consumer == IterConsumerKind::All;
+                self.local(&result, Some(LuaExpr::Bool(initial)));
                 Some(result)
             }
             IterConsumerKind::Find => {
                 let result = self.fresh_tmp();
-                self.line(&format!("local {} = nil", result));
+                self.local(&result, Some(LuaExpr::Nil));
                 Some(result)
             }
         };
@@ -1033,164 +1154,228 @@ impl Codegen<'_> {
                 inclusive,
             } => {
                 let stop = if *inclusive {
-                    end.clone()
+                    LuaExpr::name(end)
                 } else {
-                    format!("({}) - 1", end)
+                    LuaExpr::name(end).binary(LuaBinaryOp::Sub, LuaExpr::integer("1"))
                 };
                 let index = self.fresh_tmp();
-                self.line(&format!("for {} = {}, {} do", index, start, stop));
-                self.indent += 1;
-                self.line(&format!("local {} = {}", item, index));
-                self.indent -= 1;
+                self.lua
+                    .begin_numeric_for(&index, LuaExpr::name(start), stop);
+                self.local(&item, Some(LuaExpr::name(index)));
             }
             IterLoopSource::Vec { holder } => {
                 let index = self.fresh_tmp();
-                self.line(&format!("for {} = 0, {}.n - 1 do", index, holder));
-                self.indent += 1;
-                self.line(&format!("local {} = {}[{}]", item, holder, index));
-                self.indent -= 1;
+                self.lua.begin_numeric_for(
+                    &index,
+                    LuaExpr::integer("0"),
+                    LuaExpr::name(holder)
+                        .field("n")
+                        .binary(LuaBinaryOp::Sub, LuaExpr::integer("1")),
+                );
+                self.local(
+                    &item,
+                    Some(LuaExpr::name(holder).index(LuaExpr::name(index))),
+                );
             }
         }
-        self.indent += 1;
         let active = self.fresh_tmp();
-        self.line(&format!("local {} = true", active));
+        self.local(&active, Some(LuaExpr::Bool(true)));
 
         for (adapter, state) in chain.adapters.iter().zip(&states) {
-            self.line(&format!("if {} then", active));
-            self.indent += 1;
+            self.lua.begin_if(LuaExpr::name(&active));
             match adapter.kind {
                 IterAdapterKind::Map => {
                     if let Some(closure) = adapter.args.first() {
-                        let mapped = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
-                        self.line(&format!("{} = {}", item, mapped));
+                        let mapped = self.gen_inlined_closure(
+                            closure,
+                            std::slice::from_ref(&LuaExpr::name(&item)),
+                        );
+                        self.assign(LuaExpr::name(&item), mapped);
                     }
                 }
                 IterAdapterKind::Filter => {
                     if let Some(closure) = adapter.args.first() {
-                        let keep = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
-                        self.line(&format!("if not {} then {} = false end", keep, active));
+                        let keep = self.gen_inlined_closure(
+                            closure,
+                            std::slice::from_ref(&LuaExpr::name(&item)),
+                        );
+                        self.lua.compact_if(
+                            LuaExpr::unary(LuaUnaryOp::Not, keep),
+                            vec![InlineStatement::assign(
+                                LuaExpr::name(&active),
+                                LuaExpr::Bool(false),
+                            )],
+                        );
                     }
                 }
                 IterAdapterKind::FilterMap => {
                     if let Some(closure) = adapter.args.first() {
-                        let mapped = self.gen_inlined_closure(closure, std::slice::from_ref(&item));
-                        self.line(&format!("if {} == nil then", mapped));
-                        self.indent += 1;
-                        self.line(&format!("{} = false", active));
-                        self.indent -= 1;
-                        self.line("else");
-                        self.indent += 1;
-                        self.line(&format!("{} = {}", item, mapped));
-                        self.indent -= 1;
-                        self.line("end");
+                        let mapped = self.gen_inlined_closure(
+                            closure,
+                            std::slice::from_ref(&LuaExpr::name(&item)),
+                        );
+                        self.lua
+                            .begin_if(mapped.clone().binary(LuaBinaryOp::Eq, LuaExpr::Nil));
+                        self.assign(LuaExpr::name(&active), LuaExpr::Bool(false));
+                        self.lua.begin_else();
+                        self.assign(LuaExpr::name(&item), mapped);
+                        self.lua.end_block();
                     }
                 }
                 IterAdapterKind::Enumerate => {
                     let counter = state.counter.as_deref().unwrap_or("0");
-                    self.line(&format!(
-                        "{} = {{ [0] = {}, [1] = {}, n = 2 }}",
-                        item, counter, item
-                    ));
-                    self.line(&format!("{} = {} + 1", counter, counter));
+                    self.assign(
+                        LuaExpr::name(&item),
+                        LuaExpr::Table(vec![
+                            TableField::Indexed(LuaExpr::integer("0"), LuaExpr::name(counter)),
+                            TableField::Indexed(LuaExpr::integer("1"), LuaExpr::name(&item)),
+                            TableField::Named("n".into(), LuaExpr::integer("2")),
+                        ]),
+                    );
+                    self.assign(
+                        LuaExpr::name(counter),
+                        LuaExpr::name(counter).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                    );
                 }
                 IterAdapterKind::Skip => {
                     let counter = state.counter.as_deref().unwrap_or("0");
                     let limit = state.limit.as_deref().unwrap_or("0");
-                    self.line(&format!("if {} < {} then", counter, limit));
-                    self.indent += 1;
-                    self.line(&format!("{} = {} + 1", counter, counter));
-                    self.line(&format!("{} = false", active));
-                    self.indent -= 1;
-                    self.line("end");
+                    self.lua.begin_if(
+                        LuaExpr::name(counter).binary(LuaBinaryOp::Lt, LuaExpr::name(limit)),
+                    );
+                    self.assign(
+                        LuaExpr::name(counter),
+                        LuaExpr::name(counter).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                    );
+                    self.assign(LuaExpr::name(&active), LuaExpr::Bool(false));
+                    self.lua.end_block();
                 }
                 IterAdapterKind::Take => {
                     let counter = state.counter.as_deref().unwrap_or("0");
                     let limit = state.limit.as_deref().unwrap_or("0");
-                    self.line(&format!("if {} >= {} then break end", counter, limit));
-                    self.line(&format!("{} = {} + 1", counter, counter));
+                    self.lua.compact_if(
+                        LuaExpr::name(counter).binary(LuaBinaryOp::Ge, LuaExpr::name(limit)),
+                        vec![InlineStatement::Break],
+                    );
+                    self.assign(
+                        LuaExpr::name(counter),
+                        LuaExpr::name(counter).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                    );
                 }
             }
-            self.indent -= 1;
-            self.line("end");
+            self.lua.end_block();
         }
 
-        self.line(&format!("if {} then", active));
-        self.indent += 1;
+        self.lua.begin_if(LuaExpr::name(&active));
         match plan.consumer {
             IterConsumerKind::For => {
                 if let Some((var, body)) = for_body {
-                    self.line(&format!("local {} = {}", var, item));
+                    self.local(var, Some(LuaExpr::name(&item)));
                     self.gen_block_to(body, &Dest::Discard);
                 }
             }
             IterConsumerKind::CollectVec => {
                 let result = result.as_deref().unwrap();
-                self.line(&format!("{}[{}.n] = {}", result, result, item));
-                self.line(&format!("{}.n = {}.n + 1", result, result));
+                let length = LuaExpr::name(result).field("n");
+                self.assign(
+                    LuaExpr::name(result).index(length.clone()),
+                    LuaExpr::name(&item),
+                );
+                self.assign(
+                    length.clone(),
+                    length.binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                );
             }
             IterConsumerKind::Fold => {
                 if let (Some(result), Some(closure)) =
                     (result.as_deref(), chain.consumer_args.get(1))
                 {
-                    let inputs = [result.to_string(), item.clone()];
+                    let inputs = [LuaExpr::name(result), LuaExpr::name(&item)];
                     let next = self.gen_inlined_closure(closure, &inputs);
-                    self.line(&format!("{} = {}", result, next));
+                    self.assign(LuaExpr::name(result), next);
                 }
             }
             IterConsumerKind::Count => {
                 let result = result.as_deref().unwrap();
-                self.line(&format!("{} = {} + 1", result, result));
+                self.assign(
+                    LuaExpr::name(result),
+                    LuaExpr::name(result).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                );
             }
             IterConsumerKind::Any | IterConsumerKind::All | IterConsumerKind::Find => {
                 if let (Some(result), Some(predicate)) =
                     (result.as_deref(), chain.consumer_args.first())
                 {
-                    let matches =
-                        self.gen_inlined_closure(predicate, std::slice::from_ref(&item));
+                    let matches = self.gen_inlined_closure(
+                        predicate,
+                        std::slice::from_ref(&LuaExpr::name(&item)),
+                    );
                     match plan.consumer {
                         IterConsumerKind::Any => {
-                            self.line(&format!(
-                                "if {} then {} = true; break end",
-                                matches, result
-                            ));
+                            self.lua.compact_if(
+                                matches,
+                                vec![
+                                    InlineStatement::assign(
+                                        LuaExpr::name(result),
+                                        LuaExpr::Bool(true),
+                                    ),
+                                    InlineStatement::Break,
+                                ],
+                            );
                         }
                         IterConsumerKind::All => {
-                            self.line(&format!(
-                                "if not {} then {} = false; break end",
-                                matches, result
-                            ));
+                            self.lua.compact_if(
+                                LuaExpr::unary(LuaUnaryOp::Not, matches),
+                                vec![
+                                    InlineStatement::assign(
+                                        LuaExpr::name(result),
+                                        LuaExpr::Bool(false),
+                                    ),
+                                    InlineStatement::Break,
+                                ],
+                            );
                         }
                         IterConsumerKind::Find => {
-                            self.line(&format!(
-                                "if {} then {} = {}; break end",
-                                matches, result, item
-                            ));
+                            self.lua.compact_if(
+                                matches,
+                                vec![
+                                    InlineStatement::assign(
+                                        LuaExpr::name(result),
+                                        LuaExpr::name(&item),
+                                    ),
+                                    InlineStatement::Break,
+                                ],
+                            );
                         }
                         _ => {}
                     }
                 }
             }
         }
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
 
         if plan.consumer == IterConsumerKind::For
             && let Some((_, body)) = for_body
-                && Self::block_has_continue(body) { self.line("::continue::"); }
+            && Self::block_has_continue(body)
+        {
+            self.lua.label("continue");
+        }
         for (adapter, state) in chain.adapters.iter().zip(&states) {
             if adapter.kind == IterAdapterKind::Take {
                 let counter = state.counter.as_deref().unwrap_or("0");
                 let limit = state.limit.as_deref().unwrap_or("0");
-                self.line(&format!("if {} >= {} then break end", counter, limit));
+                self.lua.compact_if(
+                    LuaExpr::name(counter).binary(LuaBinaryOp::Ge, LuaExpr::name(limit)),
+                    vec![InlineStatement::Break],
+                );
             }
         }
-        self.indent -= 1;
-        self.line("end");
+        self.lua.end_block();
 
         if let Some(result) = result {
             match dest {
-                Dest::Var(target) => self.line(&format!("{} = {}", target, result)),
-                Dest::Return => self.line(&format!("return {}", result)),
+                Dest::Var(target) => self.assign(target.clone(), LuaExpr::name(result)),
+                Dest::Return => self.return_value(LuaExpr::name(result)),
                 Dest::Discard => {}
             }
         }
@@ -1206,16 +1391,20 @@ impl Codegen<'_> {
             Some(e) => self.gen_expr_to(e, dest),
             None => {
                 if let Dest::Var(d) = dest {
-                    self.line(&format!("{} = nil", d));
+                    self.assign(d.clone(), LuaExpr::Nil);
                 }
             }
         }
     }
 
-    fn gen_expr_to(&mut self, e: &Expr, dest: &Dest) {
-        if let Some(plan) = self
-            .info
-            .iter_plan(e.span.file, e.span.start, e.span.len)
+    fn gen_expr_to(&mut self, expression: &Expr, dest: &Dest) {
+        self.lua.push_anchor(expression.span);
+        self.gen_expr_to_inner(expression, dest);
+        self.lua.pop_anchor();
+    }
+
+    fn gen_expr_to_inner(&mut self, e: &Expr, dest: &Dest) {
+        if let Some(plan) = self.info.iter_plan(e.id)
             && let Some(chain) = extract_iter_chain(e, plan, true)
         {
             self.gen_iter_loop(&chain, plan, None, dest);
@@ -1228,33 +1417,25 @@ impl Codegen<'_> {
                 else_block,
             } => {
                 let c = self.gen_inline(cond);
-                self.line(&format!("if {} then", c));
-                self.indent += 1;
+                self.lua.begin_if(c);
                 self.gen_block_to(then_block, dest);
-                self.indent -= 1;
                 match else_block.as_deref() {
                     Some(ElseBranch::Block(b)) => {
-                        self.line("else");
-                        self.indent += 1;
+                        self.lua.begin_else();
                         self.gen_block_to(b, dest);
-                        self.indent -= 1;
                     }
                     Some(ElseBranch::If(inner)) => {
-                        self.line("else");
-                        self.indent += 1;
+                        self.lua.begin_else();
                         self.gen_expr_to(inner, dest);
-                        self.indent -= 1;
                     }
                     None => {
                         if let Dest::Var(d) = dest {
-                            self.line("else");
-                            self.indent += 1;
-                            self.line(&format!("{} = nil", d));
-                            self.indent -= 1;
+                            self.lua.begin_else();
+                            self.assign(d.clone(), LuaExpr::Nil);
                         }
                     }
                 }
-                self.line("end");
+                self.lua.end_block();
             }
             ExprKind::IfLet {
                 pat,
@@ -1264,45 +1445,32 @@ impl Codegen<'_> {
             } => {
                 let m = self.fresh_tmp();
                 let s = self.gen_inline(expr);
-                self.line(&format!("local {} = {}", m, s));
+                self.local(&m, Some(s));
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(pat, &m, "\"\"", &mut tests, &mut binds);
-                let cond = if tests.is_empty() {
-                    "true".to_string()
-                } else {
-                    tests.join(" and ")
-                };
-                self.line(&format!("if {} then", cond));
-                self.indent += 1;
+                self.pat_test(pat, LuaExpr::name(&m), &mut tests, &mut binds);
+                self.lua.begin_if(and_all(tests));
                 for (name, subj) in &binds {
-                    self.line(&format!("local {} = {}", name, subj));
+                    self.local(self.local_name(name), Some(subj.clone()));
                 }
                 self.gen_block_to(then_block, dest);
-                self.indent -= 1;
                 match else_block.as_deref() {
                     Some(ElseBranch::Block(b)) => {
-                        self.line("else");
-                        self.indent += 1;
+                        self.lua.begin_else();
                         self.gen_block_to(b, dest);
-                        self.indent -= 1;
                     }
                     Some(ElseBranch::If(inner)) => {
-                        self.line("else");
-                        self.indent += 1;
+                        self.lua.begin_else();
                         self.gen_expr_to(inner, dest);
-                        self.indent -= 1;
                     }
                     None => {
                         if let Dest::Var(d) = dest {
-                            self.line("else");
-                            self.indent += 1;
-                            self.line(&format!("{} = nil", d));
-                            self.indent -= 1;
+                            self.lua.begin_else();
+                            self.assign(d.clone(), LuaExpr::Nil);
                         }
                     }
                 }
-                self.line("end");
+                self.lua.end_block();
             }
             ExprKind::Block(b) => self.gen_block_to(b, dest),
             ExprKind::Match { scrut, arms } => self.gen_match(scrut, arms, dest),
@@ -1310,8 +1478,8 @@ impl Codegen<'_> {
                 let t = self.gen_inline(target);
                 self.gen_expr_to(value, &Dest::Var(t));
                 match dest {
-                    Dest::Var(d) => self.line(&format!("{} = nil", d)),
-                    Dest::Return => self.line("return nil"),
+                    Dest::Var(d) => self.assign(d.clone(), LuaExpr::Nil),
+                    Dest::Return => self.return_value(LuaExpr::Nil),
                     Dest::Discard => {}
                 }
             }
@@ -1321,13 +1489,15 @@ impl Codegen<'_> {
                     Dest::Discard => {
                         if matches!(
                             e.kind,
-                            ExprKind::Call { .. } | ExprKind::MethodCall { .. } | ExprKind::MacroCall { .. }
+                            ExprKind::Call { .. }
+                                | ExprKind::MethodCall { .. }
+                                | ExprKind::MacroCall { .. }
                         ) {
-                            self.line(&v);
+                            self.expression_statement(v);
                         }
                     }
-                    Dest::Var(d) => self.line(&format!("{} = {}", d, v)),
-                    Dest::Return => self.line(&format!("return {}", v)),
+                    Dest::Var(d) => self.assign(d.clone(), v),
+                    Dest::Return => self.return_value(v),
                 }
             }
         }
@@ -1338,67 +1508,55 @@ impl Codegen<'_> {
     fn gen_match(&mut self, scrut: &Expr, arms: &[MatchArm], dest: &Dest) {
         let m = self.fresh_tmp();
         let s = self.gen_inline(scrut);
-        // Only capture a second return value (the error companion) when the
-        // scrutinee is a call that could produce `nil, err` (Result::Err).
-        let may_multi = matches!(&scrut.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
-        let me = if may_multi {
-            let tmp = self.fresh_tmp();
-            self.line(&format!("local {}, {} = {}", m, tmp, s));
-            tmp
-        } else {
-            self.line(&format!("local {} = {}", m, s));
-            String::from("\"\"")
-        };
+        self.local(&m, Some(s));
+        let matched = self.fresh_tmp();
+        self.local(&matched, Some(LuaExpr::Bool(false)));
 
-        let mut last_is_wildcard = false;
-        for (i, arm) in arms.iter().enumerate() {
-            let (tests, binds) = self.arm_tests(arm, &m, &me);
-            let prefix = if i == 0 { "if " } else { "elseif " };
-            let has_test = !tests.is_empty();
-
-            if i == arms.len() - 1 && !has_test {
-                last_is_wildcard = true;
-                self.line("else");
-            } else if has_test {
-                self.line(&format!("{}{} then", prefix, tests.join(" and ")));
+        for arm in arms {
+            let (tests, binds) = self.arm_tests(arm, LuaExpr::name(&m));
+            let unmatched = LuaExpr::unary(LuaUnaryOp::Not, LuaExpr::name(&matched));
+            let condition = if tests.is_empty() {
+                unmatched
             } else {
-                self.line(&format!("{}true then", prefix));
-            }
-            self.indent += 1;
+                unmatched.binary(LuaBinaryOp::And, and_all(tests).parenthesized())
+            };
+            self.lua.begin_if(condition);
 
             for (name, subj) in &binds {
-                self.line(&format!("local {} = {}", name, subj));
+                self.local(self.local_name(name), Some(subj.clone()));
             }
             let guard = arm.guard.as_ref().map(|g| self.gen_inline(g));
             if let Some(g) = &guard {
-                self.line(&format!("if {} then", g));
-                self.indent += 1;
+                self.lua.begin_if(g.clone());
             }
 
+            self.assign(LuaExpr::name(&matched), LuaExpr::Bool(true));
             self.gen_expr_to(&arm.body, dest);
 
             if guard.is_some() {
-                self.indent -= 1;
-                self.line("end");
+                self.lua.end_block();
             }
-            self.indent -= 1;
+            self.lua.end_block();
         }
 
-        if !last_is_wildcard {
-            self.line("else");
-            self.indent += 1;
-            self.line("error(\"non-exhaustive match\")");
-            self.indent -= 1;
-        }
-        self.line("end");
+        self.lua.compact_if(
+            LuaExpr::unary(LuaUnaryOp::Not, LuaExpr::name(matched)),
+            vec![InlineStatement::expression(
+                LuaExpr::name("error").call(vec![LuaExpr::string("non-exhaustive match")]),
+            )],
+        );
     }
 
     /// Structural tests + bindings for a match arm against subject variable `m`.
-    fn arm_tests(&mut self, arm: &MatchArm, m: &str, me: &str) -> (Vec<String>, Vec<(String, String)>) {
+    fn arm_tests(
+        &mut self,
+        arm: &MatchArm,
+        subject: LuaExpr,
+    ) -> (Vec<LuaExpr>, Vec<(String, LuaExpr)>) {
         if arm.pats.len() == 1 {
             let mut tests = Vec::new();
             let mut binds = Vec::new();
-            self.pat_test(&arm.pats[0], m, me, &mut tests, &mut binds);
+            self.pat_test(&arm.pats[0], subject, &mut tests, &mut binds);
             (tests, binds)
         } else {
             // or-patterns: combine alternatives; bindings are not supported here.
@@ -1406,116 +1564,146 @@ impl Codegen<'_> {
             for p in &arm.pats {
                 let mut tests = Vec::new();
                 let mut binds = Vec::new();
-                self.pat_test(p, m, me, &mut tests, &mut binds);
-                let cond = if tests.is_empty() {
-                    "true".to_string()
-                } else {
-                    format!("({})", tests.join(" and "))
-                };
-                alts.push(cond);
+                self.pat_test(p, subject.clone(), &mut tests, &mut binds);
+                alts.push(and_all(tests).parenthesized());
             }
-            (vec![alts.join(" or ")], Vec::new())
+            (vec![or_all(alts)], Vec::new())
         }
     }
 
     fn pat_test(
         &mut self,
         pat: &Pattern,
-        subject: &str,
-        err_subject: &str,
-        tests: &mut Vec<String>,
-        binds: &mut Vec<(String, String)>,
+        subject: LuaExpr,
+        tests: &mut Vec<LuaExpr>,
+        binds: &mut Vec<(String, LuaExpr)>,
     ) {
         match pat {
             Pattern::Wildcard => {}
-            Pattern::Binding(name, _) => binds.push((name.clone(), subject.to_string())),
+            Pattern::Binding(name, _) => binds.push((name.clone(), subject)),
             Pattern::Literal(lit) => {
                 let v = self.gen_inline(lit);
-                tests.push(format!("{} == {}", subject, v));
+                tests.push(subject.binary(LuaBinaryOp::Eq, v));
             }
-            Pattern::Range {
-                lo,
-                hi,
-                inclusive,
-            } => {
+            Pattern::Range { lo, hi, inclusive } => {
                 let l = self.gen_inline(lo);
                 let h = self.gen_inline(hi);
-                let op = if *inclusive { "<=" } else { "<" };
-                tests.push(format!("({0} >= {1} and {0} {2} {3})", subject, l, op, h));
+                let upper = if *inclusive {
+                    LuaBinaryOp::Le
+                } else {
+                    LuaBinaryOp::Lt
+                };
+                tests.push(
+                    subject
+                        .clone()
+                        .binary(LuaBinaryOp::Ge, l)
+                        .binary(LuaBinaryOp::And, subject.binary(upper, h))
+                        .parenthesized(),
+                );
             }
-            Pattern::Path(segs) => {
-                let joined = segs.join("::");
-                match joined.as_str() {
-                    "None" | "Option::None" => {
-                        tests.push(format!("{} == nil", subject));
+            Pattern::Path { id, .. } => {
+                let target = self.pattern_target(*id);
+                match target {
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionNone) => {
+                        tests.push(subject.binary(LuaBinaryOp::Eq, LuaExpr::Nil));
                     }
-                    "Some" | "Option::Some" | "Ok" | "Result::Ok" => {
-                        tests.push(format!("{} == nil", err_subject));
-                        // bind subject as the value
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionSome) => {
+                        tests.push(subject.binary(LuaBinaryOp::Ne, LuaExpr::Nil))
                     }
-                    "Err" | "Result::Err" => {
-                        tests.push(format!("{} ~= nil", err_subject));
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
+                        tests.push(
+                            subject
+                                .field("tag")
+                                .binary(LuaBinaryOp::Eq, LuaExpr::string("ok")),
+                        )
+                    }
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
+                        tests.push(
+                            subject
+                                .field("tag")
+                                .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
+                        )
                     }
                     _ => {
-                        if let Some((_, var, _)) = self.ctx.resolve_variant(segs) {
-                            tests.push(format!("{}.tag == \"{}\"", subject, var));
-                        } else {
-                            // best-effort: treat last segment as a tag
-                            tests.push(format!(
-                                "{}.tag == \"{}\"",
-                                subject,
-                                segs.last().unwrap()
-                            ));
-                        }
+                        let (_, variant, _) = self
+                            .resolve_variant(Some(target))
+                            .expect("checked path pattern resolves to an enum variant");
+                        tests.push(subject.field("tag").binary(
+                            LuaBinaryOp::Eq,
+                            LuaExpr::string(&self.hir.definition(variant).name),
+                        ));
                     }
                 }
             }
-            Pattern::TupleVariant { path, elems } => {
-                let head = path.last().map(String::as_str).unwrap_or("");
-                match head {
-                    "Some" => {
+            Pattern::TupleVariant { id, elems, .. } => {
+                let target = self.pattern_target(*id);
+                match target {
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionSome) => {
                         // Some(x) is the bare value; None is nil.
-                        tests.push(format!("{} ~= nil", subject));
+                        tests.push(subject.clone().binary(LuaBinaryOp::Ne, LuaExpr::Nil));
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject, err_subject, tests, binds);
+                            self.pat_test(inner, subject, tests, binds);
                         }
                     }
-                    "Ok" => {
-                        // Ok(x) is the bare value; Err sets err_subject.
-                        tests.push(format!("{} == nil", err_subject));
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
+                        tests.push(
+                            subject
+                                .clone()
+                                .field("tag")
+                                .binary(LuaBinaryOp::Eq, LuaExpr::string("ok")),
+                        );
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, subject, err_subject, tests, binds);
+                            self.pat_test(inner, subject.field("value"), tests, binds);
                         }
                     }
-                    "Err" => {
-                        // Err(e) → nil, e.  Bind e = err_subject.
-                        tests.push(format!("{} ~= nil", err_subject));
+                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
+                        tests.push(
+                            subject
+                                .clone()
+                                .field("tag")
+                                .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
+                        );
                         if let Some(inner) = elems.first() {
-                            self.pat_test(inner, err_subject, err_subject, tests, binds);
+                            self.pat_test(inner, subject.field("value"), tests, binds);
                         }
                     }
                     _ => {
-                        if let Some((_, var, _)) = self.ctx.resolve_variant(path) {
-                            tests.push(format!("{}.tag == \"{}\"", subject, var));
-                        } else {
-                            tests.push(format!("{}.tag == \"{}\"", subject, head));
-                        }
+                        let (_, variant, crate::hir::VariantShape::Tuple) = self
+                            .resolve_variant(Some(target))
+                            .expect("checked tuple pattern resolves to a tuple enum variant")
+                        else {
+                            unreachable!("checked tuple pattern has tuple variant shape")
+                        };
+                        tests.push(subject.clone().field("tag").binary(
+                            LuaBinaryOp::Eq,
+                            LuaExpr::string(&self.hir.definition(variant).name),
+                        ));
                         for (i, elem) in elems.iter().enumerate() {
-                            let sub = format!("{}[{}]", subject, i + 1);
-                            self.pat_test(elem, &sub, err_subject, tests, binds);
+                            let sub = subject.clone().index(LuaExpr::integer((i + 1).to_string()));
+                            self.pat_test(elem, sub, tests, binds);
                         }
                     }
                 }
             }
-            Pattern::StructVariant { path, fields, .. } => {
+            Pattern::StructVariant {
+                id,
+                path: _,
+                fields,
+                ..
+            } => {
                 // If it resolves to an enum variant, test the tag; a plain struct
                 // pattern needs no tag test.
-                if let Some((_, var, _)) = self.ctx.resolve_variant(path) {
-                    tests.push(format!("{}.tag == \"{}\"", subject, var));
+                if let Some((_, variant, _)) =
+                    self.resolve_variant(Some(self.program.pattern_target(*id)))
+                {
+                    tests.push(subject.clone().field("tag").binary(
+                        LuaBinaryOp::Eq,
+                        LuaExpr::string(&self.hir.definition(variant).name),
+                    ));
                 }
                 for (fname, fpat) in fields {
-                    let sub = format!("{}.{}", subject, fname);
-                    self.pat_test(fpat, &sub, err_subject, tests, binds);
+                    let sub = subject.clone().field(self.layout.member_name(fname));
+                    self.pat_test(fpat, sub, tests, binds);
                 }
             }
         }
@@ -1523,29 +1711,34 @@ impl Codegen<'_> {
 
     // --- inline (pure Lua expression, may hoist) --------------------------
 
-    fn gen_inline(&mut self, e: &Expr) -> String {
-        if let Some(plan) = self
-            .info
-            .iter_plan(e.span.file, e.span.start, e.span.len)
+    fn gen_inline(&mut self, expression: &Expr) -> LuaExpr {
+        self.lua.push_anchor(expression.span);
+        let value = self.gen_inline_inner(expression);
+        self.lua.pop_anchor();
+        value
+    }
+
+    fn gen_inline_inner(&mut self, e: &Expr) -> LuaExpr {
+        if let Some(plan) = self.info.iter_plan(e.id)
             && let Some(chain) = extract_iter_chain(e, plan, true)
         {
             let tmp = self.fresh_tmp();
-            self.line(&format!("local {}", tmp));
-            self.gen_iter_loop(&chain, plan, None, &Dest::Var(tmp.clone()));
-            return tmp;
+            self.local(&tmp, None);
+            self.gen_iter_loop(&chain, plan, None, &Dest::Var(LuaExpr::name(&tmp)));
+            return LuaExpr::name(tmp);
         }
         match &e.kind {
-            ExprKind::Int(s) => lua_int_literal(s),
-            ExprKind::Float(s) => s.replace('_', ""),
-            ExprKind::Str(s) => s.clone(),
-            ExprKind::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            ExprKind::Int(s) => LuaExpr::integer(lua_int_literal(s)),
+            ExprKind::Float(s) => LuaExpr::number(s.replace('_', "")),
+            ExprKind::Str(s) => LuaExpr::string_literal(s),
+            ExprKind::Bool(value) => LuaExpr::Bool(*value),
             ExprKind::Closure { params, body, .. } => self.gen_closure_value(params, body),
-            ExprKind::Path(segs) => self.gen_path(segs),
+            ExprKind::Path(_) => self.gen_path(e),
             ExprKind::Unary { op, expr } => {
                 let inner = self.gen_inline(expr);
                 match op {
-                    UnOp::Neg => format!("-{}", paren_if_needed(&inner)),
-                    UnOp::Not => format!("not {}", paren_if_needed(&inner)),
+                    UnOp::Neg => LuaExpr::unary(LuaUnaryOp::Neg, inner),
+                    UnOp::Not => LuaExpr::unary(LuaUnaryOp::Not, inner),
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
@@ -1555,105 +1748,99 @@ impl Codegen<'_> {
                 // truncate toward zero to match Rust (Lua `//`/`%` floor, differing
                 // when exactly one operand is negative: Rust `-7/2 == -3`,
                 // `-7%2 == -1` vs Lua `-7//2 == -4`, `-7%2 == 1`).
-                if *op == BinOp::Div && self.info.is_int_div(e.span.start, e.span.len) {
+                if *op == BinOp::Div && self.info.is_int_div(e.id) {
                     self.uses_rt = true;
-                    return format!("rt.idiv({}, {})", l, r);
+                    return rt_call("idiv", vec![l, r]);
                 }
-                if *op == BinOp::Rem && self.info.is_int_rem(e.span.start, e.span.len) {
+                if *op == BinOp::Rem && self.info.is_int_rem(e.id) {
                     self.uses_rt = true;
-                    return format!("rt.irem({}, {})", l, r);
+                    return rt_call("irem", vec![l, r]);
                 }
                 // `String + String` is Lua concatenation, not arithmetic.
-                if *op == BinOp::Add && self.info.is_str_concat(e.span.start, e.span.len) {
-                    return format!("({} .. {})", l, r);
+                if *op == BinOp::Add && self.info.is_str_concat(e.id) {
+                    return l.binary(LuaBinaryOp::Concat, r).parenthesized();
                 }
-                format!("{} {} {}", l, binop_lua(*op), r)
+                l.binary(binop_lua(*op), r)
             }
             ExprKind::Call { callee, args } => self.gen_call(callee, args),
-            ExprKind::MethodCall { recv, method, args, .. } => {
+            ExprKind::MethodCall {
+                recv, method, args, ..
+            } => {
                 let r = self.gen_inline(recv);
-                let a: Vec<String> = args.iter().map(|x| self.gen_inline(x)).collect();
+                let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
                 // Recognized `String` methods route through `rt.str` (bracket
                 // form avoids clashing with Lua keywords like `repeat`); the
                 // receiver is passed as the first argument.
-                if self.info.is_str_method(e.span.start, e.span.len) {
+                if self.info.is_str_method(e.id) {
                     // Optimise: .to_string() / .to_owned() / .clone() on a
                     // string literal is a no-op — just return the literal.
                     let is_string_lit = matches!(&recv.kind, ExprKind::Str(..));
-                    if is_string_lit && matches!(method.as_str(), "to_string" | "to_owned" | "clone") {
+                    if is_string_lit
+                        && matches!(method.as_str(), "to_string" | "to_owned" | "clone")
+                    {
                         return r;
                     }
                     self.uses_rt = true;
                     let mut all = vec![r];
                     all.extend(a);
-                    return format!("rt.str[\"{}\"]({})", method, all.join(", "));
+                    return LuaExpr::name("rt")
+                        .field("str")
+                        .index(LuaExpr::string(method))
+                        .call(all);
                 }
                 // Option::map(f) — Some(v) compiles to v, None to nil.
                 // Inline the closure application directly on the raw value.
-                if self.info.is_option_map(e.span.start, e.span.len) && args.len() == 1 {
+                if self.info.is_option_map(e.id) && args.len() == 1 {
                     let val = self.fresh_tmp();
-                    self.line(&format!("local {} = {}", val, r));
-                    self.line(&format!("if {} ~= nil then", val));
-                    self.indent += 1;
-                    // Identity closure `|v| v` → just return the value
-                    if let ExprKind::Closure { params, body, .. } = &args[0].kind {
-                        if params.len() == 1
-                            && let ClosureBody::Expr(inner) = body
-                                && let ExprKind::Path(segs) = &inner.kind
-                                    && segs.len() == 1 && segs[0] == params[0].name
-                                {
-                                    // Identity: |v| v → value unchanged
-                                    self.indent -= 1;
-                                    self.line("end");
-                                    return val;
-                                }
-                        let applied = self.gen_inlined_closure(&args[0], std::slice::from_ref(&val));
-                        self.line(&format!("{} = {}", val, applied));
+                    self.local(&val, Some(r));
+                    self.lua
+                        .begin_if(LuaExpr::name(&val).binary(LuaBinaryOp::Ne, LuaExpr::Nil));
+                    if matches!(&args[0].kind, ExprKind::Closure { .. }) {
+                        let applied = self.gen_inlined_closure(
+                            &args[0],
+                            std::slice::from_ref(&LuaExpr::name(&val)),
+                        );
+                        self.assign(LuaExpr::name(&val), applied);
                     }
-                    self.indent -= 1;
-                    self.line("end");
-                    return val;
+                    self.lua.end_block();
+                    return LuaExpr::name(val);
                 }
-                format!("{}:{}({})", r, method, a.join(", "))
+                r.method_call(self.layout.member_name(method), a)
             }
             ExprKind::Field { base, name, .. } => {
-                let b = self.gen_inline(base);
-                format!("{}.{}", b, name)
+                self.gen_inline(base).field(self.layout.member_name(name))
             }
             ExprKind::Index { base, index } => {
                 let b = self.gen_inline(base);
                 let i = self.gen_inline(index);
-                format!("{}[{}]", b, i)
+                b.index(i)
             }
-            ExprKind::MacroCall { name, args } => self.gen_macro(name, args),
+            ExprKind::MacroCall { args, .. } => self.gen_macro(e, args),
             ExprKind::Range { start, end, .. } => {
                 // Ranges are only meaningful as a `for` iterator; elsewhere they
                 // have no first-class value.
                 let _ = (start, end);
-                "nil --[[ range only valid as a for-iterator ]]".to_string()
+                LuaExpr::Nil
             }
-            ExprKind::StructLit { path, fields } => self.gen_struct_lit(path, fields),
+            ExprKind::StructLit { fields, .. } => self.gen_struct_lit(e, fields),
             ExprKind::Try { expr } => {
                 let inner = self.gen_inline(expr);
-                let may_multi =
-                    matches!(&expr.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
-                if may_multi {
-                    // Function call: capture both value and optional error.
-                    let ok = self.fresh_tmp();
-                    let err = self.fresh_tmp();
-                    self.line(&format!("local {}, {} = {}", ok, err, inner));
-                    self.line(&format!(
-                        "if {} ~= nil then return nil, {} end",
-                        err, err
-                    ));
-                    self.line(&format!("if {} == nil then return nil end", ok));
-                    ok
+                let value = self.fresh_tmp();
+                self.local(&value, Some(inner));
+                if self.info.is_result_try(e.id) {
+                    self.lua.compact_if(
+                        LuaExpr::name(&value)
+                            .field("tag")
+                            .binary(LuaBinaryOp::Eq, LuaExpr::string("err")),
+                        vec![InlineStatement::return_value(LuaExpr::name(&value))],
+                    );
+                    LuaExpr::name(value).field("value")
                 } else {
-                    // Plain value / variable: no multi-return, only need nil check.
-                    let ok = self.fresh_tmp();
-                    self.line(&format!("local {} = {}", ok, inner));
-                    self.line(&format!("if {} == nil then return nil end", ok));
-                    ok
+                    self.lua.compact_if(
+                        LuaExpr::name(&value).binary(LuaBinaryOp::Eq, LuaExpr::Nil),
+                        vec![InlineStatement::return_nil()],
+                    );
+                    LuaExpr::name(value)
                 }
             }
             // Control-flow in operand position: hoist into a temp.
@@ -1663,134 +1850,224 @@ impl Codegen<'_> {
             | ExprKind::Match { .. }
             | ExprKind::Assign { .. } => {
                 let tmp = self.fresh_tmp();
-                self.line(&format!("local {}", tmp));
-                self.gen_expr_to(e, &Dest::Var(tmp.clone()));
-                tmp
+                self.local(&tmp, None);
+                self.gen_expr_to(e, &Dest::Var(LuaExpr::name(&tmp)));
+                LuaExpr::name(tmp)
             }
         }
     }
 
-    fn gen_path(&mut self, segs: &[String]) -> String {
-        // Check codegen rules first (e.g. `None` → `nil`).
-        let key = segs.join("::");
-        if let Some(rule) = self.builtin_rules.get(&key)
-            && let crate::builtins::CodegenRule::Literal(lua) = rule {
-                return (*lua).to_string();
-            }
-        if let Some((en, var, shape)) = self.ctx.resolve_variant(segs)
-            && let VarShape::Unit = shape {
-                let meta = enum_ref(segs, &en);
-                return format!("setmetatable({{ tag = \"{}\" }}, {})", var, meta);
-            }
-        segs.join(".")
+    fn gen_path(&mut self, expression: &Expr) -> LuaExpr {
+        let target = self.program.expression_target(expression.id);
+        if let crate::hir::ResolvedTarget::Builtin(builtin) = target
+            && matches!(
+                self.builtin_rules.get(builtin),
+                Some(crate::builtins::CodegenRule::Nil)
+            )
+        {
+            return LuaExpr::Nil;
+        }
+        if let Some((owner, variant, shape)) = self.resolve_variant(Some(target))
+            && let crate::hir::VariantShape::Unit = shape
+        {
+            let meta = self
+                .target_place(crate::hir::ResolvedTarget::Item(owner))
+                .expect("enum owner has a backend place");
+            return setmetatable(
+                LuaExpr::named_table(vec![(
+                    "tag".into(),
+                    LuaExpr::string(&self.hir.definition(variant).name),
+                )]),
+                meta.expression(),
+            );
+        }
+        if let Some(place) = self.target_place(target) {
+            return place.expression();
+        }
+        panic!("typed expression {:?} has no backend place", expression.id)
     }
 
-    fn gen_call(&mut self, callee: &Expr, args: &[Expr]) -> String {
-        if let ExprKind::Path(segs) = &callee.kind {
+    fn target_place(
+        &self,
+        target: crate::hir::ResolvedTarget,
+    ) -> Option<crate::backend_layout::Place> {
+        self.layout.target(target).cloned()
+    }
+
+    fn resolve_variant(
+        &self,
+        target: Option<crate::hir::ResolvedTarget>,
+    ) -> Option<(
+        crate::hir::DefId,
+        crate::hir::DefId,
+        crate::hir::VariantShape,
+    )> {
+        let crate::hir::ResolvedTarget::Item(variant) = target? else {
+            return None;
+        };
+        let crate::hir::DefKind::EnumVariant { owner, shape } = self.hir.definition(variant).kind
+        else {
+            return None;
+        };
+        Some((owner, variant, shape))
+    }
+
+    fn pattern_target(&self, id: PatternId) -> crate::hir::ResolvedTarget {
+        self.program.pattern_target(id)
+    }
+
+    fn gen_call(&mut self, callee: &Expr, args: &[Expr]) -> LuaExpr {
+        if matches!(callee.kind, ExprKind::Path(_)) {
             // Check codegen rules for builtin constructors.
-            let key = segs.join("::");
-            if let Some(rule) = self.builtin_rules.get(&key) {
+            let rule = match self.program.expression_target(callee.id) {
+                crate::hir::ResolvedTarget::Builtin(builtin) => self.builtin_rules.get(builtin),
+                _ => None,
+            };
+            if let Some(rule) = rule {
                 use crate::builtins::CodegenRule::*;
                 match rule {
                     InlineArg if !args.is_empty() => return self.gen_inline(&args[0]),
-                    MultiReturn if !args.is_empty() => {
+                    TaggedResult { ok } if !args.is_empty() => {
                         let v = self.gen_inline(&args[0]);
-                        return format!("nil, {}", v);
-                    }
-                    RtCall(lua) => {
                         self.uses_rt = true;
-                        return (*lua).to_string();
+                        let constructor = if *ok { "result_ok" } else { "result_err" };
+                        return rt_call(constructor, vec![v]);
+                    }
+                    EmptyVec => {
+                        self.uses_rt = true;
+                        return rt_call(
+                            "vec",
+                            vec![LuaExpr::named_table(vec![(
+                                "n".into(),
+                                LuaExpr::integer("0"),
+                            )])],
+                        );
+                    }
+                    EmptyMap => {
+                        self.uses_rt = true;
+                        return rt_call("map", Vec::new());
                     }
                     _ => {}
                 }
             }
             // Enum tuple-variant construction.
-            if let Some((en, var, VarShape::Tuple)) = self.ctx.resolve_variant(segs) {
-                let a: Vec<String> = args.iter().map(|x| self.gen_inline(x)).collect();
-                let meta = enum_ref(segs, &en);
-                let mut parts = vec![format!("tag = \"{}\"", var)];
-                parts.extend(a);
-                return format!("setmetatable({{ {} }}, {})", parts.join(", "), meta);
+            let target = Some(self.program.expression_target(callee.id));
+            if let Some((owner, variant, crate::hir::VariantShape::Tuple)) =
+                self.resolve_variant(target)
+            {
+                let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
+                let meta = self
+                    .target_place(crate::hir::ResolvedTarget::Item(owner))
+                    .expect("enum owner has a backend place");
+                let mut fields = vec![TableField::Named(
+                    "tag".into(),
+                    LuaExpr::string(&self.hir.definition(variant).name),
+                )];
+                fields.extend(a.into_iter().map(TableField::Value));
+                return setmetatable(LuaExpr::Table(fields), meta.expression());
             }
             // Associated function `Type::func(..)` or plain call.
-            let a: Vec<String> = args.iter().map(|x| self.gen_inline(x)).collect();
-            return format!("{}({})", segs.join("."), a.join(", "));
+            let a = args.iter().map(|x| self.gen_inline(x)).collect();
+            return self.gen_path(callee).call(a);
         }
         let c = self.gen_inline(callee);
-        let a: Vec<String> = args.iter().map(|x| self.gen_inline(x)).collect();
-        format!("{}({})", c, a.join(", "))
+        let a = args.iter().map(|x| self.gen_inline(x)).collect();
+        c.call(a)
     }
 
-    fn gen_macro(&mut self, name: &str, args: &[Expr]) -> String {
-        let a: Vec<String> = args.iter().map(|x| self.gen_inline(x)).collect();
-        match name {
-            "vec" => {
+    fn gen_macro(&mut self, expression: &Expr, args: &[Expr]) -> LuaExpr {
+        let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
+        let crate::hir::ResolvedTarget::Builtin(builtin) =
+            self.program.expression_target(expression.id)
+        else {
+            panic!(
+                "checked macro call {:?} has no builtin identity",
+                expression.id
+            );
+        };
+        let spec = builtin_macro_by_id(builtin)
+            .unwrap_or_else(|| panic!("resolved builtin {builtin:?} is not a macro"));
+        let lowering = spec.lowering;
+        match lowering {
+            BuiltinMacroLowering::Vec => {
                 self.uses_rt = true;
                 // 0-based storage + length field, matching Rust indexing.
-                let mut parts: Vec<String> = a
-                    .iter()
+                let mut fields: Vec<TableField> = a
+                    .into_iter()
                     .enumerate()
-                    .map(|(i, v)| format!("[{}] = {}", i, v))
+                    .map(|(index, value)| {
+                        TableField::Indexed(LuaExpr::integer(index.to_string()), value)
+                    })
                     .collect();
-                parts.push(format!("n = {}", a.len()));
-                format!("rt.vec({{ {} }})", parts.join(", "))
+                fields.push(TableField::Named(
+                    "n".into(),
+                    LuaExpr::integer(fields.len().to_string()),
+                ));
+                rt_call("vec", vec![LuaExpr::Table(fields)])
             }
-            "format" => {
+            BuiltinMacroLowering::Format => {
                 self.uses_rt = true;
-                format!("rt.format({})", a.join(", "))
+                rt_call("format", a)
             }
-            "println" => {
+            BuiltinMacroLowering::Println => {
                 self.uses_rt = true;
-                format!("rt.println({})", a.join(", "))
+                rt_call("println", a)
             }
-            "print" => {
+            BuiltinMacroLowering::Print => {
                 self.uses_rt = true;
-                format!("rt.print({})", a.join(", "))
+                rt_call("print", a)
             }
-            "panic" => {
+            BuiltinMacroLowering::Panic => {
                 self.uses_rt = true;
-                format!("rt.panic(rt.format({}))", a.join(", "))
+                rt_call("panic", vec![rt_call("format", a)])
             }
-            other => {
-                // Unknown macro: best-effort passthrough as a call.
-                format!("{}({})", other, a.join(", "))
-            }
+            BuiltinMacroLowering::Passthrough => LuaExpr::name(spec.name).call(a),
         }
     }
 
-    fn gen_struct_lit(&mut self, path: &[String], fields: &[(String, Expr)]) -> String {
-        let field_parts: Vec<String> = fields
+    fn gen_struct_lit(&mut self, expression: &Expr, fields: &[(String, Expr)]) -> LuaExpr {
+        let field_values: Vec<(String, LuaExpr)> = fields
             .iter()
-            .map(|(n, e)| {
-                let v = self.gen_inline(e);
-                format!("{} = {}", n, v)
-            })
+            .map(|(name, expression)| (self.layout.member_name(name), self.gen_inline(expression)))
             .collect();
 
         // Struct variant of an enum?
-        if let Some((en, var, VarShape::Struct)) = self.ctx.resolve_variant(path) {
-            let meta = enum_ref(path, &en);
-            let mut parts = vec![format!("tag = \"{}\"", var)];
-            parts.extend(field_parts);
-            return format!("setmetatable({{ {} }}, {})", parts.join(", "), meta);
+        let target = Some(self.program.expression_target(expression.id));
+        if let Some((owner, variant, crate::hir::VariantShape::Struct)) =
+            self.resolve_variant(target)
+        {
+            let meta = self
+                .target_place(crate::hir::ResolvedTarget::Item(owner))
+                .expect("enum owner has a backend place");
+            let mut values = vec![(
+                "tag".into(),
+                LuaExpr::string(&self.hir.definition(variant).name),
+            )];
+            values.extend(field_values);
+            return setmetatable(LuaExpr::named_table(values), meta.expression());
         }
 
-        let name = path.last().cloned().unwrap_or_default();
-        if self.ctx.structs.contains(&name) {
-            // Cross-module `mod::Type { .. }` uses the qualified class table.
-            let meta = if path.len() > 1 {
-                path.join(".")
-            } else {
-                name.clone()
-            };
-            format!("setmetatable({{ {} }}, {})", field_parts.join(", "), meta)
+        let is_struct = matches!(
+            target,
+            Some(crate::hir::ResolvedTarget::Item(definition))
+                if self.hir.definition(definition).kind == crate::hir::DefKind::Struct
+        );
+        if is_struct {
+            let meta = self
+                .target_place(self.program.expression_target(expression.id))
+                .expect("checked struct literal target has a backend place");
+            setmetatable(LuaExpr::named_table(field_values), meta.expression())
         } else {
-            format!("{{ {} }}", field_parts.join(", "))
+            LuaExpr::named_table(field_values)
         }
     }
 }
 
-fn extract_iter_chain<'a>(expr: &'a Expr, plan: &IterPlan, has_consumer: bool) -> Option<IterChain<'a>> {
+fn extract_iter_chain<'a>(
+    expr: &'a Expr,
+    plan: &IterPlan,
+    has_consumer: bool,
+) -> Option<IterChain<'a>> {
     let (mut cursor, consumer_args): (&Expr, &[Expr]) = if has_consumer {
         let ExprKind::MethodCall { recv, args, .. } = &expr.kind else {
             return None;
@@ -1830,42 +2107,42 @@ fn extract_iter_chain<'a>(expr: &'a Expr, plan: &IterPlan, has_consumer: bool) -
     })
 }
 
-/// Collect trait declarations across all scopes (root + nested modules), keyed
-/// by simple name.
-fn collect_traits<'p>(items: &'p [Item], out: &mut HashMap<&'p str, &'p TraitDecl>) {
-    for it in items {
-        match it {
+/// Collect trait declarations across all scopes, keyed by resolved identity.
+fn collect_traits<'p>(
+    items: &'p [Item],
+    module: crate::hir::ModuleId,
+    program: &crate::typed_ir::TypedProgram,
+    out: &mut HashMap<crate::hir::DefId, &'p TraitDecl>,
+) {
+    for (item_index, item) in items.iter().enumerate() {
+        match item {
             Item::Trait(t) => {
-                out.insert(t.name.as_str(), t);
+                out.insert(program.item_definition(module, item_index), t);
             }
-            Item::Mod(m) => collect_traits(&m.items, out),
+            Item::Mod(m) => {
+                let child = program.child_module(module, item_index);
+                collect_traits(&m.items, child, program, out);
+            }
             _ => {}
         }
     }
 }
 
-/// Lua expression for the enum class table referenced by a variant path.
-/// `["math","Shape","Circle"]` -> `math.Shape`; a bare `["Circle"]` uses the
-/// resolved owning enum's (simple) name, which is a same-scope local.
-fn enum_ref(segs: &[String], en_simple: &str) -> String {
-    if segs.len() >= 2 {
-        segs[..segs.len() - 1].join(".")
-    } else {
-        en_simple.to_string()
-    }
-}
-
 /// If `impl <trait> for T` defines the operator method `method`, return the Lua
 /// metamethod name to alias it to (enabling `a + b`, `a == b`, etc.).
-fn op_alias(trait_name: &str, method: &str) -> Option<&'static str> {
-    Some(match (trait_name, method) {
-        ("Add", "add") => "__add",
-        ("Sub", "sub") => "__sub",
-        ("Mul", "mul") => "__mul",
-        ("Div", "div") => "__div",
-        ("Rem", "rem") => "__mod",
-        ("Neg", "neg") => "__unm",
-        ("PartialEq", "eq") | ("Eq", "eq") => "__eq",
+fn op_alias(target: crate::hir::TraitTarget, method: &str) -> Option<&'static str> {
+    use rua_core::BuiltinTraitId;
+    let crate::hir::TraitTarget::Builtin(trait_id) = target else {
+        return None;
+    };
+    Some(match (trait_id, method) {
+        (BuiltinTraitId::Add, "add") => "__add",
+        (BuiltinTraitId::Sub, "sub") => "__sub",
+        (BuiltinTraitId::Mul, "mul") => "__mul",
+        (BuiltinTraitId::Div, "div") => "__div",
+        (BuiltinTraitId::Rem, "rem") => "__mod",
+        (BuiltinTraitId::Neg, "neg") => "__unm",
+        (BuiltinTraitId::PartialEq | BuiltinTraitId::Eq, "eq") => "__eq",
         _ => return None,
     })
 }
@@ -1877,42 +2154,54 @@ fn needs_hoist(e: &Expr) -> bool {
     )
 }
 
-fn binop_lua(op: BinOp) -> &'static str {
-    // `/` maps to Lua float division; integer-vs-float selection needs the type
-    // checker (docs §9 open question 6). This MVP always emits `/`.
+fn binop_lua(op: BinOp) -> LuaBinaryOp {
     match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "~=",
-        BinOp::Lt => "<",
-        BinOp::Le => "<=",
-        BinOp::Gt => ">",
-        BinOp::Ge => ">=",
-        BinOp::And => "and",
-        BinOp::Or => "or",
+        BinOp::Add => LuaBinaryOp::Add,
+        BinOp::Sub => LuaBinaryOp::Sub,
+        BinOp::Mul => LuaBinaryOp::Mul,
+        BinOp::Div => LuaBinaryOp::Div,
+        BinOp::Rem => LuaBinaryOp::Rem,
+        BinOp::Eq => LuaBinaryOp::Eq,
+        BinOp::Ne => LuaBinaryOp::Ne,
+        BinOp::Lt => LuaBinaryOp::Lt,
+        BinOp::Le => LuaBinaryOp::Le,
+        BinOp::Gt => LuaBinaryOp::Gt,
+        BinOp::Ge => LuaBinaryOp::Ge,
+        BinOp::And => LuaBinaryOp::And,
+        BinOp::Or => LuaBinaryOp::Or,
     }
+}
+
+fn rt_call(name: &str, args: Vec<LuaExpr>) -> LuaExpr {
+    LuaExpr::name("rt").field(name).call(args)
+}
+
+fn setmetatable(table: LuaExpr, metatable: LuaExpr) -> LuaExpr {
+    LuaExpr::name("setmetatable").call(vec![table, metatable])
+}
+
+fn and_all(expressions: Vec<LuaExpr>) -> LuaExpr {
+    expressions
+        .into_iter()
+        .reduce(|left, right| left.binary(LuaBinaryOp::And, right))
+        .unwrap_or(LuaExpr::Bool(true))
+}
+
+fn or_all(expressions: Vec<LuaExpr>) -> LuaExpr {
+    expressions
+        .into_iter()
+        .reduce(|left, right| left.binary(LuaBinaryOp::Or, right))
+        .unwrap_or(LuaExpr::Bool(false))
 }
 
 fn lua_int_literal(s: &str) -> String {
     let clean = s.replace('_', "");
-    if let Some(bits) = clean.strip_prefix("0b").or_else(|| clean.strip_prefix("0B"))
-        && let Ok(v) = i64::from_str_radix(bits, 2) {
-            return v.to_string();
-        }
-    clean
-}
-
-fn paren_if_needed(s: &str) -> String {
-    let is_atom = !s.contains(' ')
-        || (s.starts_with('(') && s.ends_with(')'))
-        || s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
-    if is_atom {
-        s.to_string()
-    } else {
-        format!("({})", s)
+    if let Some(bits) = clean
+        .strip_prefix("0b")
+        .or_else(|| clean.strip_prefix("0B"))
+        && let Ok(v) = i64::from_str_radix(bits, 2)
+    {
+        return v.to_string();
     }
+    clean
 }

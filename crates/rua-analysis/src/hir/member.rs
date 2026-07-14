@@ -11,8 +11,8 @@ use std::{
 
 use super::{
     CallableSignature, CallableTy, DefId, DefKind, DefMap, GenericParamId, ItemSignature,
-    ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, Substitution, Ty,
-    TypeLoweringContext, TypeRef, VariantKind,
+    ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, Substitution, Ty, TypeLoweringContext,
+    TypeRef, VariantKind,
 };
 
 /// Analysis-owned identifiers for members supplied by the language runtime.
@@ -267,13 +267,31 @@ struct TraitData {
 }
 
 #[derive(Clone, Debug)]
-struct ImplData {
+pub struct ImplementationData {
     definition: DefId,
     target_ty: Ty,
     trait_ty: Option<Ty>,
     trait_id: Option<DefId>,
     methods: Vec<DefId>,
     requirements: Vec<(Ty, DefId)>,
+}
+
+impl ImplementationData {
+    pub const fn definition(&self) -> DefId {
+        self.definition
+    }
+
+    pub fn target_ty(&self) -> &Ty {
+        &self.target_ty
+    }
+
+    pub const fn trait_definition(&self) -> Option<DefId> {
+        self.trait_id
+    }
+
+    pub fn methods(&self) -> &[DefId] {
+        &self.methods
+    }
 }
 
 /// Immutable native member index for one DefMap/project snapshot.
@@ -289,12 +307,22 @@ pub struct MemberIndex {
     variant_fields: BTreeMap<DefId, Vec<FieldTemplate>>,
     variants: BTreeMap<DefId, Vec<VariantTemplate>>,
     traits: BTreeMap<DefId, TraitData>,
-    implementations: Vec<ImplData>,
+    implementations: Vec<ImplementationData>,
     builtin_callables: BTreeMap<BuiltinMemberId, CallableTy>,
     builtin_receivers: BTreeMap<BuiltinMemberId, Ty>,
 }
 
 impl MemberIndex {
+    pub fn implementations(&self) -> impl Iterator<Item = &ImplementationData> {
+        self.implementations.iter()
+    }
+
+    pub fn implementation(&self, definition: DefId) -> Option<&ImplementationData> {
+        self.implementations
+            .iter()
+            .find(|implementation| implementation.definition == definition)
+    }
+
     pub fn build(def_map: &DefMap) -> Self {
         Self::build_shared(Arc::new(def_map.clone()))
     }
@@ -958,7 +986,7 @@ impl MemberIndex {
                 .filter(|method| method.kind() == DefKind::Method)
                 .map(|method| method.id())
                 .collect();
-            self.implementations.push(ImplData {
+            self.implementations.push(ImplementationData {
                 definition,
                 target_ty,
                 trait_ty,
@@ -1014,9 +1042,9 @@ impl MemberIndex {
     fn resolve_named_type(&self, owner: DefId, path: &str) -> Option<DefId> {
         let module = self.def_map.definition(owner)?.module_id();
         let segments = path.split("::").collect::<Vec<_>>();
-        let definition = self
-            .def_map
-            .resolve_path(module, &segments, ResolveStrategy::LexicalUnique)?;
+        let definition =
+            self.def_map
+                .resolve_path(module, &segments, ResolveStrategy::LexicalUnique)?;
         matches!(
             definition.kind(),
             DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
@@ -1034,7 +1062,7 @@ impl MemberIndex {
 
     fn match_implementation(
         &self,
-        implementation: &ImplData,
+        implementation: &ImplementationData,
         receiver: &Ty,
     ) -> Option<Substitution> {
         let substitution = self.match_receiver(&implementation.target_ty, receiver)?;
@@ -1050,7 +1078,7 @@ impl MemberIndex {
 
     fn match_associated_implementation(
         &self,
-        implementation: &ImplData,
+        implementation: &ImplementationData,
         owner_ty: &Ty,
     ) -> Option<Substitution> {
         if let Some(substitution) = self.match_implementation(implementation, owner_ty) {
@@ -1109,7 +1137,7 @@ impl MemberIndex {
 
     fn impl_declared_candidates(
         &self,
-        implementation: &ImplData,
+        implementation: &ImplementationData,
         substitution: &Substitution,
         instance: bool,
         origin: MemberOrigin,
@@ -1127,7 +1155,7 @@ impl MemberIndex {
 
     fn trait_impl_candidates(
         &self,
-        implementation: &ImplData,
+        implementation: &ImplementationData,
         receiver_substitution: &Substitution,
         instance: bool,
     ) -> Vec<MemberCandidate> {

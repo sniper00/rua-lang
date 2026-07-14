@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn selection_range_expands_from_token() {

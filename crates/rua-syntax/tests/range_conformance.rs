@@ -11,9 +11,7 @@ use rua_syntax::ast::{
     MethodCallExpr as SyntaxMethodCallExpr, PathExpr as SyntaxPathExpr, Stmt as SyntaxStmt,
 };
 use rua_syntax::{AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken, lex, parse_source_file};
-use ruac::ast::{
-    ClosureBody, Expr, ExprKind, Item as CompilerItem, Stmt as CompilerStmt,
-};
+use ruac::ast::{ClosureBody, Expr, ExprKind, Item as CompilerItem, Stmt as CompilerStmt};
 use ruac::token::{RuaTokenKind, SourceRange};
 use ruac::tokenize::RuaTokenize;
 
@@ -299,8 +297,7 @@ fn range_conformance_path_and_member_access() {
 
 #[test]
 fn range_conformance_closure_params_and_body() {
-    let source =
-        "fn main() { let add = |left: i64, right| -> i64 left + right; }\n";
+    let source = "fn main() { let add = |left: i64, right| -> i64 left + right; }\n";
     let compiler = ruac::parser::parse(source).expect("compiler parser accepts closure case");
     let parsed = parse_source_file(source);
     assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
@@ -316,8 +313,7 @@ fn range_conformance_closure_params_and_body() {
     else {
         panic!("compiler initializer is not an expression closure")
     };
-    let SyntaxItem::Fn(syntax_function) =
-        parsed.tree.items().next().expect("CST function item")
+    let SyntaxItem::Fn(syntax_function) = parsed.tree.items().next().expect("CST function item")
     else {
         panic!("CST item is not a function")
     };

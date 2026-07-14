@@ -1,0 +1,13 @@
+[package]
+name = "rua-project"
+version = "0.1.0"
+edition = "2024"
+description = "IO-free Rua project, source-root, and source-provider contracts."
+
+[lib]
+name = "rua_project"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rua-core.workspace = true

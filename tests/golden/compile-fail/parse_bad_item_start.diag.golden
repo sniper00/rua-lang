@@ -1,1 +1,0 @@
-<golden>/compile-fail/parse_bad_item_start.rua: 1: expected item (`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`mod`/`use`), found `let`

@@ -15,8 +15,8 @@
 use rowan::TextSize;
 
 use crate::ast::{
-    AstNode, EnumDecl, ExternBlock, ExternFn, FieldDecl, FnDecl, ImplDecl, Item, ModDecl,
-    Named, SourceFile, StructDecl, TraitDecl, TraitMethod,
+    AstNode, EnumDecl, ExternBlock, ExternFn, FieldDecl, FnDecl, ImplDecl, Item, ModDecl, Named,
+    SourceFile, StructDecl, TraitDecl, TraitMethod,
 };
 use crate::kind::SyntaxKind;
 use crate::{SyntaxElement, SyntaxNode};
@@ -157,7 +157,7 @@ fn collect_fn_with_kind(
         full_range: node_byte_range(f.syntax()),
         container: container.to_vec(),
         detail,
-        doc: leading_doc(f.syntax()),
+        doc: documentation(f.syntax()).unwrap_or_default(),
     });
 }
 
@@ -173,7 +173,7 @@ fn collect_struct(s: &StructDecl, container: &mut Vec<String>, symbols: &mut Vec
         full_range: node_byte_range(s.syntax()),
         container: container.clone(),
         detail: format!("struct {}", name),
-        doc: leading_doc(s.syntax()),
+        doc: documentation(s.syntax()).unwrap_or_default(),
     });
 
     container.push(name);
@@ -197,7 +197,7 @@ fn collect_enum(e: &EnumDecl, container: &mut Vec<String>, symbols: &mut Vec<Sym
         full_range: node_byte_range(e.syntax()),
         container: container.clone(),
         detail: format!("enum {}", name),
-        doc: leading_doc(e.syntax()),
+        doc: documentation(e.syntax()).unwrap_or_default(),
     });
 
     container.push(name);
@@ -214,7 +214,7 @@ fn collect_enum(e: &EnumDecl, container: &mut Vec<String>, symbols: &mut Vec<Sym
                 full_range: node_byte_range(variant.syntax()),
                 container: container.clone(),
                 detail: String::new(),
-                doc: leading_doc(variant.syntax()),
+                doc: documentation(variant.syntax()).unwrap_or_default(),
             });
         }
     }
@@ -233,7 +233,7 @@ fn collect_trait(t: &TraitDecl, container: &mut Vec<String>, symbols: &mut Vec<S
         full_range: node_byte_range(t.syntax()),
         container: container.clone(),
         detail: format!("trait {}", name),
-        doc: leading_doc(t.syntax()),
+        doc: documentation(t.syntax()).unwrap_or_default(),
     });
 
     container.push(name);
@@ -244,7 +244,10 @@ fn collect_trait(t: &TraitDecl, container: &mut Vec<String>, symbols: &mut Vec<S
 }
 
 fn collect_impl(i: &ImplDecl, container: &mut Vec<String>, symbols: &mut Vec<Symbol>) {
-    let type_name = i.type_name().map(|t| t.text().to_string()).unwrap_or_default();
+    let type_name = i
+        .type_name()
+        .map(|t| t.text().to_string())
+        .unwrap_or_default();
     if type_name.is_empty() {
         return;
     }
@@ -270,7 +273,7 @@ fn collect_impl(i: &ImplDecl, container: &mut Vec<String>, symbols: &mut Vec<Sym
         full_range: node_byte_range(i.syntax()),
         container: container.clone(),
         detail,
-        doc: leading_doc(i.syntax()),
+        doc: documentation(i.syntax()).unwrap_or_default(),
     });
 
     // Nest methods under the impl node itself (its symbol name, e.g. "impl
@@ -297,7 +300,7 @@ fn collect_extern(eb: &ExternBlock, container: &[String], symbols: &mut Vec<Symb
             full_range: node_byte_range(ef.syntax()),
             container: container.to_vec(),
             detail,
-            doc: leading_doc(ef.syntax()),
+            doc: documentation(ef.syntax()).unwrap_or_default(),
         });
     }
 }
@@ -314,7 +317,9 @@ fn collect_mod(m: &ModDecl, container: &mut Vec<String>, symbols: &mut Vec<Symbo
         full_range: node_byte_range(m.syntax()),
         container: container.clone(),
         detail: format!("mod {}", name),
-        doc: leading_doc(m.syntax()),
+        doc: module_documentation(m.syntax())
+            .or_else(|| documentation(m.syntax()))
+            .unwrap_or_default(),
     });
 
     // Only recurse into inline modules; file modules have their body
@@ -338,7 +343,7 @@ fn collect_field(f: &FieldDecl, container: &[String], symbols: &mut Vec<Symbol>)
         full_range: node_byte_range(f.syntax()),
         container: container.to_vec(),
         detail: String::new(),
-        doc: leading_doc(f.syntax()),
+        doc: documentation(f.syntax()).unwrap_or_default(),
     });
 }
 
@@ -355,7 +360,7 @@ fn collect_trait_method(m: &TraitMethod, container: &[String], symbols: &mut Vec
         full_range: node_byte_range(m.syntax()),
         container: container.to_vec(),
         detail,
-        doc: leading_doc(m.syntax()),
+        doc: documentation(m.syntax()).unwrap_or_default(),
     });
 }
 
@@ -366,7 +371,9 @@ fn collect_trait_method(m: &TraitMethod, container: &[String], symbols: &mut Vec
 /// receiver, and `where` clause are all shown faithfully (e.g.
 /// `fn find(v: Vec<i64>, target: i64) -> Option<i64>`).
 fn fn_detail(f: &FnDecl) -> String {
-    let cut = f.body().map(|b| usize::from(b.syntax().text_range().start()));
+    let cut = f
+        .body()
+        .map(|b| usize::from(b.syntax().text_range().start()));
     node_signature(f.syntax(), cut)
 }
 
@@ -396,7 +403,10 @@ fn node_signature(node: &SyntaxNode, cut_abs: Option<usize>) -> String {
         .map(|c| c.saturating_sub(node_start).min(full.len()))
         .unwrap_or(full.len());
     let collapsed = full[..end].split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.trim_end_matches([' ', '{', ';']).trim().to_string()
+    collapsed
+        .trim_end_matches([' ', '{', ';'])
+        .trim()
+        .to_string()
 }
 
 // --- doc-comment extraction -------------------------------------------------
@@ -410,12 +420,44 @@ fn node_signature(node: &SyntaxNode, cut_abs: Option<usize>) -> String {
 /// absorbed as the node's own leading trivia (struct fields, enum variants,
 /// extern fns). A blank line between the comment block and the node detaches it
 /// (matching the convention that a doc comment hugs its item).
-fn leading_doc(node: &SyntaxNode) -> String {
+pub fn documentation(node: &SyntaxNode) -> Option<String> {
     let mut texts = absorbed_leading_comments(node);
     if texts.is_empty() {
         texts = preceding_sibling_comments(node);
     }
-    render_doc(&texts)
+    let rendered = render_doc(&texts);
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+/// Extract inner module documentation (`//!` / `/*! ... */`) immediately after
+/// an inline module's opening brace.
+pub fn module_documentation(node: &SyntaxNode) -> Option<String> {
+    let mut saw_open_brace = false;
+    let mut texts = Vec::new();
+    for element in node.children_with_tokens() {
+        match element {
+            SyntaxElement::Token(token) if token.kind() == SyntaxKind::LBrace => {
+                saw_open_brace = true;
+            }
+            _ if !saw_open_brace => {}
+            SyntaxElement::Token(token) if token.kind() == SyntaxKind::Whitespace => {
+                if token.text().matches('\n').count() >= 2 && !texts.is_empty() {
+                    break;
+                }
+            }
+            SyntaxElement::Token(token) if token.kind().is_comment() => {
+                let text = token.text().trim();
+                if text.starts_with("//!") || text.starts_with("/*!") {
+                    texts.push(token.text().to_string());
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let rendered = render_doc(&texts);
+    (!rendered.is_empty()).then_some(rendered)
 }
 
 /// Comments the parser absorbed as `node`'s own leading trivia (before its first
@@ -472,19 +514,34 @@ fn preceding_sibling_comments(node: &SyntaxNode) -> Vec<String> {
 /// Strip comment delimiters from raw comment texts and join into doc lines.
 fn render_doc(texts: &[String]) -> String {
     let mut lines: Vec<String> = Vec::new();
-    for raw in texts {
+    let docs = texts
+        .iter()
+        .rev()
+        .take_while(|raw| is_doc_comment(raw))
+        .collect::<Vec<_>>();
+    for raw in docs.into_iter().rev() {
         let s = raw.trim();
         if let Some(rest) = s.strip_prefix("///").or_else(|| s.strip_prefix("//!")) {
             lines.push(rest.trim().to_string());
-        } else if let Some(rest) = s.strip_prefix("//") {
-            lines.push(rest.trim().to_string());
-        } else if let Some(inner) = s.strip_prefix("/*").and_then(|b| b.strip_suffix("*/")) {
+        } else if let Some(inner) = s
+            .strip_prefix("/**")
+            .or_else(|| s.strip_prefix("/*!"))
+            .and_then(|body| body.strip_suffix("*/"))
+        {
             for l in inner.lines() {
                 lines.push(l.trim().trim_start_matches('*').trim().to_string());
             }
         }
     }
     lines.join("\n").trim().to_string()
+}
+
+fn is_doc_comment(raw: &str) -> bool {
+    let text = raw.trim();
+    text.starts_with("///")
+        || text.starts_with("//!")
+        || (text.starts_with("/**") && text.ends_with("*/"))
+        || (text.starts_with("/*!") && text.ends_with("*/"))
 }
 
 // --- byte-range helpers -----------------------------------------------------
@@ -599,8 +656,14 @@ mod tests {
         let v = find(&s, "Circle");
         assert_eq!(v.kind, SymbolKind::Variant);
         assert_eq!(v.container, vec!["Shape"]);
-        assert!(s.iter().any(|x| x.name == "Rect" && x.kind == SymbolKind::Variant));
-        assert!(s.iter().any(|x| x.name == "Dot" && x.kind == SymbolKind::Variant));
+        assert!(
+            s.iter()
+                .any(|x| x.name == "Rect" && x.kind == SymbolKind::Variant)
+        );
+        assert!(
+            s.iter()
+                .any(|x| x.name == "Dot" && x.kind == SymbolKind::Variant)
+        );
     }
 
     #[test]
@@ -679,8 +742,8 @@ mod tests {
 
     #[test]
     fn doc_comment_on_top_level_fn() {
-        let s = syms("// adds one to x\nfn add_one(x: i64) {}");
-        assert_eq!(find(&s, "add_one").doc, "adds one to x");
+        let s = syms("// ordinary comment\nfn add_one(x: i64) {}");
+        assert_eq!(find(&s, "add_one").doc, "");
     }
 
     #[test]
@@ -699,20 +762,20 @@ mod tests {
     #[test]
     fn doc_comment_on_struct_field_peeled() {
         // Field comments are absorbed as the field node's own leading trivia.
-        let s = syms("struct S {\n    // the answer\n    a: i64,\n}");
+        let s = syms("struct S {\n    /// the answer\n    a: i64,\n}");
         assert_eq!(find(&s, "a").doc, "the answer");
     }
 
     #[test]
     fn doc_comment_on_enum_variant() {
-        let s = syms("enum E {\n    // red one\n    Red,\n    Green,\n}");
+        let s = syms("enum E {\n    /// red one\n    Red,\n    Green,\n}");
         assert_eq!(find(&s, "Red").doc, "red one");
         assert_eq!(find(&s, "Green").doc, "");
     }
 
     #[test]
     fn doc_comment_block_style() {
-        let s = syms("/* a block doc */\nstruct S;");
+        let s = syms("/** a block doc */\nstruct S;");
         assert_eq!(find(&s, "S").doc, "a block doc");
     }
 
@@ -811,16 +874,24 @@ mod tests {
         let src = std::fs::read_to_string(path).expect("read example file");
         let s = syms(&src);
         assert!(s.len() > 5, "should have multiple symbols");
-        assert!(s.iter().any(|x| x.name == "main" && x.kind == SymbolKind::Function));
-        assert!(s.iter().any(|x| x.name == "Point" && x.kind == SymbolKind::Struct));
-        assert!(s
-            .iter()
-            .any(|x| x.name == "geo" && x.kind == SymbolKind::Module));
-        assert!(s
-            .iter()
-            .any(|x| x.name == "norm_sq" && x.kind == SymbolKind::Method));
-        assert!(s
-            .iter()
-            .any(|x| x.name == "area" && x.kind == SymbolKind::Function && x.container == vec!["geo"]));
+        assert!(
+            s.iter()
+                .any(|x| x.name == "main" && x.kind == SymbolKind::Function)
+        );
+        assert!(
+            s.iter()
+                .any(|x| x.name == "Point" && x.kind == SymbolKind::Struct)
+        );
+        assert!(
+            s.iter()
+                .any(|x| x.name == "geo" && x.kind == SymbolKind::Module)
+        );
+        assert!(
+            s.iter()
+                .any(|x| x.name == "norm_sq" && x.kind == SymbolKind::Method)
+        );
+        assert!(s.iter().any(|x| x.name == "area"
+            && x.kind == SymbolKind::Function
+            && x.container == vec!["geo"]));
     }
 }

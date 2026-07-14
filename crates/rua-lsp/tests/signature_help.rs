@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn signature_help_in_function_call() {
@@ -102,7 +102,10 @@ fn signature_help_returns_none_at_file_start() {
     // cursor at file start — not in any call
     let pp = srv.pp(&uri, 0, 0).unwrap();
     let help = srv.snapshot().signature_help(pp);
-    assert!(help.is_none(), "signature help should be None at file start");
+    assert!(
+        help.is_none(),
+        "signature help should be None at file start"
+    );
 }
 
 #[test]

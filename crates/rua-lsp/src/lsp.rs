@@ -4,54 +4,81 @@
 //! single long-lived [`AnalysisHost`]; there is no legacy workspace or compiler
 //! bridge in the production path.
 
+#[path = "lsp/conversion.rs"]
+mod conversion;
+#[path = "lsp/filesystem.rs"]
+mod filesystem;
+#[path = "lsp/protocol.rs"]
+mod protocol;
+#[path = "lsp/requests.rs"]
+mod requests;
+#[path = "lsp/state.rs"]
+mod state;
+mod worker;
+
 use std::{
-    collections::HashMap,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use lsp_server::{Connection, Message, Notification, Request, Response};
+use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
-    DidOpenTextDocument, DidSaveTextDocument, Notification as _, PublishDiagnostics,
+    Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles,
+    DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _,
+    PublishDiagnostics,
 };
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
-    CodeActionRequest, CodeLensRequest, Completion, DocumentHighlightRequest,
-    DocumentLinkRequest, DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest,
-    Formatting, GotoDefinition, GotoImplementation, HoverRequest, InlayHintRequest,
-    OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References, Rename,
-    Request as _, ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
-    SemanticTokensRangeRequest, SignatureHelpRequest, TypeHierarchyPrepare,
-    TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
+    CodeActionRequest, CodeLensRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
+    DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, Formatting, GotoDefinition,
+    GotoImplementation, HoverRequest, InlayHintRequest, OnTypeFormatting, PrepareRenameRequest,
+    RangeFormatting, References, Rename, Request as _, ResolveCompletionItem,
+    SelectionRangeRequest, SemanticTokensFullRequest, SemanticTokensRangeRequest, Shutdown,
+    SignatureHelpRequest, TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionParams, CodeActionResponse, CodeLens,
-    CodeLensParams, CompletionItem, CompletionItemKind, CompletionList, CompletionOptions,
-    CompletionResponse, Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentLink, DocumentLinkParams, DocumentOnTypeFormattingParams, DocumentSymbol,
-    DocumentSymbolResponse, Documentation, FileSystemWatcher, FoldingRange, FoldingRangeKind,
-    FoldingRangeParams, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
-    InitializeParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintLabelPart,
-    InlayHintParams,
+    CodeAction, CodeActionKind, CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionOptions, CompletionResponse,
+    Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkParams, DocumentOnTypeFormattingParams, DocumentSymbol, DocumentSymbolResponse,
+    Documentation, FileSystemWatcher, FoldingRange, FoldingRangeKind, FoldingRangeParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, InitializeParams,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintLabelPart, InlayHintParams,
     InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, ParameterInformation,
-    ParameterLabel, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range,
-    Registration, RegistrationParams, RenameOptions, SelectionRange, SelectionRangeParams,
-    ServerCapabilities, SemanticToken as LspSemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensResult, SemanticTokensServerCapabilities,
-    SignatureHelp, SignatureHelpOptions, SignatureInformation,
-    SymbolKind as LspSymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Uri, WatchKind, WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    ParameterLabel, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration,
+    RegistrationParams, RenameOptions, SelectionRange, SelectionRangeParams,
+    SemanticToken as LspSemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureInformation, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Unregistration, UnregistrationParams, Uri, WatchKind,
+    WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 
 use rua_analysis::{
-    AnalysisHost, Change, CompletionInsert, CompletionKind, DefKind, FileId, FileKind,
-    HoverResult, MacroDelimiter, NavigationTarget, ProjectId, ProjectPosition,
-    SemanticTokenKind, SourceChange, SourceRootId, SourceRootKind, TextRange,
+    AnalysisHost, Change, CompletionInsert, CompletionKind, DefId, DefKind, FileId, FileKind,
+    HoverResult, MacroDelimiter, NavigationTarget, ProjectData, ProjectFile, ProjectId,
+    ProjectPosition, ProjectRoot, QueryContext, ReferenceResult, SemanticTokenKind, SourceChange,
+    SourceRootId, SourceRootKind, TextRange, WorkspaceSymbol as AnalysisWorkspaceSymbol,
 };
 use rua_syntax::LineIndex;
+
+use crate::conversion::{
+    LineIndexCache, find_import_insertion_point, normalize_physical_path, path_to_uri,
+    range_from_bytes, uri_to_path,
+};
+use crate::filesystem::{LibraryConfig, LibraryScanRequest, WorkspaceScan, scan_workspace_roots};
+#[cfg(test)]
+use crate::filesystem::{scan_library_root, scan_workspace_files};
+use crate::state::*;
+use crate::worker::WorkerPool;
 
 // ---------------------------------------------------------------------------
 // request-handler macros — factor out the 15-line extract→error→call→respond
@@ -134,56 +161,16 @@ macro_rules! extract_notification {
     }};
 }
 
-// ---------------------------------------------------------------------------
-// Server state
-// ---------------------------------------------------------------------------
-
-struct Server {
-    connection: Connection,
-    /// Single authoritative semantic state.
-    host: AnalysisHost,
-    /// URI → (path, FileId) mapping. The path key is canonical.
-    file_ids: HashMap<PathBuf, (Uri, FileId)>,
-    /// FileId → (URI, open buffer text).
-    open_buffers: HashMap<FileId, (Uri, String)>,
-    /// FileId → URI reverse lookup, maintained alongside `file_ids`
-    /// and `open_buffers` so rename and code-edit handlers don't
-    /// need to rebuild it from scratch.
-    file_to_uri: HashMap<FileId, Uri>,
-    /// Next FileId to allocate.
-    next_file_id: u32,
-    /// Next SourceRootId to allocate.
-    next_root_id: u32,
-    /// library config state
-    library_roots: Vec<PathBuf>,
-    library_mounts: HashMap<String, PathBuf>,
-    /// Paths currently watched via `workspace/didChangeWatchedFiles`.
-    watched_paths: Vec<PathBuf>,
-    /// Timestamp of last watcher-triggered reload (debounce, 100ms).
-    last_watcher_event: Option<std::time::Instant>,
-}
+#[path = "lsp/notifications.rs"]
+mod notifications;
 
 impl Server {
-    fn new(connection: Connection) -> Self {
-        Server {
-            connection,
-            host: AnalysisHost::new(),
-            file_ids: HashMap::new(),
-            open_buffers: HashMap::new(),
-            file_to_uri: HashMap::new(),
-            next_file_id: 0,
-            next_root_id: 1, // 0 is workspace root
-            library_roots: Vec::new(),
-            library_mounts: HashMap::new(),
-            watched_paths: Vec::new(),
-            last_watcher_event: None,
-        }
-    }
-
     // -- file identity -------------------------------------------------------
 
     fn doc_key(uri: &Uri) -> PathBuf {
-        uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri.as_str()))
+        uri_to_path(uri)
+            .map(|path| normalize_physical_path(&path))
+            .unwrap_or_else(|| PathBuf::from(uri.as_str()))
     }
 
     fn file_id_for_uri(&self, uri: &Uri) -> Option<FileId> {
@@ -207,72 +194,83 @@ impl Server {
         id
     }
 
-    // -- main loop -----------------------------------------------------------
-
-    fn main_loop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            let msg = match self.connection.receiver.recv() {
-                Ok(m) => m,
-                Err(_) => return Ok(()),
-            };
-            match msg {
-                Message::Request(req) => {
-                    if self.connection.handle_shutdown(&req)? {
-                        return Ok(());
-                    }
-                    self.handle_request(req);
-                }
-                Message::Notification(not) => {
-                    self.handle_notification(not);
-                }
-                Message::Response(_resp) => {}
-            }
+    fn consider_project_root(&mut self, project_id: ProjectId, file_id: FileId, path: &Path) {
+        let Some(project) = self.projects.get_mut(&project_id) else {
+            return;
+        };
+        if path.file_name().and_then(|name| name.to_str()) == Some("main.rua") {
+            project.root_file = file_id;
         }
     }
 
-    // -- requests ------------------------------------------------------------
-
-    fn handle_request(&mut self, req: Request) {
-        match req.method.as_str() {
-            Formatting::METHOD => self.handle_formatting(req),
-            RangeFormatting::METHOD => self.handle_range_formatting(req),
-            SelectionRangeRequest::METHOD => self.handle_selection_range(req),
-            CodeLensRequest::METHOD => self.handle_code_lens(req),
-            HoverRequest::METHOD => self.handle_hover(req),
-            GotoDefinition::METHOD => self.handle_definition(req),
-            GotoImplementation::METHOD => self.handle_goto_implementation(req),
-            DocumentSymbolRequest::METHOD => self.handle_document_symbol(req),
-            Completion::METHOD => self.handle_completion(req),
-            References::METHOD => self.handle_references(req),
-            Rename::METHOD => self.handle_rename(req),
-            PrepareRenameRequest::METHOD => self.handle_prepare_rename(req),
-            SemanticTokensFullRequest::METHOD => self.handle_semantic_tokens(req),
-            SemanticTokensRangeRequest::METHOD => self.handle_semantic_tokens_range(req),
-            ResolveCompletionItem::METHOD => self.handle_resolve_completion(req),
-            SignatureHelpRequest::METHOD => self.handle_signature_help(req),
-            InlayHintRequest::METHOD => self.handle_inlay_hint(req),
-            DocumentHighlightRequest::METHOD => self.handle_document_highlight(req),
-            CodeActionRequest::METHOD => self.handle_code_action(req),
-            ExecuteCommand::METHOD => self.handle_execute_command(req),
-            CallHierarchyPrepare::METHOD => self.handle_call_hierarchy_prepare(req),
-            CallHierarchyIncomingCalls::METHOD => self.handle_call_hierarchy_incoming(req),
-            CallHierarchyOutgoingCalls::METHOD => self.handle_call_hierarchy_outgoing(req),
-            TypeHierarchyPrepare::METHOD => self.handle_type_hierarchy_prepare(req),
-            TypeHierarchySubtypes::METHOD => self.handle_type_hierarchy_subtypes(req),
-            TypeHierarchySupertypes::METHOD => self.handle_type_hierarchy_supertypes(req),
-            WorkspaceSymbolRequest::METHOD => self.handle_workspace_symbol(req),
-            FoldingRangeRequest::METHOD => self.handle_folding_range(req),
-            DocumentLinkRequest::METHOD => self.handle_document_link(req),
-            OnTypeFormatting::METHOD => self.handle_on_type_formatting(req),
-            _ => {
-                let resp = Response::new_err(
-                    req.id,
-                    lsp_server::ErrorCode::MethodNotFound as i32,
-                    format!("unknown request: {}", req.method),
-                );
-                let _ = self.connection.sender.send(Message::Response(resp));
-            }
+    fn set_project_changes(&self, change: &mut Change) {
+        for (project_id, project) in &self.projects {
+            change.set_project(
+                *project_id,
+                ProjectData::new(
+                    project.root_file,
+                    project.workspace_roots.clone(),
+                    self.project_dependency_roots
+                        .get(project_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
         }
+    }
+
+    fn rebuild_project_dependency_roots(&mut self) {
+        self.project_dependency_roots.clear();
+        let Some(root_id) = self.library_source_root else {
+            return;
+        };
+        for project_id in self.projects.keys().copied() {
+            let mut bases = self.library_bases.clone();
+            if let Some(project_bases) = self.library_project_bases.get(&project_id.index()) {
+                bases.extend(project_bases.iter().cloned());
+            }
+            bases.sort();
+            bases.dedup();
+            self.project_dependency_roots.insert(
+                project_id,
+                bases
+                    .into_iter()
+                    .map(|base| ProjectRoot::new(root_id, base))
+                    .collect(),
+            );
+        }
+    }
+
+    fn project_id_for_file(&self, file_id: FileId) -> Option<ProjectId> {
+        self.file_projects.get(&file_id).copied()
+    }
+
+    fn project_file(&self, file_id: FileId) -> Option<ProjectFile> {
+        Some(ProjectFile::new(
+            self.project_id_for_file(file_id)?,
+            file_id,
+        ))
+    }
+
+    fn project_id_for_path(&self, path: &Path) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .filter_map(|(project_id, project)| {
+                let best = project
+                    .workspace_roots
+                    .iter()
+                    .filter(|root| path.starts_with(root.logical_base().as_path()))
+                    .map(|root| root.logical_base().as_path().components().count())
+                    .max()?;
+                Some((best, *project_id))
+            })
+            .max_by_key(|(depth, project_id)| (*depth, *project_id))
+            .map(|(_, project_id)| project_id)
+    }
+
+    fn apply_analysis_change(&mut self, change: Change) {
+        self.input_generation = self.input_generation.wrapping_add(1);
+        self.host.apply_change(change);
     }
 
     // -- formatting ----------------------------------------------------------
@@ -292,9 +290,9 @@ impl Server {
             }
         };
         let key = Self::doc_key(&params.text_document.uri);
-        let edits = if let Some((_, text)) =
-            self.file_id_for_uri(&params.text_document.uri)
-                .and_then(|id| self.open_buffers.get(&id))
+        let edits = if let Some((_, text)) = self
+            .file_id_for_uri(&params.text_document.uri)
+            .and_then(|id| self.open_buffers.get(&id))
         {
             format_edits(text)
         } else {
@@ -305,8 +303,7 @@ impl Server {
             format_edits(&text)
         };
         drop(key);
-        let result: Option<Vec<TextEdit>> =
-            if edits.is_empty() { None } else { Some(edits) };
+        let result: Option<Vec<TextEdit>> = if edits.is_empty() { None } else { Some(edits) };
         let resp = Response::new_ok(id, result);
         let _ = self.connection.sender.send(Message::Response(resp));
     }
@@ -364,20 +361,19 @@ impl Server {
 
     fn handle_selection_range(&mut self, req: Request) {
         let id = req.id.clone();
-        let (id, params): (_, SelectionRangeParams) = match req
-            .extract::<SelectionRangeParams>(SelectionRangeRequest::METHOD)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let resp = Response::new_err(
-                    id,
-                    lsp_server::ErrorCode::InvalidParams as i32,
-                    format!("invalid selection-range params: {e:?}"),
-                );
-                let _ = self.connection.sender.send(Message::Response(resp));
-                return;
-            }
-        };
+        let (id, params): (_, SelectionRangeParams) =
+            match req.extract::<SelectionRangeParams>(SelectionRangeRequest::METHOD) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response::new_err(
+                        id,
+                        lsp_server::ErrorCode::InvalidParams as i32,
+                        format!("invalid selection-range params: {e:?}"),
+                    );
+                    let _ = self.connection.sender.send(Message::Response(resp));
+                    return;
+                }
+            };
         let uri = &params.text_document.uri;
         let Some(file_id) = self.file_id_for_uri(uri) else {
             let resp = Response::new_ok(id, Option::<Vec<SelectionRange>>::None);
@@ -385,16 +381,15 @@ impl Server {
             return;
         };
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<SelectionRange>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         let mut results = Vec::new();
         for pos in &params.positions {
-            let offset = line_index.offset(
-                pos.line as usize,
-                pos.character as usize,
-                &source,
-            );
+            let offset = line_index.offset(pos.line as usize, pos.character as usize, &source);
             let mut ranges = Vec::new();
             let parse = analysis.parse(file_id);
             let root = parse.syntax_node();
@@ -465,34 +460,31 @@ impl Server {
             return;
         };
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
-        let def_map = analysis.def_map(file_id);
-        // Precompute: for each name, count how many function bodies
-        // reference it (used by Function/Method CodeLens below).
-        let mut ref_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let total_impl_count = def_map
-            .definitions()
-            .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
-            .count();
-        for d in def_map.definitions() {
-            if matches!(
-                d.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            )
-                && let Some(body) = analysis.body(d.id()) {
-                    let mut seen = std::collections::HashSet::new();
-                    for (_, nr) in body.name_refs() {
-                        if let Some(n) = nr.name() {
-                            seen.insert(n.to_string());
-                        }
-                    }
-                    for n in seen {
-                        *ref_counts.entry(n).or_default() += 1;
-                    }
-                }
-        }
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<CodeLens>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(project_id) = self.project_id_for_file(file_id) else {
+            let resp = Response::new_ok(id, Vec::<CodeLens>::new());
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(def_map) = analysis.def_map_for_project(project_id) else {
+            let resp = Response::new_ok(id, Vec::<CodeLens>::new());
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(reference_index) = analysis.reference_index_for_project(project_id) else {
+            let resp = Response::new_ok(id, Vec::<CodeLens>::new());
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(member_index) = analysis.member_index_for_project(project_id) else {
+            let resp = Response::new_ok(id, Vec::<CodeLens>::new());
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         let mut lenses = Vec::new();
 
@@ -503,18 +495,18 @@ impl Server {
             let kind = definition.kind();
             let title = match kind {
                 rua_analysis::DefKind::Function | rua_analysis::DefKind::Method => {
-                    let ref_count = ref_counts
-                        .get(definition.name())
-                        .copied()
-                        .unwrap_or(0);
+                    let ref_count = reference_index.occurrences(definition.id()).len();
                     format!("{ref_count} reference(s)")
                 }
                 rua_analysis::DefKind::Struct => {
-                    let impl_count = def_map
-                        .definitions()
-                        .filter(|d| {
-                            d.kind() == rua_analysis::DefKind::Impl
-                                && d.name() == definition.name()
+                    let impl_count = member_index
+                        .implementations()
+                        .filter(|implementation| {
+                            matches!(
+                                implementation.target_ty(),
+                                rua_analysis::Ty::Named(named)
+                                    if named.definition() == definition.id()
+                            )
                         })
                         .count();
                     if impl_count == 0 {
@@ -524,10 +516,16 @@ impl Server {
                     }
                 }
                 rua_analysis::DefKind::Trait => {
-                    if total_impl_count == 0 {
+                    let impl_count = member_index
+                        .implementations()
+                        .filter(|implementation| {
+                            implementation.trait_definition() == Some(definition.id())
+                        })
+                        .count();
+                    if impl_count == 0 {
                         "trait".to_string()
                     } else {
-                        format!("{total_impl_count} impl(s)")
+                        format!("{impl_count} impl(s)")
                     }
                 }
                 _ => continue,
@@ -559,39 +557,48 @@ impl Server {
     // -- hover ---------------------------------------------------------------
 
     fn handle_hover(&mut self, req: Request) {
-        handle_position_request!(self, req, lsp_types::HoverParams, HoverRequest::METHOD, |pp, analysis| {
-            analysis.hover(pp).map(|hover| to_lsp_hover(&hover))
-        });
+        handle_position_request!(
+            self,
+            req,
+            lsp_types::HoverParams,
+            HoverRequest::METHOD,
+            |pp, analysis| { analysis.hover(pp).map(|hover| to_lsp_hover(&hover)) }
+        );
     }
 
     // -- goto definition -----------------------------------------------------
 
     fn handle_definition(&mut self, req: Request) {
-        handle_position_request!(self, req, lsp_types::GotoDefinitionParams, GotoDefinition::METHOD, |pp, analysis| {
-            analysis
-                .goto_definition(pp)
-                .and_then(|target| self.nav_to_location(&target))
-        });
+        handle_position_request!(
+            self,
+            req,
+            lsp_types::GotoDefinitionParams,
+            GotoDefinition::METHOD,
+            |pp, analysis| {
+                analysis
+                    .goto_definition(pp)
+                    .and_then(|target| self.nav_to_location(&target))
+            }
+        );
     }
 
     // -- goto implementation -------------------------------------------------
 
     fn handle_goto_implementation(&mut self, req: Request) {
         let id = req.id.clone();
-        let (id, params) = match req
-            .extract::<lsp_types::GotoDefinitionParams>(GotoImplementation::METHOD)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let resp = Response::new_err(
-                    id,
-                    lsp_server::ErrorCode::InvalidParams as i32,
-                    format!("invalid goto-impl params: {e:?}"),
-                );
-                let _ = self.connection.sender.send(Message::Response(resp));
-                return;
-            }
-        };
+        let (id, params) =
+            match req.extract::<lsp_types::GotoDefinitionParams>(GotoImplementation::METHOD) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response::new_err(
+                        id,
+                        lsp_server::ErrorCode::InvalidParams as i32,
+                        format!("invalid goto-impl params: {e:?}"),
+                    );
+                    let _ = self.connection.sender.send(Message::Response(resp));
+                    return;
+                }
+            };
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
@@ -605,8 +612,7 @@ impl Server {
                     .filter_map(|t| {
                         let file_range = t.target_range();
                         let uri = self.uri_for_file(file_range.file_id)?;
-                        let range =
-                            self.range_for_file(file_range.file_id, file_range.range)?;
+                        let range = self.range_for_file(file_range.file_id, file_range.range)?;
                         Some(Location { uri, range })
                     })
                     .collect()
@@ -647,9 +653,14 @@ impl Server {
         };
 
         let analysis = self.host.analysis();
-        let symbols = analysis.document_symbols(file_id, file_id);
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let symbols = self
+            .project_file(file_id)
+            .map_or_else(Vec::new, |file| analysis.document_symbols_in_project(file));
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<DocumentSymbolResponse>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
         let nested = build_document_symbol_tree(&symbols, &line_index, &source);
         let result = DocumentSymbolResponse::Nested(nested);
 
@@ -661,19 +672,18 @@ impl Server {
 
     fn handle_completion(&mut self, req: Request) {
         let id = req.id.clone();
-        let (id, params) =
-            match req.extract::<lsp_types::CompletionParams>(Completion::METHOD) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response::new_err(
-                        id,
-                        lsp_server::ErrorCode::InvalidParams as i32,
-                        format!("invalid completion params: {e:?}"),
-                    );
-                    let _ = self.connection.sender.send(Message::Response(resp));
-                    return;
-                }
-            };
+        let (id, params) = match req.extract::<lsp_types::CompletionParams>(Completion::METHOD) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid completion params: {e:?}"),
+                );
+                let _ = self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
@@ -687,15 +697,16 @@ impl Server {
 
         let items = self
             .project_position(uri, pos)
-            .map(|pp| {
-                let source = analysis.parse(pp.position.file_id).syntax_node().text().to_string();
-                let line_index = LineIndex::new(&source);
+            .and_then(|pp| {
+                let (source, line_index) = self.source_line_index(pp.position.file_id)?;
                 let native_items = analysis.completions(pp);
                 let file_id = pp.position.file_id;
-                native_items
-                    .into_iter()
-                    .map(|item| completion_to_lsp(&item, &line_index, &source, file_id))
-                    .collect::<Vec<_>>()
+                Some(
+                    native_items
+                        .into_iter()
+                        .map(|item| completion_to_lsp(&item, &line_index, &source, file_id))
+                        .collect::<Vec<_>>(),
+                )
             })
             .unwrap_or_default();
 
@@ -717,28 +728,34 @@ impl Server {
     // -- signature help ------------------------------------------------------
 
     fn handle_signature_help(&mut self, req: Request) {
-        handle_position_request!(self, req, lsp_types::SignatureHelpParams, SignatureHelpRequest::METHOD, |pp, analysis| {
-            analysis.signature_help(pp).map(|info| {
-                let parameters: Vec<ParameterInformation> = info
-                    .parameters
-                    .iter()
-                    .map(|p| ParameterInformation {
-                        label: ParameterLabel::Simple(p.clone()),
-                        documentation: None,
-                    })
-                    .collect();
-                SignatureHelp {
-                    signatures: vec![SignatureInformation {
-                        label: info.label,
-                        documentation: None,
-                        parameters: Some(parameters),
+        handle_position_request!(
+            self,
+            req,
+            lsp_types::SignatureHelpParams,
+            SignatureHelpRequest::METHOD,
+            |pp, analysis| {
+                analysis.signature_help(pp).map(|info| {
+                    let parameters: Vec<ParameterInformation> = info
+                        .parameters
+                        .iter()
+                        .map(|p| ParameterInformation {
+                            label: ParameterLabel::Simple(p.clone()),
+                            documentation: None,
+                        })
+                        .collect();
+                    SignatureHelp {
+                        signatures: vec![SignatureInformation {
+                            label: info.label,
+                            documentation: None,
+                            parameters: Some(parameters),
+                            active_parameter: Some(info.active_parameter),
+                        }],
+                        active_signature: Some(0),
                         active_parameter: Some(info.active_parameter),
-                    }],
-                    active_signature: Some(0),
-                    active_parameter: Some(info.active_parameter),
-                }
-            })
-        });
+                    }
+                })
+            }
+        );
     }
 
     // -- inlay hints ---------------------------------------------------------
@@ -766,20 +783,31 @@ impl Server {
         };
 
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<InlayHint>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         let mut hints: Vec<InlayHint> = Vec::new();
-        let def_map = analysis.def_map(file_id);
+        let Some(project_id) = self.project_id_for_file(file_id) else {
+            let resp = Response::new_ok(id, hints);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(def_map) = analysis.def_map_for_project(project_id) else {
+            let resp = Response::new_ok(id, hints);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         for definition in def_map.definitions() {
-            if !matches!(
-                definition.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
+            if !definition.kind().is_body_owner() {
                 continue;
             }
-            let Some(body) = analysis.body(definition.id()) else { continue };
+            let Some(body) = analysis.body(definition.id()) else {
+                continue;
+            };
             let Some(source_map) = analysis.body_source_map(definition.id()) else {
                 continue;
             };
@@ -800,7 +828,9 @@ impl Server {
                 ) {
                     continue;
                 }
-                let Some(_name) = binding.name() else { continue };
+                let Some(_name) = binding.name() else {
+                    continue;
+                };
                 let Some(ty) = inference.type_of_binding(binding_id) else {
                     continue;
                 };
@@ -819,30 +849,20 @@ impl Server {
                 // Make type hint clickable: if it's a named type, link to its definition.
                 let label = if let rua_analysis::Ty::Named(named) = ty {
                     if let Some(def) = def_map.definition(named.definition()) {
-                        let def_source = analysis
-                            .parse(def.file_id())
-                            .syntax_node()
-                            .text()
-                            .to_string();
-                        let def_li = LineIndex::new(&def_source);
-                        let def_start = def.name_range().start() as usize;
-                        let (def_line, def_col) =
-                            def_li.line_col(def_start, &def_source);
                         let def_uri = self
                             .uri_for_file(def.file_id())
                             .unwrap_or_else(|| uri.clone());
+                        let def_range = self
+                            .range_for_file(def.file_id(), def.name_range())
+                            .unwrap_or_else(|| {
+                                Range::new(Position::new(0, 0), Position::new(0, 0))
+                            });
                         InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
                             value: format!(": {ty_str}"),
                             tooltip: None,
                             location: Some(Location {
                                 uri: def_uri,
-                                range: Range {
-                                    start: Position::new(def_line as u32, def_col as u32),
-                                    end: Position::new(
-                                        def_line as u32,
-                                        (def_col + def.name().len()) as u32,
-                                    ),
-                                },
+                                range: def_range,
                             }),
                             command: None,
                         }])
@@ -955,9 +975,11 @@ impl Server {
             return;
         };
 
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<TextEdit>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         let mut edits: Vec<TextEdit> = Vec::new();
 
@@ -980,10 +1002,7 @@ impl Server {
                 "/// ".to_string()
             };
             let edit_pos = Position::new(pos.line + 1, 0);
-            let (line, col) = (
-                edit_pos.line,
-                0u32,
-            );
+            let (line, col) = (edit_pos.line, 0u32);
             edits.push(TextEdit {
                 range: Range {
                     start: Position::new(line, col),
@@ -1010,11 +1029,7 @@ impl Server {
             });
         }
 
-        let result = if edits.is_empty() {
-            None
-        } else {
-            Some(edits)
-        };
+        let result = if edits.is_empty() { None } else { Some(edits) };
         let resp = Response::new_ok(id, result);
         let _ = self.connection.sender.send(Message::Response(resp));
     }
@@ -1045,8 +1060,11 @@ impl Server {
         };
 
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<CodeActionResponse>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
 
         // Get the offset of the code action range start.
         let start_offset = line_index.offset(
@@ -1061,6 +1079,7 @@ impl Server {
         );
 
         let mut actions: Vec<CodeAction> = Vec::new();
+        let project_id = self.project_id_for_file(file_id);
 
         // Diagnostic-based quick fixes.
         for diag in &params.context.diagnostics {
@@ -1103,28 +1122,28 @@ impl Server {
                             });
                         }
                     }
-                    "E0206" => {
-                        // Immutable assignment → add `mut`
+                    "E0212" => {
                         let diag_range = &diag.range;
-                        let (sl, sc) = (
-                            diag_range.start.line,
-                            diag_range.start.character,
+                        let Some(project_id) = project_id else {
+                            continue;
+                        };
+                        let diagnostic_offset = line_index.offset(
+                            diag_range.start.line as usize,
+                            diag_range.start.character as usize,
+                            &source,
                         );
-                        // Find the `let` keyword by scanning backwards for the
-                        // word `let` at a word boundary (not inside an identifier
-                        // like `outlet_name` or a string literal).
-                        let d_start = line_index.offset(sl as usize, sc as usize, &source);
-                        let before = source[..d_start]
-                            .rmatch_indices("let ")
-                            .find(|&(pos, _)| {
-                                pos == 0
-                                    || !rua_syntax::text::is_ident_byte(
-                                        source.as_bytes()[pos - 1],
-                                    )
-                            })
-                            .map(|(pos, _)| pos)
-                            .unwrap_or(d_start);
-                        let insert_pos = before + 4; // after "let "
+                        let Some(target) = analysis.prepare_rename(ProjectPosition::at(
+                            project_id,
+                            file_id,
+                            diagnostic_offset as u32,
+                        )) else {
+                            continue;
+                        };
+                        let declaration = target.range();
+                        if declaration.file_id != file_id {
+                            continue;
+                        }
+                        let insert_pos = declaration.range.start() as usize;
                         let (il, ic) = line_index.line_col(insert_pos, &source);
                         let edit = TextEdit {
                             range: Range {
@@ -1155,15 +1174,33 @@ impl Server {
         }
 
         // "Fill match arms" — find match expressions at the cursor.
-        let def_map = analysis.def_map(file_id);
+        let Some(project_id) = project_id else {
+            let resp = Response::new_ok(id, actions);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(def_map) = analysis.def_map_for_project(project_id) else {
+            let resp = Response::new_ok(id, actions);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(member_index) = analysis.member_index_for_project(project_id) else {
+            let resp = Response::new_ok(id, actions);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let Some(semantics) = analysis.semantics_for_project(project_id) else {
+            let resp = Response::new_ok(id, actions);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
         for definition in def_map.definitions() {
-            if !matches!(
-                definition.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
+            if !definition.kind().is_body_owner() {
                 continue;
             }
-            let Some(body) = analysis.body(definition.id()) else { continue };
+            let Some(body) = analysis.body(definition.id()) else {
+                continue;
+            };
             let Some(source_map) = analysis.body_source_map(definition.id()) else {
                 continue;
             };
@@ -1186,10 +1223,11 @@ impl Server {
                 }
 
                 let scrutinee_ty = inference.type_of_expr(*scrutinee).cloned();
-                let Some(scrutinee_ty) = scrutinee_ty else { continue };
+                let Some(scrutinee_ty) = scrutinee_ty else {
+                    continue;
+                };
 
                 // Check if enum
-                let member_index = analysis.member_index(file_id);
                 let Some(enum_template) = (|| {
                     let named = match &scrutinee_ty {
                         rua_analysis::Ty::Named(n) => n,
@@ -1204,10 +1242,16 @@ impl Server {
                     continue;
                 };
 
-                let all_variants =
-                    member_index.associated_candidates(&enum_template);
-                // Collect existing arm names from pattern paths.
-                let existing_names: Vec<String> = arms
+                let all_variants = member_index.associated_candidates(&enum_template);
+                let line_start = source[..m_start]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline + 1);
+                let base_indent = source[line_start..m_start]
+                    .chars()
+                    .take_while(|character| matches!(character, ' ' | '\t'))
+                    .collect::<String>();
+                let arm_indent = format!("{base_indent}    ");
+                let existing_variants: HashSet<DefId> = arms
                     .iter()
                     .filter_map(|arm| {
                         let pat_id = arm.patterns().first()?;
@@ -1219,32 +1263,69 @@ impl Server {
                             _ => return None,
                         };
                         let last_seg = path.last()?;
-                        let name_ref = body.name_ref(*last_seg)?;
-                        name_ref.name().map(|n| n.to_string())
+                        let range = source_map.name_ref_range(*last_seg)?;
+                        semantics
+                            .find_def_at(rua_analysis::FilePosition::new(
+                                range.file_id,
+                                range.range.start(),
+                            ))
+                            .map(|definition| definition.id())
                     })
                     .collect();
 
                 let mut new_arms = String::new();
+                let mut missing_count = 0;
                 for variant in &all_variants {
+                    let rua_analysis::MemberTarget::Definition(variant_id) = variant.target()
+                    else {
+                        continue;
+                    };
                     let name = variant.name();
-                    if existing_names.iter().any(|n| n == name) {
+                    if existing_variants.contains(&variant_id) {
                         continue;
                     }
-                    let arm_text = if variant.ty().to_string() == "()" {
-                        format!("        {name} => todo!(),\n")
-                    } else {
-                        format!("        {name}(..) => todo!(),\n")
+                    let Some(variant_definition) = def_map.definition(variant_id) else {
+                        continue;
                     };
-                    new_arms.push_str(&arm_text);
+                    let rua_analysis::ItemSignature::Variant(signature) =
+                        variant_definition.signature()
+                    else {
+                        continue;
+                    };
+                    let pattern = match signature.kind() {
+                        rua_analysis::VariantKind::Unit => name.to_string(),
+                        rua_analysis::VariantKind::Tuple => format!(
+                            "{name}({})",
+                            vec!["_"; signature.tuple_types().len()].join(", ")
+                        ),
+                        rua_analysis::VariantKind::Struct => {
+                            format!("{name} {{ .. }}")
+                        }
+                    };
+                    if !new_arms.is_empty() {
+                        new_arms.push('\n');
+                    }
+                    new_arms.push_str(&format!("{arm_indent}{pattern} => todo!(),"));
+                    missing_count += 1;
                 }
                 if new_arms.is_empty() {
                     continue;
                 }
 
-                // Find the `{` of the match body and insert after newline.
-                let lbrace = source[..m_end].rfind('{').unwrap_or(m_start);
-                let newline_off = source[lbrace..].find('\n').map(|n| lbrace + n + 1);
-                let insert_pos = newline_off.unwrap_or(lbrace + 1);
+                let Some(scrutinee_range) = source_map.expr_range(*scrutinee) else {
+                    continue;
+                };
+                let search_start = scrutinee_range.range.end() as usize;
+                let Some(relative_lbrace) = source[search_start..m_end].find('{') else {
+                    continue;
+                };
+                let lbrace = search_start + relative_lbrace;
+                let insert_pos = lbrace + 1;
+                let suffix = if source.as_bytes().get(insert_pos) == Some(&b'\n') {
+                    String::new()
+                } else {
+                    format!("\n{base_indent}")
+                };
 
                 let (line, col) = line_index.line_col(insert_pos, &source);
                 let edit = TextEdit {
@@ -1252,7 +1333,7 @@ impl Server {
                         start: Position::new(line as u32, col as u32),
                         end: Position::new(line as u32, col as u32),
                     },
-                    new_text: format!("\n{new_arms}"),
+                    new_text: format!("\n{new_arms}{suffix}"),
                 };
 
                 let mut changes = std::collections::HashMap::new();
@@ -1263,10 +1344,7 @@ impl Server {
                 };
 
                 actions.push(CodeAction {
-                    title: format!(
-                        "Fill match arms ({} missing)",
-                        all_variants.len() - existing_names.len()
-                    ),
+                    title: format!("Fill match arms ({missing_count} missing)"),
                     kind: Some(CodeActionKind::QUICKFIX),
                     diagnostics: None,
                     edit: Some(workspace_edit),
@@ -1280,169 +1358,31 @@ impl Server {
             }
         }
 
-        // "Generate impl members" — for empty `impl Trait for Type {}` blocks.
-        for definition in def_map.definitions() {
-            if definition.kind() != rua_analysis::DefKind::Impl {
-                continue;
-            }
-            let impl_range = definition.range();
-            let i_start = impl_range.start() as usize;
-            let i_end = impl_range.end() as usize;
-            if start_offset > i_end || end_offset < i_start {
-                continue;
-            }
-            let sig = definition.signature();
-            let trait_name = match sig {
-                rua_analysis::ItemSignature::Impl(s) => s
-                    .trait_ref()
-                    .as_ref()
-                    .and_then(|tr| tr.syntax().map(|s| s.to_string())),
-                _ => continue,
-            };
-            let Some(trait_name) = trait_name else { continue };
-            // Find the trait definition by name.
-            let trait_def = def_map.definitions().find(|d| {
-                d.kind() == rua_analysis::DefKind::Trait && d.name() == trait_name
-            });
-            let Some(trait_def) = trait_def else { continue };
-            let existing_names: Vec<&str> = def_map
-                .members(definition.id())
-                .map(|d| d.name())
+        // "Remove trailing comma" — if cursor is on a comma before )/]/}.
+        let comma_offset = line_index.offset(
+            params.range.start.line as usize,
+            params.range.start.character as usize,
+            &source,
+        );
+        if comma_offset < source.len() && source.as_bytes().get(comma_offset) == Some(&b',') {
+            let after: String = source[comma_offset + 1..]
+                .chars()
+                .take_while(|c| c.is_whitespace())
                 .collect();
-            let mut new_methods = String::new();
-            for method in def_map.members(trait_def.id()) {
-                if existing_names.contains(&method.name()) {
-                    continue;
-                }
-                let sig = method.signature();
-                let sig_str = match sig {
-                    rua_analysis::ItemSignature::Callable(cs) => {
-                        let params: Vec<String> = cs
-                            .params()
-                            .iter()
-                            .filter_map(|p| {
-                                let name = p.name()?;
-                                let ty = p.type_ref().syntax()?;
-                                Some(format!("{name}: {ty}"))
-                            })
-                            .collect();
-                        let ret = cs.return_type().syntax().unwrap_or("()");
-                        format!("fn {}({}) -> {ret}", method.name(), params.join(", "))
-                    }
-                    _ => format!("fn {}()", method.name()),
-                };
-                new_methods.push_str(&format!("    {sig_str} {{ todo!() }}\n"));
-            }
-            if new_methods.is_empty() {
-                continue;
-            }
-            let lbrace = source[i_start..i_end].find('{').unwrap_or(0) + i_start;
-            let insert_pos = source[lbrace..]
-                .find('\n')
-                .map(|n| lbrace + n + 1)
-                .unwrap_or(lbrace + 1);
-            let (line, col) = line_index.line_col(insert_pos, &source);
-            let edit = TextEdit {
-                range: Range {
-                    start: Position::new(line as u32, col as u32),
-                    end: Position::new(line as u32, col as u32),
-                },
-                new_text: format!("\n{new_methods}"),
-            };
-            let mut changes = std::collections::HashMap::new();
-            changes.insert(uri.clone(), vec![edit]);
-            actions.push(CodeAction {
-                title: format!(
-                    "Generate impl members ({} missing)",
-                    def_map.members(trait_def.id()).count() - existing_names.len()
-                ),
-                kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: None,
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                command: None,
-                is_preferred: None,
-                disabled: None,
-                data: None,
-            });
-            break;
-        }
-
-        // "Extract variable" — when the user has a range selected.
-        let sel_start = start_offset;
-        let sel_end = end_offset;
-        if sel_end > sel_start
-            && (sel_end - sel_start) > 1
-        {
-            let sel_text = source[sel_start..sel_end.min(source.len())].trim().to_string();
-            if !sel_text.is_empty() && sel_text.len() < 200 {
-                // Generate a variable name from the text (lowercase first letter
-                // of the expression type hint, or just "var").
-                let var_name = "var_name"; // simple default
-                let insert_line = {
-                    let (l, _) = line_index.line_col(sel_start, &source);
-                    l
-                };
-                let leading_ws: String = source[..sel_start]
-                    .chars()
-                    .rev()
-                    .take_while(|c| *c == ' ' || *c == '\t')
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                let edit1 = TextEdit {
-                    range: Range {
-                        start: Position::new(insert_line as u32, 0),
-                        end: Position::new(insert_line as u32, 0),
-                    },
-                    new_text: format!("{leading_ws}let {var_name} = {sel_text};\n"),
-                };
-                let (el, ec) = line_index.line_col(sel_end.min(source.len()), &source);
-                let edit2 = TextEdit {
-                    range: Range {
-                        start: Position::new(insert_line as u32, leading_ws.len() as u32),
-                        end: Position::new(el as u32, ec as u32),
-                    },
-                    new_text: var_name.to_string(),
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit1, edit2]);
-                actions.push(CodeAction {
-                    title: format!("Extract to variable `{var_name}`"),
-                    kind: Some(CodeActionKind::REFACTOR_EXTRACT),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-            }
-
-            // "Wrap in block" — wrap selected code in { }
-            if !sel_text.contains('\n') {
-                let (sl, sc) = line_index.line_col(sel_start, &source);
+            let next = source[comma_offset + 1 + after.len()..].chars().next();
+            if next.is_some_and(|c| c == ')' || c == ']' || c == '}') {
+                let (sl, sc) = line_index.line_col(comma_offset, &source);
                 let edit = TextEdit {
                     range: Range {
                         start: Position::new(sl as u32, sc as u32),
-                        end: {
-                            let (el, ec) =
-                                line_index.line_col(sel_end.min(source.len()), &source);
-                            Position::new(el as u32, ec as u32)
-                        },
+                        end: Position::new(sl as u32, sc as u32 + 1),
                     },
-                    new_text: format!("{{\n    {sel_text}\n}}"),
+                    new_text: String::new(),
                 };
                 let mut changes = std::collections::HashMap::new();
                 changes.insert(uri.clone(), vec![edit]);
                 actions.push(CodeAction {
-                    title: "Wrap in block".to_string(),
+                    title: "Remove trailing comma".to_string(),
                     kind: Some(CodeActionKind::REFACTOR_REWRITE),
                     diagnostics: None,
                     edit: Some(WorkspaceEdit {
@@ -1454,422 +1394,6 @@ impl Server {
                     disabled: None,
                     data: None,
                 });
-            }
-        }
-
-        // The actions below use the cursor position (sel_start) but do
-        // NOT require a text selection — they work on the enclosing
-        // struct, function, or statement at the cursor.
-
-        // "Sort struct fields" — alphabetically reorder fields.
-            for definition in def_map.definitions() {
-                if definition.kind() != rua_analysis::DefKind::Struct {
-                    continue;
-                }
-                let sr = definition.range();
-                if start_offset as u32 > sr.end() || (end_offset as u32) < sr.start() {
-                    continue;
-                }
-                let mut fields: Vec<(&str, rua_analysis::TextRange)> = def_map
-                    .members(definition.id())
-                    .filter(|d| d.kind() == rua_analysis::DefKind::Field)
-                    .map(|d| (d.name(), d.name_range()))
-                    .collect();
-                if fields.len() < 2 {
-                    continue;
-                }
-                let original = fields.clone();
-                fields.sort_by_key(|(name, _)| *name);
-                if original.iter().map(|(n, _)| *n).eq(fields.iter().map(|(n, _)| *n)) {
-                    continue; // already sorted
-                }
-                let mut edits = Vec::new();
-                for (i, (_name, range)) in original.iter().enumerate() {
-                    let new_text = fields[i].0.to_string();
-                    let (sl, sc) = line_index.line_col(range.start() as usize, &source);
-                    let (el, ec) = line_index.line_col(range.end() as usize, &source);
-                    edits.push(TextEdit {
-                        range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(el as u32, ec as u32),
-                        },
-                        new_text,
-                    });
-                }
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), edits);
-                actions.push(CodeAction {
-                    title: "Sort struct fields".to_string(),
-                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-                break;
-            }
-
-            // "Remove trailing comma" — if cursor is on a comma before )/]/}.
-            let comma_offset = line_index.offset(
-                params.range.start.line as usize,
-                params.range.start.character as usize,
-                &source,
-            );
-            if comma_offset < source.len()
-                && source.as_bytes().get(comma_offset) == Some(&b',')
-            {
-                let after: String = source[comma_offset + 1..]
-                    .chars()
-                    .take_while(|c| c.is_whitespace())
-                    .collect();
-                let next = source[comma_offset + 1 + after.len()..]
-                    .chars()
-                    .next();
-                if next.is_some_and(|c| c == ')' || c == ']' || c == '}') {
-                    let (sl, sc) = line_index.line_col(comma_offset, &source);
-                    let edit = TextEdit {
-                        range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(sl as u32, sc as u32 + 1),
-                        },
-                        new_text: String::new(),
-                    };
-                    let mut changes = std::collections::HashMap::new();
-                    changes.insert(uri.clone(), vec![edit]);
-                    actions.push(CodeAction {
-                        title: "Remove trailing comma".to_string(),
-                        kind: Some(CodeActionKind::REFACTOR_REWRITE),
-                        diagnostics: None,
-                        edit: Some(WorkspaceEdit {
-                            changes: Some(changes),
-                            ..Default::default()
-                        }),
-                        command: None,
-                        is_preferred: None,
-                        disabled: None,
-                        data: None,
-                    });
-                }
-            }
-
-        // "Extract function" — wrap selected code in a new function.
-        if sel_end > sel_start && (sel_end - sel_start) > 10 {
-            let sel_text =
-                source[sel_start..sel_end.min(source.len())].to_string();
-            if sel_text.contains('\n') && !sel_text.trim().is_empty() {
-                let func_name = "extracted";
-                let (sl, _sc) = line_index.line_col(sel_start, &source);
-                // Build the extracted function and replace selection with call.
-                let new_func = format!(
-                    "fn {func_name}() {{\n{sel_text}\n}}\n\n"
-                );
-                let call_text = format!("{func_name}();");
-                let edit1 = TextEdit {
-                    range: Range {
-                        start: Position::new(0, 0),
-                        end: Position::new(0, 0),
-                    },
-                    new_text: new_func,
-                };
-                let (el, ec) =
-                    line_index.line_col(sel_end.min(source.len()), &source);
-                let edit2 = TextEdit {
-                    range: Range {
-                        start: Position::new(sl as u32, 0),
-                        end: Position::new(el as u32, ec as u32),
-                    },
-                    new_text: format!("    {call_text}"),
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit1, edit2]);
-                actions.push(CodeAction {
-                    title: format!("Extract to function `{func_name}`"),
-                    kind: Some(CodeActionKind::REFACTOR_EXTRACT),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-            }
-        }
-
-        // "Inline function" — replace a function call with its body.
-        for definition in def_map.definitions() {
-            if !matches!(
-                definition.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
-                continue;
-            }
-            let Some(body) = analysis.body(definition.id()) else { continue };
-            let Some(source_map) = analysis.body_source_map(definition.id()) else {
-                continue;
-            };
-            for (eid, expr) in body.exprs() {
-                let rua_analysis::Expr::Call { callee, args: _ } = expr else {
-                    continue;
-                };
-                let Some(fr) = source_map.expr_range(eid) else { continue };
-                let es = fr.range.start() as usize;
-                let ee = fr.range.end() as usize;
-                if start_offset > ee || end_offset < es {
-                    continue;
-                }
-                // Find the called function's body.
-                let callee_expr = body.expr(*callee);
-                let callee_name = match callee_expr {
-                    Some(rua_analysis::Expr::Path(path)) => path
-                        .last()
-                        .and_then(|nrid| body.name_ref(*nrid))
-                        .and_then(|nr| nr.name()),
-                    _ => None,
-                };
-                let Some(callee_name) = callee_name else { continue };
-                let callee_def = def_map
-                    .definitions()
-                    .find(|d| d.name() == callee_name && d.kind() == rua_analysis::DefKind::Function);
-                let Some(callee_def) = callee_def else { continue };
-                let Some(callee_body) = analysis.body(callee_def.id()) else {
-                    continue;
-                };
-                let Some(callee_sm) = analysis.body_source_map(callee_def.id()) else {
-                    continue;
-                };
-                // Get body text.
-                let body_exprs: Vec<(rua_analysis::ExprId, &rua_analysis::Expr)> =
-                    callee_body.exprs().collect();
-                let body_text = if let Some(&(first_id, _)) = body_exprs.first() {
-                    let last_id = body_exprs.last().map(|&(id, _)| id).unwrap_or(first_id);
-                    let body_start = callee_sm
-                        .expr_range(first_id)
-                        .map(|r| r.range.start() as usize)
-                        .unwrap_or(0);
-                    let body_end = callee_sm
-                        .expr_range(last_id)
-                        .map(|r| r.range.end() as usize)
-                        .unwrap_or(0);
-                    source[body_start..body_end.min(source.len())].to_string()
-                } else {
-                    "{}".to_string()
-                };
-                // Replace call with body.
-                let (sl, sc) = line_index.line_col(es, &source);
-                let (el, ec) =
-                    line_index.line_col(ee.min(source.len()), &source);
-                let edit = TextEdit {
-                    range: Range {
-                        start: Position::new(sl as u32, sc as u32),
-                        end: Position::new(el as u32, ec as u32),
-                    },
-                    new_text: body_text,
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit]);
-                actions.push(CodeAction {
-                    title: format!("Inline function `{callee_name}`"),
-                    kind: Some(CodeActionKind::REFACTOR_INLINE),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-                break;
-            }
-            if !actions.is_empty() {
-                break;
-            }
-        }
-
-        // "Replace if-let with match"
-        for definition in def_map.definitions() {
-            if !matches!(
-                definition.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
-                continue;
-            }
-            let Some(body) = analysis.body(definition.id()) else { continue };
-            let Some(source_map) = analysis.body_source_map(definition.id()) else {
-                continue;
-            };
-            for (expr_id, expr) in body.exprs() {
-                let rua_analysis::Expr::If {
-                    condition:
-                        rua_analysis::Condition::Let {
-                            pattern: _,
-                            scrutinee,
-                        },
-                    then_branch: then_body,
-                    else_branch: else_body,
-                } = expr
-                else {
-                    continue;
-                };
-                let Some(expr_range) = source_map.expr_range(expr_id) else {
-                    continue;
-                };
-                let e_start = expr_range.range.start() as usize;
-                let e_end = expr_range.range.end() as usize;
-                if start_offset > e_end || end_offset < e_start {
-                    continue;
-                }
-                // Get source text of the scrutinee and arms.
-                let Some(scr_range) = source_map.expr_range(*scrutinee) else {
-                    continue;
-                };
-                let scr_text =
-                    source[scr_range.range.start() as usize..scr_range.range.end() as usize]
-                        .to_string();
-                let Some(then_range) = source_map.expr_range(*then_body) else {
-                    continue;
-                };
-                let then_text =
-                    source[then_range.range.start() as usize..then_range.range.end() as usize]
-                        .to_string();
-                let else_text = else_body
-                    .as_ref()
-                    .and_then(|eid| {
-                        let r = source_map.expr_range(*eid)?;
-                        Some(source[r.range.start() as usize..r.range.end() as usize].to_string())
-                    })
-                    .unwrap_or_else(|| "()".to_string());
-                let new_text = format!(
-                    "match {scr_text} {{\n        {then_text}\n        _ => {else_text},\n    }}"
-                );
-                let (sl, sc) = line_index.line_col(e_start, &source);
-                let (el, ec) = line_index.line_col(e_end.min(source.len()), &source);
-                let edit = TextEdit {
-                    range: Range {
-                        start: Position::new(sl as u32, sc as u32),
-                        end: Position::new(el as u32, ec as u32),
-                    },
-                    new_text,
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit]);
-                actions.push(CodeAction {
-                    title: "Replace if-let with match".to_string(),
-                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-                break;
-            }
-            if !actions.is_empty() {
-                break;
-            }
-        }
-
-        // "Inline variable" — when cursor is on a variable usage.
-        for definition in def_map.definitions() {
-            if !matches!(
-                definition.kind(),
-                rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-            ) {
-                continue;
-            }
-            let Some(body) = analysis.body(definition.id()) else { continue };
-            let Some(source_map) = analysis.body_source_map(definition.id()) else {
-                continue;
-            };
-            let Some(resolution) = analysis.body_resolution(definition.id()) else {
-                continue;
-            };
-            // Find the local binding at the cursor.
-            for (name_ref_id, _nr) in body.name_refs() {
-                let Some(fr) = source_map.name_ref_range(name_ref_id) else {
-                    continue;
-                };
-                let nr_start = fr.range.start() as usize;
-                let nr_end = fr.range.end() as usize;
-                if nr_start < start_offset || nr_end > end_offset {
-                    continue;
-                }
-                let Some(resolved) = resolution.resolve(name_ref_id) else {
-                    continue;
-                };
-                let binding_id = match resolved {
-                    rua_analysis::LocalResolveResult::Resolved(lid) => lid.binding(),
-                    _ => continue,
-                };
-                let Some(binding) = body.binding(binding_id) else {
-                    continue;
-                };
-                if binding.name().is_none_or(|n| n == "_") {
-                    continue;
-                }
-                // Find the binding's definition expression.
-                let binding_range = source_map.binding_range(binding_id);
-                let def_expr = body
-                    .exprs()
-                    .find(|(eid, _)| {
-                        source_map
-                            .expr_range(*eid)
-                            .is_some_and(|r| {
-                                binding_range
-                                    .is_some_and(|br| r.range.contains(br.range.start()))
-                            })
-                    });
-                let Some((def_expr_id, _)) = def_expr else {
-                    continue;
-                };
-                let Some(def_fr) = source_map.expr_range(def_expr_id) else {
-                    continue;
-                };
-                let def_text = source
-                    [def_fr.range.start() as usize..def_fr.range.end() as usize]
-                    .to_string();
-                // Replace the variable usage with the definition expression.
-                let (sl, sc) = line_index.line_col(nr_start, &source);
-                let (el, ec) = line_index.line_col(nr_end.min(source.len()), &source);
-                let edit = TextEdit {
-                    range: Range {
-                        start: Position::new(sl as u32, sc as u32),
-                        end: Position::new(el as u32, ec as u32),
-                    },
-                    new_text: def_text,
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit]);
-                actions.push(CodeAction {
-                    title: "Inline variable".to_string(),
-                    kind: Some(CodeActionKind::REFACTOR_INLINE),
-                    diagnostics: None,
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: None,
-                });
-                break;
-            }
-            if !actions.is_empty() {
-                break;
             }
         }
 
@@ -1882,9 +1406,8 @@ impl Server {
     fn handle_call_hierarchy_prepare(&mut self, req: Request) {
         let id = req.id.clone();
         let (id, params): (_, lsp_types::CallHierarchyPrepareParams) =
-            match req.extract::<lsp_types::CallHierarchyPrepareParams>(
-                CallHierarchyPrepare::METHOD,
-            ) {
+            match req.extract::<lsp_types::CallHierarchyPrepareParams>(CallHierarchyPrepare::METHOD)
+            {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response::new_err(
@@ -1900,37 +1423,10 @@ impl Server {
         let pos = params.text_document_position_params.position;
         let result = self.project_position(uri, pos).and_then(|pp| {
             let analysis = self.host.analysis();
-            analysis
-                .call_hierarchy_prepare(pp)
-                .map(|item| {
-                    let (sl, sc) = {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        li.line_col(item.range.start() as usize, &source)
-                    };
-                    let (el, ec) = {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        li.line_col(item.range.end() as usize, &source)
-                    };
-                    vec![lsp_types::CallHierarchyItem { detail: None,
-                        name: item.name,
-                        kind: lsp_types::SymbolKind::FUNCTION,
-                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| fallback_uri(item.file_id)),
-                        range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(el as u32, ec as u32),
-                        },
-                        selection_range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(el as u32, ec as u32),
-                        },
-                        data: None,
-                        tags: None,
-                    }]
-                })
+            analysis.call_hierarchy_prepare(pp).and_then(|item| {
+                self.call_hierarchy_item_to_lsp(&item)
+                    .map(|item| vec![item])
+            })
         });
         let resp = Response::new_ok(id, result);
         let _ = self.connection.sender.send(Message::Response(resp));
@@ -1957,44 +1453,36 @@ impl Server {
             .file_id_for_uri(&params.item.uri)
             .map(|file_id| {
                 let analysis = self.host.analysis();
+                let Some((project_id, target)) = hierarchy_identity(params.item.data.as_ref())
+                else {
+                    return Vec::new();
+                };
+                if self.project_id_for_file(file_id) != Some(project_id) {
+                    return Vec::new();
+                }
                 let chi = rua_analysis::CallHierarchyItem {
+                    project_id,
+                    target,
                     name: params.item.name.clone(),
                     kind: rua_analysis::DefKind::Function,
                     file_id,
-                    range: rua_analysis::TextRange::new(0, 0),
+                    range: self
+                        .text_range_for_file(file_id, params.item.selection_range)
+                        .unwrap_or_else(|| TextRange::new(0, 0)),
+                    call_sites: Vec::new(),
                 };
                 analysis
                     .call_hierarchy_incoming(&chi)
                     .into_iter()
-                    .map(|item| {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        let (sl, sc) = li.line_col(item.range.start() as usize, &source);
-                        let (el, ec) = li.line_col(item.range.end() as usize, &source);
-                        lsp_types::CallHierarchyIncomingCall {
-                            from: lsp_types::CallHierarchyItem { detail: None,
-                                name: item.name,
-                                kind: lsp_types::SymbolKind::FUNCTION,
-                                uri: self
-                                    .uri_for_file(item.file_id)
-                                    .unwrap_or_else(|| fallback_uri(item.file_id)),
-                                range: Range {
-                                    start: Position::new(sl as u32, sc as u32),
-                                    end: Position::new(el as u32, ec as u32),
-                                },
-                                selection_range: Range {
-                                    start: Position::new(sl as u32, sc as u32),
-                                    end: Position::new(el as u32, ec as u32),
-                                },
-                                data: None,
-                                tags: None,
-                            },
-                            from_ranges: vec![Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            }],
-                        }
+                    .filter_map(|item| {
+                        let from = self.call_hierarchy_item_to_lsp(&item)?;
+                        let from_ranges = item
+                            .call_sites
+                            .iter()
+                            .filter_map(|range| self.range_for_file(range.file_id, range.range))
+                            .collect::<Vec<_>>();
+                        (!from_ranges.is_empty())
+                            .then_some(lsp_types::CallHierarchyIncomingCall { from, from_ranges })
                     })
                     .collect()
             })
@@ -2024,44 +1512,36 @@ impl Server {
             .file_id_for_uri(&params.item.uri)
             .map(|file_id| {
                 let analysis = self.host.analysis();
+                let Some((project_id, target)) = hierarchy_identity(params.item.data.as_ref())
+                else {
+                    return Vec::new();
+                };
+                if self.project_id_for_file(file_id) != Some(project_id) {
+                    return Vec::new();
+                }
                 let chi = rua_analysis::CallHierarchyItem {
+                    project_id,
+                    target,
                     name: params.item.name.clone(),
                     kind: rua_analysis::DefKind::Function,
                     file_id,
-                    range: rua_analysis::TextRange::new(0, 0),
+                    range: self
+                        .text_range_for_file(file_id, params.item.selection_range)
+                        .unwrap_or_else(|| TextRange::new(0, 0)),
+                    call_sites: Vec::new(),
                 };
                 analysis
                     .call_hierarchy_outgoing(&chi)
                     .into_iter()
-                    .map(|item| {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        let (sl, sc) = li.line_col(item.range.start() as usize, &source);
-                        let (el, ec) = li.line_col(item.range.end() as usize, &source);
-                        lsp_types::CallHierarchyOutgoingCall {
-                            to: lsp_types::CallHierarchyItem { detail: None,
-                                name: item.name,
-                                kind: lsp_types::SymbolKind::FUNCTION,
-                                uri: self
-                                    .uri_for_file(item.file_id)
-                                    .unwrap_or_else(|| fallback_uri(item.file_id)),
-                                range: Range {
-                                    start: Position::new(sl as u32, sc as u32),
-                                    end: Position::new(el as u32, ec as u32),
-                                },
-                                selection_range: Range {
-                                    start: Position::new(sl as u32, sc as u32),
-                                    end: Position::new(el as u32, ec as u32),
-                                },
-                                data: None,
-                                tags: None,
-                            },
-                            from_ranges: vec![Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            }],
-                        }
+                    .filter_map(|item| {
+                        let to = self.call_hierarchy_item_to_lsp(&item)?;
+                        let from_ranges = item
+                            .call_sites
+                            .iter()
+                            .filter_map(|range| self.range_for_file(range.file_id, range.range))
+                            .collect::<Vec<_>>();
+                        (!from_ranges.is_empty())
+                            .then_some(lsp_types::CallHierarchyOutgoingCall { to, from_ranges })
                     })
                     .collect()
             })
@@ -2075,9 +1555,8 @@ impl Server {
     fn handle_type_hierarchy_prepare(&mut self, req: Request) {
         let id = req.id.clone();
         let (id, params): (_, lsp_types::TypeHierarchyPrepareParams) =
-            match req.extract::<lsp_types::TypeHierarchyPrepareParams>(
-                TypeHierarchyPrepare::METHOD,
-            ) {
+            match req.extract::<lsp_types::TypeHierarchyPrepareParams>(TypeHierarchyPrepare::METHOD)
+            {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response::new_err(
@@ -2095,27 +1574,8 @@ impl Server {
             let analysis = self.host.analysis();
             analysis
                 .type_hierarchy_prepare(pp)
-                .map(|item| {
-                    let source = analysis.parse(item.file_id).syntax_node().text().to_string();
-                    let li = LineIndex::new(&source);
-                    let (sl, sc) = li.line_col(item.range.start() as usize, &source);
-                    let (el, ec) = li.line_col(item.range.end() as usize, &source);
-                    vec![lsp_types::TypeHierarchyItem { detail: None,
-                        name: item.name,
-                        kind: lsp_types::SymbolKind::STRUCT,
-                        uri: self.uri_for_file(item.file_id).unwrap_or_else(|| fallback_uri(item.file_id)),
-                        range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(el as u32, ec as u32),
-                        },
-                        selection_range: Range {
-                            start: Position::new(sl as u32, sc as u32),
-                            end: Position::new(el as u32, ec as u32),
-                        },
-                        data: None,
-                        tags: None,
-                    }]
-                })
+                .map(|item| self.type_hierarchy_item_to_lsp(&item, to_lsp_symbol_kind(item.kind)))
+                .and_then(|item| item.map(|item| vec![item]))
         });
         let resp = Response::new_ok(id, result);
         let _ = self.connection.sender.send(Message::Response(resp));
@@ -2124,9 +1584,9 @@ impl Server {
     fn handle_type_hierarchy_subtypes(&mut self, req: Request) {
         let id = req.id.clone();
         let (id, params): (_, lsp_types::TypeHierarchySubtypesParams) =
-            match req.extract::<lsp_types::TypeHierarchySubtypesParams>(
-                TypeHierarchySubtypes::METHOD,
-            ) {
+            match req
+                .extract::<lsp_types::TypeHierarchySubtypesParams>(TypeHierarchySubtypes::METHOD)
+            {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response::new_err(
@@ -2142,42 +1602,28 @@ impl Server {
             .file_id_for_uri(&params.item.uri)
             .map(|file_id| {
                 let analysis = self.host.analysis();
+                let Some((project_id, target)) = hierarchy_identity(params.item.data.as_ref())
+                else {
+                    return Vec::new();
+                };
+                if self.project_id_for_file(file_id) != Some(project_id) {
+                    return Vec::new();
+                }
                 let thi = rua_analysis::TypeHierarchyItem {
+                    project_id,
+                    target,
                     name: params.item.name.clone(),
                     kind: rua_analysis::DefKind::Trait,
                     file_id,
-                    range: rua_analysis::TextRange::new(0, 0),
+                    range: self
+                        .text_range_for_file(file_id, params.item.selection_range)
+                        .unwrap_or_else(|| TextRange::new(0, 0)),
                 };
                 analysis
                     .type_hierarchy_subtypes(&thi)
                     .into_iter()
-                    .map(|item| {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        let (sl, sc) = li.line_col(item.range.start() as usize, &source);
-                        let (el, ec) = li.line_col(item.range.end() as usize, &source);
-                        lsp_types::TypeHierarchyItem { detail: None,
-                            name: item.name,
-                            kind: lsp_types::SymbolKind::STRUCT,
-                            uri: self
-                                .uri_for_file(item.file_id)
-                                .unwrap_or_else(|| {
-                                    format!("file:///unknown/{}", item.file_id.index())
-                                        .parse()
-                                        .unwrap()
-                                }),
-                            range: Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            },
-                            selection_range: Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            },
-                            data: None,
-                            tags: None,
-                        }
+                    .filter_map(|item| {
+                        self.type_hierarchy_item_to_lsp(&item, lsp_types::SymbolKind::STRUCT)
                     })
                     .collect()
             })
@@ -2207,42 +1653,28 @@ impl Server {
             .file_id_for_uri(&params.item.uri)
             .map(|file_id| {
                 let analysis = self.host.analysis();
+                let Some((project_id, target)) = hierarchy_identity(params.item.data.as_ref())
+                else {
+                    return Vec::new();
+                };
+                if self.project_id_for_file(file_id) != Some(project_id) {
+                    return Vec::new();
+                }
                 let thi = rua_analysis::TypeHierarchyItem {
+                    project_id,
+                    target,
                     name: params.item.name.clone(),
                     kind: rua_analysis::DefKind::Struct,
                     file_id,
-                    range: rua_analysis::TextRange::new(0, 0),
+                    range: self
+                        .text_range_for_file(file_id, params.item.selection_range)
+                        .unwrap_or_else(|| TextRange::new(0, 0)),
                 };
                 analysis
                     .type_hierarchy_supertypes(&thi)
                     .into_iter()
-                    .map(|item| {
-                        let source =
-                            analysis.parse(item.file_id).syntax_node().text().to_string();
-                        let li = LineIndex::new(&source);
-                        let (sl, sc) = li.line_col(item.range.start() as usize, &source);
-                        let (el, ec) = li.line_col(item.range.end() as usize, &source);
-                        lsp_types::TypeHierarchyItem { detail: None,
-                            name: item.name,
-                            kind: lsp_types::SymbolKind::INTERFACE,
-                            uri: self
-                                .uri_for_file(item.file_id)
-                                .unwrap_or_else(|| {
-                                    format!("file:///unknown/{}", item.file_id.index())
-                                        .parse()
-                                        .unwrap()
-                                }),
-                            range: Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            },
-                            selection_range: Range {
-                                start: Position::new(sl as u32, sc as u32),
-                                end: Position::new(el as u32, ec as u32),
-                            },
-                            data: None,
-                            tags: None,
-                        }
+                    .filter_map(|item| {
+                        self.type_hierarchy_item_to_lsp(&item, lsp_types::SymbolKind::INTERFACE)
                     })
                     .collect()
             })
@@ -2282,7 +1714,6 @@ impl Server {
                 .iter()
                 .map(|(_, (uri, id))| (*id, uri.clone()))
                 .collect();
-            let analysis = self.host.analysis();
             // Empty pattern would cause find("") = Some(0) on every
             // iteration, wasting CPU. Guard early.
             if pattern.is_empty() || replacement.is_empty() {
@@ -2295,17 +1726,16 @@ impl Server {
                 return;
             }
             for (file_id, uri) in &file_ids {
-                let source =
-                    analysis.parse(*file_id).syntax_node().text().to_string();
-                let line_index = LineIndex::new(&source);
+                let Some((source, line_index)) = self.source_line_index(*file_id) else {
+                    continue;
+                };
                 let mut file_edits = Vec::new();
                 let mut search_start = 0usize;
                 while let Some(pos) = source[search_start..].find(pattern) {
                     let abs_pos = search_start + pos;
                     if !pattern.is_empty() {
                         let (sl, sc) = line_index.line_col(abs_pos, &source);
-                        let (el, ec) =
-                            line_index.line_col(abs_pos + pattern.len(), &source);
+                        let (el, ec) = line_index.line_col(abs_pos + pattern.len(), &source);
                         file_edits.push(TextEdit {
                             range: Range {
                                 start: Position::new(sl as u32, sc as u32),
@@ -2337,8 +1767,7 @@ impl Server {
             return;
         }
 
-        let resp: Response =
-            Response::new_ok(id, Option::<serde_json::Value>::None);
+        let resp: Response = Response::new_ok(id, Option::<serde_json::Value>::None);
         let _ = self.connection.sender.send(Message::Response(resp));
     }
 
@@ -2361,61 +1790,48 @@ impl Server {
             };
         let query = params.query.to_lowercase();
         let analysis = self.host.analysis();
-        let mut symbols: Vec<WorkspaceSymbol> = Vec::new();
-
-        // Search across all open files.
-        let file_ids: Vec<FileId> = self.file_ids.values().map(|(_, id)| *id).collect();
-        for file_id in file_ids {
-            let def_map = analysis.def_map(file_id);
-            for definition in def_map.definitions() {
-                let name = definition.name();
-                if name.to_lowercase().contains(&query) {
-                    let kind = match definition.kind() {
-                        rua_analysis::DefKind::Function | rua_analysis::DefKind::ExternFunction
-                        | rua_analysis::DefKind::Method => LspSymbolKind::FUNCTION,
-                        rua_analysis::DefKind::Struct => LspSymbolKind::STRUCT,
-                        rua_analysis::DefKind::Enum => LspSymbolKind::ENUM,
-                        rua_analysis::DefKind::Trait => LspSymbolKind::INTERFACE,
-                        rua_analysis::DefKind::Module => LspSymbolKind::MODULE,
-                        rua_analysis::DefKind::Variant => LspSymbolKind::ENUM_MEMBER,
-                        rua_analysis::DefKind::Field => LspSymbolKind::FIELD,
-                        rua_analysis::DefKind::TypeAlias => LspSymbolKind::TYPE_PARAMETER,
-                        _ => LspSymbolKind::OBJECT,
-                    };
-                    if let Some(location) = self.nav_to_location(
-                        &rua_analysis::NavigationTarget::new(
-                            rua_analysis::FileRange::new(
-                                definition.file_id(),
-                                definition.name_range(),
-                            ),
-                            None,
-                        ),
-                    ) {
-                        let (uri, range) = match location {
-                            GotoDefinitionResponse::Scalar(l) => (l.uri, l.range),
-                            _ => continue,
-                        };
-                        symbols.push(WorkspaceSymbol {
-                            name: name.to_string(),
-                            kind,
-                            location: OneOf::Left(Location { uri, range }),
-                            container_name: None,
-                            tags: None,
-                            data: None,
+        let project_ids = self.projects.keys().copied().collect::<Vec<_>>();
+        let task_id = self.next_task_id;
+        self.next_task_id = self.next_task_id.wrapping_add(1);
+        let cancellation = CancellationToken::new();
+        self.pending_queries.insert(
+            task_id,
+            PendingQuery {
+                request_id: id.clone(),
+                input_generation: self.input_generation,
+                cancellation: cancellation.clone(),
+            },
+        );
+        let sender = self.background_sender.clone();
+        if self
+            .worker_pool
+            .try_execute(move || {
+                let mut symbols = Vec::new();
+                for project_id in project_ids {
+                    if cancellation.is_cancelled() {
+                        let _ = sender.send(BackgroundResult::WorkspaceSymbols {
+                            task_id,
+                            result: None,
                         });
+                        return;
                     }
+                    symbols.extend(
+                        analysis
+                            .workspace_symbols_in_project(QueryContext::new(project_id), &query),
+                    );
                 }
-                if symbols.len() >= 50 {
-                    break;
-                }
-            }
-            if symbols.len() >= 50 {
-                break;
-            }
+                let result = (!cancellation.is_cancelled()).then_some(symbols);
+                let _ = sender.send(BackgroundResult::WorkspaceSymbols { task_id, result });
+            })
+            .is_err()
+        {
+            self.pending_queries.remove(&task_id);
+            self.send_query_error(
+                id,
+                lsp_server::ErrorCode::ServerCancelled,
+                "analysis worker queue is full",
+            );
         }
-
-        let resp = Response::new_ok(id, WorkspaceSymbolResponse::Nested(symbols));
-        let _ = self.connection.sender.send(Message::Response(resp));
     }
 
     // -- folding range -------------------------------------------------------
@@ -2441,9 +1857,11 @@ impl Server {
             return;
         };
 
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<FoldingRange>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
         let mut ranges = Vec::new();
         let mut brace_stack: Vec<(usize, usize)> = Vec::new(); // (line, col)
 
@@ -2531,9 +1949,11 @@ impl Server {
             return;
         };
 
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<Vec<DocumentLink>>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
         let mut links = Vec::new();
 
         // Find `[text]` references in doc comments and link them.
@@ -2601,63 +2021,24 @@ impl Server {
             return;
         }
 
-        // Deserialize the completion data and try to look up documentation.
+        // Resolve documentation through the exact semantic declaration target.
         if let Some(raw) = &item.data
-            && let Some((raw_file_id, name)) = parse_resolve_data(raw)
+            && let Some(target) = parse_resolve_data(raw)
         {
-                let file_id = rua_analysis::FileId::new(raw_file_id);
-                let analysis = self.host.analysis();
-                let def_map = analysis.def_map(file_id);
-                // Find the definition by name and extract its doc comment.
-                if let Some(definition) = def_map
-                    .definitions()
-                    .find(|d| d.name() == name && d.file_id() == file_id)
-                {
-                    // Walk backwards from the definition keyword to collect
-                    // /// line comments.
-                    let parse = analysis.parse(file_id);
-                    let root = parse.syntax_node();
-                    let range_start: u32 = definition.range().start();
-                    let end: u32 = root.text_range().end().into();
-                    // Find token at the start of the definition.
-                    let mut current: Option<rua_syntax::SyntaxToken> = match root
-                        .token_at_offset(range_start.min(end).into())
-                    {
-                        rowan::TokenAtOffset::Single(t) => Some(t),
-                        rowan::TokenAtOffset::Between(l, _) => Some(l),
-                        _ => None,
-                    };
-                    let mut doc_lines: Vec<String> = Vec::new();
-                    loop {
-                        let prev = current.as_ref().and_then(|t| t.prev_token());
-                        match prev {
-                            None => break,
-                            Some(ref pt)
-                                if pt.kind() == rua_syntax::SyntaxKind::LineComment
-                                    && pt.text().starts_with("///") =>
-                            {
-                                let doc = pt
-                                    .text()
-                                    .strip_prefix("///")
-                                    .unwrap_or(pt.text())
-                                    .trim();
-                                doc_lines.push(doc.to_string());
-                                current = prev;
-                            }
-                            Some(ref pt) if pt.kind().is_trivia() => {
-                                current = prev;
-                            }
-                            Some(_) => break,
-                        }
-                    }
-                    if !doc_lines.is_empty() {
-                        doc_lines.reverse();
-                        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: doc_lines.join("\n"),
-                        }));
-                    }
-                }
+            let analysis = self.host.analysis();
+            if let Some(project_id) = self.project_id_for_file(target.file_id)
+                && let Some(def_map) = analysis.def_map_for_project(project_id)
+                && let Some(definition) = def_map.definitions().find(|definition| {
+                    definition.file_id() == target.file_id
+                        && definition.name_range() == target.range
+                })
+                && let Some(documentation) = definition.documentation()
+            {
+                item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: documentation.to_string(),
+                }));
+            }
         }
 
         let resp = Response::new_ok(id, item);
@@ -2668,35 +2049,58 @@ impl Server {
 
     fn handle_references(&mut self, req: Request) {
         let id = req.id.clone();
-        let (id, params) =
-            match req.extract::<lsp_types::ReferenceParams>(References::METHOD) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response::new_err(
-                        id,
-                        lsp_server::ErrorCode::InvalidParams as i32,
-                        format!("invalid references params: {e:?}"),
-                    );
-                    let _ = self.connection.sender.send(Message::Response(resp));
-                    return;
-                }
-            };
+        let (id, params) = match req.extract::<lsp_types::ReferenceParams>(References::METHOD) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid references params: {e:?}"),
+                );
+                let _ = self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let include_decl = params.context.include_declaration;
 
-        let locations = self
-            .project_position(uri, pos)
-            .map(|pp| {
-                let analysis = self.host.analysis();
-                let refs = analysis.references(pp, include_decl);
-                refs.into_iter()
-                    .filter_map(|r| self.ref_to_location(&r))
-                    .collect::<Vec<_>>()
-            });
-
-        let resp = Response::new_ok(id, locations);
-        let _ = self.connection.sender.send(Message::Response(resp));
+        let Some(project_position) = self.project_position(uri, pos) else {
+            let response = Response::new_ok(id, Option::<Vec<Location>>::None);
+            let _ = self.connection.sender.send(Message::Response(response));
+            return;
+        };
+        let analysis = self.host.analysis();
+        let task_id = self.next_task_id;
+        self.next_task_id = self.next_task_id.wrapping_add(1);
+        let cancellation = CancellationToken::new();
+        self.pending_queries.insert(
+            task_id,
+            PendingQuery {
+                request_id: id.clone(),
+                input_generation: self.input_generation,
+                cancellation: cancellation.clone(),
+            },
+        );
+        let sender = self.background_sender.clone();
+        if self
+            .worker_pool
+            .try_execute(move || {
+                let result =
+                    analysis.references_cancellable(project_position, include_decl, || {
+                        cancellation.is_cancelled()
+                    });
+                let _ = sender.send(BackgroundResult::References { task_id, result });
+            })
+            .is_err()
+        {
+            self.pending_queries.remove(&task_id);
+            self.send_query_error(
+                id,
+                lsp_server::ErrorCode::ServerCancelled,
+                "analysis worker queue is full",
+            );
+        }
     }
 
     // -- rename / prepare rename ---------------------------------------------
@@ -2719,19 +2123,17 @@ impl Server {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
-        let result = self
-            .project_position(uri, pos)
-            .and_then(|pp| {
-                let analysis = self.host.analysis();
-                match analysis.rename(pp, &params.new_name) {
-                    Ok(change) => source_change_to_workspace_edit(
-                        &analysis,
-                        &change,
-                        |fid| self.file_to_uri.get(&fid).cloned(),
-                    ),
-                    Err(_) => None,
-                }
-            });
+        let result = self.project_position(uri, pos).and_then(|pp| {
+            let analysis = self.host.analysis();
+            match analysis.rename(pp, &params.new_name) {
+                Ok(change) => source_change_to_workspace_edit(
+                    &change,
+                    |file_id| self.source_line_index(file_id),
+                    |file_id| self.file_to_uri.get(&file_id).cloned(),
+                ),
+                Err(_) => None,
+            }
+        });
 
         match result {
             Some(edit) => {
@@ -2751,21 +2153,20 @@ impl Server {
 
     fn handle_prepare_rename(&mut self, req: Request) {
         let id = req.id.clone();
-        let (id, params) =
-            match req.extract::<lsp_types::TextDocumentPositionParams>(
-                PrepareRenameRequest::METHOD,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response::new_err(
-                        id,
-                        lsp_server::ErrorCode::InvalidParams as i32,
-                        format!("invalid prepare-rename params: {e:?}"),
-                    );
-                    let _ = self.connection.sender.send(Message::Response(resp));
-                    return;
-                }
-            };
+        let (id, params) = match req
+            .extract::<lsp_types::TextDocumentPositionParams>(PrepareRenameRequest::METHOD)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams as i32,
+                    format!("invalid prepare-rename params: {e:?}"),
+                );
+                let _ = self.connection.sender.send(Message::Response(resp));
+                return;
+            }
+        };
         let uri = &params.text_document.uri;
         let pos = params.position;
 
@@ -2788,17 +2189,22 @@ impl Server {
 
     fn handle_semantic_tokens(&mut self, req: Request) {
         handle_doc_request!(
-            self, req, lsp_types::SemanticTokensParams, SemanticTokensFullRequest::METHOD,
+            self,
+            req,
+            lsp_types::SemanticTokensParams,
+            SemanticTokensFullRequest::METHOD,
             Option::<SemanticTokensResult>::None,
             |file_id, analysis| {
-                let source = analysis.parse(file_id).syntax_node().text().to_string();
-                let line_index = LineIndex::new(&source);
-                let tokens = analysis.semantic_tokens(file_id);
-                let data = encode_semantic_tokens(&tokens, &line_index, &source);
-                Some(SemanticTokensResult::Tokens(SemanticTokens {
-                    result_id: None,
-                    data,
-                }))
+                self.source_line_index(file_id).map(|(source, line_index)| {
+                    let tokens = self
+                        .project_file(file_id)
+                        .map_or_else(Vec::new, |file| analysis.semantic_tokens_in_project(file));
+                    let data = encode_semantic_tokens(&tokens, &line_index, &source);
+                    SemanticTokensResult::Tokens(SemanticTokens {
+                        result_id: None,
+                        data,
+                    })
+                })
             }
         );
     }
@@ -2826,9 +2232,14 @@ impl Server {
             return;
         };
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
-        let tokens = analysis.semantic_tokens(file_id);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            let resp = Response::new_ok(id, Option::<SemanticTokensResult>::None);
+            let _ = self.connection.sender.send(Message::Response(resp));
+            return;
+        };
+        let tokens = self
+            .project_file(file_id)
+            .map_or_else(Vec::new, |file| analysis.semantic_tokens_in_project(file));
         // Filter tokens to those overlapping the requested range.
         let range_start = line_index.offset(
             params.range.start.line as usize,
@@ -2857,140 +2268,179 @@ impl Server {
         let _ = self.connection.sender.send(Message::Response(resp));
     }
 
-    // -- notifications -------------------------------------------------------
-
-    fn handle_notification(&mut self, not: Notification) {
-        match not.method.as_str() {
-            DidOpenTextDocument::METHOD => {
-                extract_notification!(not, lsp_types::DidOpenTextDocumentParams, "didOpen", |p| {
-                    self.open_document(p.text_document.uri, p.text_document.text);
-                });
-            }
-            DidChangeTextDocument::METHOD => {
-                extract_notification!(not, lsp_types::DidChangeTextDocumentParams, "didChange", |p| {
-                    if let Some(change) = p.content_changes.last() {
-                        self.change_document(p.text_document.uri, change.text.clone());
-                    }
-                });
-            }
-            DidCloseTextDocument::METHOD => {
-                extract_notification!(not, lsp_types::DidCloseTextDocumentParams, "didClose", |p| {
-                    self.close_document(p.text_document.uri);
-                });
-            }
-            DidSaveTextDocument::METHOD => {
-                extract_notification!(not, lsp_types::DidSaveTextDocumentParams, "didSave", |p| {
-                    self.handle_did_save(&p);
-                });
-            }
-            DidChangeConfiguration::METHOD => {
-                extract_notification!(not, lsp_types::DidChangeConfigurationParams, "didChangeConfiguration", |p| {
-                    self.reload_configuration(&p.settings);
-                });
-            }
-            DidChangeWatchedFiles::METHOD => {
-                extract_notification!(not, DidChangeWatchedFilesParams, "didChangeWatchedFiles", |p| {
-                    self.handle_watched_file_change(&p);
-                });
-            }
-            _ => {}
-        }
-    }
-
-    fn open_document(&mut self, uri: Uri, text: String) {
+    fn open_document(&mut self, uri: Uri, version: i32, text: String) {
         let file_id = self.ensure_file_id(&uri);
+        let path = Self::doc_key(&uri);
+        let project_id = self
+            .project_id_for_file(file_id)
+            .or_else(|| self.project_id_for_path(&path))
+            .unwrap_or(ProjectId::new(0));
+        self.projects.entry(project_id).or_insert_with(|| {
+            let root_id = SourceRootId::new(0);
+            WorkspaceProject {
+                root_file: file_id,
+                workspace_roots: vec![ProjectRoot::new(
+                    root_id,
+                    path.parent().unwrap_or(Path::new("")),
+                )],
+            }
+        });
+        self.file_projects.insert(file_id, project_id);
+        self.consider_project_root(project_id, file_id, &path);
         let mut change = Change::new();
-        change.set_file_text(file_id, &*text);
-        self.host.apply_change(change);
+        if self.host.analysis().file_kind(file_id).is_some() {
+            change.set_file_text(file_id, &*text);
+        } else {
+            let root_id = self.projects[&project_id].workspace_roots[0].source_root_id();
+            change.set_source_root(root_id, SourceRootKind::Workspace);
+            change.set_file_with_path(file_id, root_id, FileKind::Source, path, &*text);
+        }
+        self.set_project_changes(&mut change);
+        self.apply_analysis_change(change);
         self.open_buffers.insert(file_id, (uri.clone(), text));
+        self.open_versions.insert(file_id, version);
         self.publish_diagnostics(&uri);
     }
 
-    fn change_document(&mut self, uri: Uri, text: String) {
-        let file_id = self.ensure_file_id(&uri);
+    fn change_document(&mut self, uri: Uri, version: i32, text: String) {
+        let Some(file_id) = self.file_id_for_uri(&uri) else {
+            return;
+        };
+        let Some(previous_version) = self.open_versions.get(&file_id).copied() else {
+            return;
+        };
+        if version <= previous_version {
+            return;
+        }
         let mut change = Change::new();
         change.set_file_text(file_id, &*text);
-        self.host.apply_change(change);
+        self.apply_analysis_change(change);
         self.open_buffers.insert(file_id, (uri.clone(), text));
+        self.open_versions.insert(file_id, version);
         self.publish_diagnostics(&uri);
     }
 
     fn close_document(&mut self, uri: Uri) {
         let key = Self::doc_key(&uri);
-        if let Some(file_id) = self.file_ids.get(&key).map(|(_, f)| *f) {
-            self.open_buffers.remove(&file_id);
-            // Remove from host so it doesn't keep stale open-buffer state
+        if let Some(file_id) = self.file_ids.get(&key).map(|(_, file_id)| *file_id)
+            && self.open_buffers.remove(&file_id).is_some()
+        {
+            self.open_versions.remove(&file_id);
             let mut change = Change::new();
-            change.remove_file(file_id);
-            self.host.apply_change(change);
+            if let Some(disk) = self.disk_files.get(&file_id) {
+                change.set_file_with_path(
+                    file_id,
+                    disk.source_root,
+                    disk.kind,
+                    &disk.analysis_path,
+                    &*disk.text,
+                );
+            } else {
+                change.remove_file(file_id);
+            }
+            self.apply_analysis_change(change);
         }
-        self.send_diagnostics(&uri, &[]);
+        self.send_diagnostics(&uri, &[], None);
     }
 
     fn handle_did_save(&mut self, params: &lsp_types::DidSaveTextDocumentParams) {
         let uri = &params.text_document.uri;
-        let Some(file_id) = self.file_id_for_uri(uri) else { return };
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
-
-        // Resolve the actual file path from the URI so we can pass it to
-        // `ruac check` (which expects a path, not source text).
-        let file_path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri.as_str()));
-
-        // Try to run ruac check as a subprocess.
-        if let Ok(output) = std::process::Command::new("ruac")
-            .arg("check")
-            .arg(&file_path)
-            .output()
-            && !output.status.success()
+        if let Some(file_id) = self.file_id_for_uri(uri)
+            && let Some(disk) = self.disk_files.get_mut(&file_id)
+            && let Ok(text) = std::fs::read_to_string(&disk.path)
         {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut diags: Vec<Diagnostic> = Vec::new();
-            for line in stderr.lines() {
-                if let Some(rest) = line.strip_prefix("error:") {
-                    let msg = rest.trim().to_string();
-                    let (sl, sc) = line_index.line_col(0, &source);
-                    let range = Range {
-                        start: Position::new(sl as u32, sc as u32),
-                        end: Position::new(sl as u32, 80.min(source.len() as u32)),
-                    };
-                    diags.push(Diagnostic {
-                        range,
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        source: Some("ruac".to_string()),
-                        message: msg,
-                        ..Default::default()
-                    });
-                }
-            }
-            if !diags.is_empty() {
-                self.send_diagnostics(uri, &diags);
-                return;
-            }
+            disk.text = text;
         }
-        // Fall back to native diagnostics.
         self.publish_diagnostics(uri);
     }
 
     fn reload_configuration(&mut self, settings: &serde_json::Value) {
-        // Extract library roots from settings
-        let config = LibraryConfig::from_settings(settings);
-        if let Ok(config) = config {
-            let mut change = Change::new();
+        let Ok(request) = LibraryScanRequest::from_settings(settings) else {
+            return;
+        };
+        if let Some((_, cancellation)) = self.library_scan.take() {
+            cancellation.cancel();
+        }
+        let generation = self.next_scan_generation;
+        self.next_scan_generation = self.next_scan_generation.wrapping_add(1);
+        let cancellation = CancellationToken::new();
+        self.library_scan = Some((generation, cancellation.clone()));
+        let sender = self.background_sender.clone();
+        if self
+            .worker_pool
+            .try_execute(move || {
+                let result = request.scan(&mut || cancellation.is_cancelled());
+                let _ = sender.send(BackgroundResult::LibraryScan { generation, result });
+            })
+            .is_err()
+        {
+            self.library_scan = None;
+        }
+    }
+
+    fn apply_library_config(&mut self, config: LibraryConfig) {
+        let mut change = Change::new();
+
+        if let Some(old_root) = self.library_source_root.take() {
+            change.remove_source_root(old_root);
+        }
+        for file_id in self.library_file_ids.drain() {
+            self.disk_files.remove(&file_id);
+            if let Some((_, overlay)) = self.open_buffers.get(&file_id) {
+                let root = SourceRootId::new(0);
+                change.set_source_root(root, SourceRootKind::Workspace);
+                change.set_file_with_path(
+                    file_id,
+                    root,
+                    FileKind::Declaration,
+                    Self::doc_key(
+                        self.file_to_uri
+                            .get(&file_id)
+                            .expect("open overlay retains URI"),
+                    ),
+                    &**overlay,
+                );
+            }
+        }
+
+        self.library_bases = config.bases.clone();
+        self.library_project_bases = config.project_bases.clone();
+        if !config.roots.is_empty() || !config.mounts.is_empty() {
             let root_id = SourceRootId::new(self.next_root_id);
             self.next_root_id += 1;
-
+            self.library_source_root = Some(root_id);
             change.set_source_root(root_id, SourceRootKind::Library);
-            for (path, content) in config.files {
-                let file_id = self.ensure_file_id_for_path(&path);
-                change.set_file(file_id, root_id, FileKind::Declaration, &*content);
+            for file in &config.files {
+                let file_id = self.ensure_file_id_for_path(&file.physical_path);
+                self.library_file_ids.insert(file_id);
+                self.disk_files.insert(
+                    file_id,
+                    DiskFile {
+                        path: file.physical_path.clone(),
+                        analysis_path: file.analysis_path.clone(),
+                        text: file.text.clone(),
+                        source_root: root_id,
+                        kind: FileKind::Declaration,
+                    },
+                );
+                if !self.open_buffers.contains_key(&file_id) {
+                    change.set_file_with_path(
+                        file_id,
+                        root_id,
+                        FileKind::Declaration,
+                        &file.analysis_path,
+                        &*file.text,
+                    );
+                }
             }
-            self.host.apply_change(change);
-            self.library_roots = config.roots;
-            self.library_mounts = config.mounts;
-            self.register_watchers();
         }
+        self.rebuild_project_dependency_roots();
+
+        self.library_roots = config.roots;
+        self.library_mounts = config.mounts;
+        self.set_project_changes(&mut change);
+        self.apply_analysis_change(change);
+        self.register_watchers();
     }
 
     // -- file watchers --------------------------------------------------------
@@ -3012,6 +2462,29 @@ impl Server {
 
     /// Register `workspace/didChangeWatchedFiles` for configured library roots.
     fn register_watchers(&mut self) {
+        if let Some(registration_id) = self.watch_registration_id.take() {
+            self.watch_registrations
+                .entry(registration_id.clone())
+                .or_default()
+                .desired = false;
+            let request_id = self.next_request_id;
+            self.next_request_id += 1;
+            let request_id: RequestId = request_id.into();
+            let request = lsp_server::Request::new(
+                request_id.clone(),
+                "client/unregisterCapability".to_string(),
+                UnregistrationParams {
+                    unregisterations: vec![Unregistration {
+                        id: registration_id.clone(),
+                        method: DidChangeWatchedFiles::METHOD.to_string(),
+                    }],
+                },
+            );
+            self.pending_watch_requests
+                .insert(request_id, (WatchOperation::Unregister, registration_id));
+            let _ = self.connection.sender.send(Message::Request(request));
+        }
+        self.watched_paths.clear();
         let mut watchers: Vec<FileSystemWatcher> = Vec::new();
 
         for root in &self.library_roots {
@@ -3036,8 +2509,11 @@ impl Server {
             return;
         }
 
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let registration_id = format!("rua-library-watcher-{request_id}");
         let registration = Registration {
-            id: "rua-library-watcher".to_string(),
+            id: registration_id.clone(),
             method: DidChangeWatchedFiles::METHOD.to_string(),
             register_options: Some(
                 serde_json::to_value(lsp_types::DidChangeWatchedFilesRegistrationOptions {
@@ -3049,55 +2525,112 @@ impl Server {
         let params = RegistrationParams {
             registrations: vec![registration],
         };
+        let request_id: RequestId = request_id.into();
         let request = lsp_server::Request::new(
-            1.into(), // id for the registration request
+            request_id.clone(),
             "client/registerCapability".to_string(),
             params,
+        );
+        self.watch_registrations.insert(
+            registration_id.clone(),
+            WatchRegistrationState {
+                desired: true,
+                ..WatchRegistrationState::default()
+            },
+        );
+        self.pending_watch_requests.insert(
+            request_id,
+            (WatchOperation::Register, registration_id.clone()),
         );
         let _ = self
             .connection
             .sender
             .send(lsp_server::Message::Request(request));
+        self.watch_registration_id = Some(registration_id);
+    }
+
+    fn library_analysis_path(&self, path: &Path) -> PathBuf {
+        for (name, mounted) in &self.library_mounts {
+            let Ok(canonical) = std::fs::canonicalize(mounted) else {
+                continue;
+            };
+            let base = canonical.parent().unwrap_or(Path::new(""));
+            if canonical.is_file() && canonical == path {
+                let extension = canonical
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("ruai");
+                return base.join(format!("{name}.{extension}"));
+            }
+            if canonical.is_dir()
+                && let Ok(relative) = path.strip_prefix(&canonical)
+            {
+                return base.join(name).join(relative);
+            }
+        }
+        path.to_path_buf()
     }
 
     fn handle_watched_file_change(&mut self, params: &DidChangeWatchedFilesParams) {
-        // Debounce: skip if within 100ms of the last event.
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_watcher_event
-            && now.duration_since(last) < std::time::Duration::from_millis(100) {
-                return;
-            }
-        self.last_watcher_event = Some(now);
+        let Some(root_id) = self.library_source_root else {
+            return;
+        };
 
         let mut change = Change::new();
-        let root_id = SourceRootId::new(self.next_root_id);
-        // Use the same root as library files (increment for reload).
-        self.next_root_id += 1;
-        change.set_source_root(root_id, SourceRootKind::Library);
 
         for event in &params.changes {
             let Some(path) = uri_to_path(&event.uri) else {
                 continue;
             };
+            let path = normalize_physical_path(&path);
             let file_id = self.ensure_file_id_for_path(&path);
             match event.typ {
                 lsp_types::FileChangeType::CREATED | lsp_types::FileChangeType::CHANGED => {
                     if let Ok(text) = std::fs::read_to_string(&path) {
-                        change.set_file(file_id, root_id, FileKind::Declaration, &*text);
+                        let analysis_path = self.library_analysis_path(&path);
+                        self.library_file_ids.insert(file_id);
+                        self.disk_files.insert(
+                            file_id,
+                            DiskFile {
+                                path: path.clone(),
+                                analysis_path: analysis_path.clone(),
+                                text: text.clone(),
+                                source_root: root_id,
+                                kind: FileKind::Declaration,
+                            },
+                        );
+                        if !self.open_buffers.contains_key(&file_id) {
+                            change.set_file_with_path(
+                                file_id,
+                                root_id,
+                                FileKind::Declaration,
+                                analysis_path,
+                                &*text,
+                            );
+                        }
                     }
                 }
                 lsp_types::FileChangeType::DELETED => {
-                    change.remove_file(file_id);
+                    self.library_file_ids.remove(&file_id);
+                    self.disk_files.remove(&file_id);
+                    if !self.open_buffers.contains_key(&file_id) {
+                        change.remove_file(file_id);
+                    }
                 }
                 _ => {}
             }
         }
 
-        self.host.apply_change(change);
+        self.rebuild_project_dependency_roots();
+        self.set_project_changes(&mut change);
+        self.apply_analysis_change(change);
 
         // Republish diagnostics for any open files that may be affected.
-        let open_uris: Vec<Uri> =
-            self.open_buffers.values().map(|(uri, _)| uri.clone()).collect();
+        let open_uris: Vec<Uri> = self
+            .open_buffers
+            .values()
+            .map(|(uri, _)| uri.clone())
+            .collect();
         for uri in open_uris {
             self.publish_diagnostics(&uri);
         }
@@ -3107,10 +2640,11 @@ impl Server {
     /// that the canonical URI-to-path round-trip produces a key consistent with
     /// URI-registered files, avoiding duplicate FileIds.
     fn ensure_file_id_for_path(&mut self, path: &Path) -> FileId {
-        if let Some((_, id)) = self.file_ids.get(path) {
+        let path = normalize_physical_path(path);
+        if let Some((_, id)) = self.file_ids.get(&path) {
             return *id;
         }
-        let uri = path_to_uri(path).unwrap_or_else(|| {
+        let uri = path_to_uri(&path).unwrap_or_else(|| {
             format!("file:///unknown/{}", self.next_file_id)
                 .parse()
                 .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
@@ -3122,27 +2656,38 @@ impl Server {
 
     fn project_position(&self, uri: &Uri, pos: Position) -> Option<ProjectPosition> {
         let file_id = self.file_id_for_uri(uri)?;
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
+        let (source, line_index) = self.source_line_index(file_id)?;
         let offset = line_index.offset(pos.line as usize, pos.character as usize, &source);
         Some(ProjectPosition::at(
-            ProjectId::new(0),
+            self.project_id_for_file(file_id)?,
             file_id,
             offset as u32,
         ))
     }
 
     fn range_for_file(&self, file_id: FileId, range: TextRange) -> Option<Range> {
-        let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let li = LineIndex::new(&source);
+        let (source, li) = self.source_line_index(file_id)?;
         let start = li.line_col(range.start() as usize, &source);
         let end = li.line_col(range.end() as usize, &source);
         Some(Range {
             start: Position::new(start.0 as u32, start.1 as u32),
             end: Position::new(end.0 as u32, end.1 as u32),
         })
+    }
+
+    fn text_range_for_file(&self, file_id: FileId, range: Range) -> Option<TextRange> {
+        let (source, line_index) = self.source_line_index(file_id)?;
+        let start = line_index.offset(
+            range.start.line as usize,
+            range.start.character as usize,
+            &source,
+        );
+        let end = line_index.offset(
+            range.end.line as usize,
+            range.end.character as usize,
+            &source,
+        );
+        (start <= end).then(|| TextRange::new(start as u32, end as u32))
     }
 
     fn nav_to_location(&self, target: &NavigationTarget) -> Option<GotoDefinitionResponse> {
@@ -3152,14 +2697,46 @@ impl Server {
         Some(GotoDefinitionResponse::Scalar(Location { uri, range }))
     }
 
-    fn ref_to_location(
-        &self,
-        r: &rua_analysis::ReferenceResult,
-    ) -> Option<Location> {
+    fn ref_to_location(&self, r: &rua_analysis::ReferenceResult) -> Option<Location> {
         let file_range = r.range();
         let uri = self.uri_for_file(file_range.file_id)?;
         let range = self.range_for_file(file_range.file_id, file_range.range)?;
         Some(Location { uri, range })
+    }
+
+    fn call_hierarchy_item_to_lsp(
+        &self,
+        item: &rua_analysis::CallHierarchyItem,
+    ) -> Option<lsp_types::CallHierarchyItem> {
+        let range = self.range_for_file(item.file_id, item.range)?;
+        Some(lsp_types::CallHierarchyItem {
+            detail: None,
+            name: item.name.clone(),
+            kind: lsp_types::SymbolKind::FUNCTION,
+            uri: self.uri_for_file(item.file_id)?,
+            range,
+            selection_range: range,
+            data: Some(hierarchy_data(item.project_id, item.target)),
+            tags: None,
+        })
+    }
+
+    fn type_hierarchy_item_to_lsp(
+        &self,
+        item: &rua_analysis::TypeHierarchyItem,
+        kind: lsp_types::SymbolKind,
+    ) -> Option<lsp_types::TypeHierarchyItem> {
+        let range = self.range_for_file(item.file_id, item.range)?;
+        Some(lsp_types::TypeHierarchyItem {
+            detail: None,
+            name: item.name.clone(),
+            kind,
+            uri: self.uri_for_file(item.file_id)?,
+            range,
+            selection_range: range,
+            data: Some(hierarchy_data(item.project_id, item.target)),
+            tags: None,
+        })
     }
 
     fn publish_diagnostics(&mut self, uri: &Uri) {
@@ -3167,135 +2744,34 @@ impl Server {
             return;
         };
         let analysis = self.host.analysis();
-        let source = analysis.parse(file_id).syntax_node().text().to_string();
-        let line_index = LineIndex::new(&source);
-        let native = analysis.diagnostics(file_id);
+        let Some((source, line_index)) = self.source_line_index(file_id) else {
+            return;
+        };
+        let native = self
+            .project_file(file_id)
+            .map_or_else(Vec::new, |file| analysis.diagnostics_in_project(file));
 
         let lsp_diags: Vec<Diagnostic> = native
             .iter()
             .map(|d| core_diag_to_lsp(d, &line_index, &source))
             .collect();
 
-        self.send_diagnostics(uri, &lsp_diags);
+        self.send_diagnostics(uri, &lsp_diags, self.open_versions.get(&file_id).copied());
     }
 
-    fn send_diagnostics(&self, uri: &Uri, diags: &[Diagnostic]) {
+    fn source_line_index(&self, file_id: FileId) -> Option<(Arc<str>, Arc<LineIndex>)> {
+        let analysis = self.host.analysis();
+        self.line_indices.borrow_mut().get(&analysis, file_id)
+    }
+
+    fn send_diagnostics(&self, uri: &Uri, diags: &[Diagnostic], version: Option<i32>) {
         let params = PublishDiagnosticsParams {
             uri: uri.clone(),
             diagnostics: diags.to_vec(),
-            version: None,
+            version,
         };
         let not = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
         let _ = self.connection.sender.send(Message::Notification(not));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Library configuration (minimal — mirrors old analysis_inputs logic)
-// ---------------------------------------------------------------------------
-
-struct LibraryConfig {
-    roots: Vec<PathBuf>,
-    mounts: HashMap<String, PathBuf>,
-    files: Vec<(PathBuf, String)>,
-}
-
-impl LibraryConfig {
-    fn from_settings(settings: &serde_json::Value) -> Result<Self, String> {
-        let nested = settings.get("rua");
-        let library = settings
-            .get("rua.library")
-            .or_else(|| nested.and_then(|rua| rua.get("library")))
-            .or_else(|| settings.get("library"));
-        let mounts = settings
-            .get("rua.libraryMounts")
-            .or_else(|| nested.and_then(|rua| rua.get("libraryMounts")))
-            .or_else(|| settings.get("libraryMounts"));
-
-        let roots = parse_library_paths(library)?;
-        let mounts = parse_mounts(mounts)?;
-
-        let mut files = Vec::new();
-        for root in &roots {
-            scan_library_root(root, &mut files);
-        }
-        for path in mounts.values() {
-            if let Ok(canonical) = std::fs::canonicalize(path)
-                && let Ok(text) = std::fs::read_to_string(&canonical) {
-                    files.push((canonical, text));
-                }
-        }
-
-        Ok(LibraryConfig {
-            roots,
-            mounts,
-            files,
-        })
-    }
-}
-
-fn parse_library_paths(value: Option<&serde_json::Value>) -> Result<Vec<PathBuf>, String> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let entries = value
-        .as_array()
-        .ok_or_else(|| "rua.library must be an array of paths".to_string())?;
-    entries
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(PathBuf::from)
-                .ok_or_else(|| "rua.library entry must be a string path".to_string())
-        })
-        .collect()
-}
-
-fn parse_mounts(
-    value: Option<&serde_json::Value>,
-) -> Result<HashMap<String, PathBuf>, String> {
-    let Some(value) = value else {
-        return Ok(HashMap::new());
-    };
-    let entries = value
-        .as_object()
-        .ok_or_else(|| "rua.libraryMounts must be an object".to_string())?;
-    entries
-        .iter()
-        .map(|(k, v)| {
-            v.as_str()
-                .map(|p| (k.clone(), PathBuf::from(p)))
-                .ok_or_else(|| format!("rua.libraryMounts.{k} must be a string path"))
-        })
-        .collect()
-}
-
-fn scan_library_root(root: &Path, files: &mut Vec<(PathBuf, String)>) {
-    if let Ok(canonical) = std::fs::canonicalize(root) {
-        if canonical.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&canonical) {
-                files.push((canonical, text));
-            }
-        } else if canonical.is_dir() {
-            scan_dir(&canonical, files);
-        }
-    }
-}
-
-fn scan_dir(dir: &Path, files: &mut Vec<(PathBuf, String)>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        paths.sort();
-        for path in paths {
-            if path.is_dir() {
-                scan_dir(&path, files);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("ruai")
-                && let Ok(text) = std::fs::read_to_string(&path) {
-                    files.push((path, text));
-                }
-        }
     }
 }
 
@@ -3310,26 +2786,20 @@ fn main() {
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-        document_on_type_formatting_provider: Some(
-            lsp_types::DocumentOnTypeFormattingOptions {
-                first_trigger_character: "\n".to_string(),
-                more_trigger_character: None,
-            },
-        ),
+        document_on_type_formatting_provider: Some(lsp_types::DocumentOnTypeFormattingOptions {
+            first_trigger_character: "\n".to_string(),
+            more_trigger_character: None,
+        }),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
-        selection_range_provider: Some(
-            lsp_types::SelectionRangeProviderCapability::Simple(true),
-        ),
+        selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
         call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
-        implementation_provider: Some(
-            lsp_types::ImplementationProviderCapability::Simple(true),
-        ),
+        implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::from(true)),
@@ -3390,80 +2860,113 @@ fn main() {
     if let Some(settings) = initialization_options {
         server.reload_configuration(&settings);
     }
-    if let Err(e) = server.main_loop() {
-        eprintln!("rua-lsp: error in main loop: {e}");
-    }
+    let failed = match server.main_loop() {
+        Ok(()) => false,
+        Err(error) => {
+            eprintln!("rua-lsp: error in main loop: {error}");
+            true
+        }
+    };
 
+    // Closing the connection sender is what lets the stdio writer terminate.
+    // Keeping `server` alive across `join` deadlocks every graceful shutdown.
+    drop(server);
     io_threads.join().expect("io threads join");
     eprintln!("rua-lsp: shutdown complete");
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 impl Server {
     fn index_workspace_folders(&mut self, folders: &[Uri]) {
-        let root_id = SourceRootId::new(0); // workspace root
-        let mut change = Change::new();
-        change.set_source_root(root_id, SourceRootKind::Workspace);
+        let roots = folders.iter().filter_map(uri_to_path).collect::<Vec<_>>();
+        if let Some((_, cancellation)) = self.workspace_scan.take() {
+            cancellation.cancel();
+        }
+        // With no workspace folders, didOpen creates an ad-hoc project. An
+        // asynchronous empty scan must not arrive later and erase that state.
+        if roots.is_empty() {
+            return;
+        }
+        let generation = self.next_scan_generation;
+        self.next_scan_generation = self.next_scan_generation.wrapping_add(1);
+        let cancellation = CancellationToken::new();
+        self.workspace_scan = Some((generation, cancellation.clone()));
+        let sender = self.background_sender.clone();
+        if self
+            .worker_pool
+            .try_execute(move || {
+                let scans = scan_workspace_roots(roots, &mut || cancellation.is_cancelled());
+                let result = (!cancellation.is_cancelled()).then_some(scans);
+                let _ = sender.send(BackgroundResult::WorkspaceScan { generation, result });
+            })
+            .is_err()
+        {
+            self.workspace_scan = None;
+        }
+    }
 
-        for uri in folders {
-            if let Some(root) = uri_to_path(uri) {
-                let mut count = 0u32;
-                scan_workspace_files(&root, &mut |path, text| {
+    fn apply_workspace_scan(&mut self, scans: Vec<WorkspaceScan>) {
+        let mut change = Change::new();
+        self.projects.clear();
+        self.file_projects.clear();
+
+        for scan in scans {
+            let WorkspaceScan {
+                project_index,
+                root,
+                files,
+            } = scan;
+            {
+                let logical_base = normalize_physical_path(&root);
+                let root_id = SourceRootId::new(self.next_root_id);
+                self.next_root_id += 1;
+                let project_id = ProjectId::new(project_index as u32);
+                if files.is_empty() {
+                    continue;
+                }
+                let root_file_index = files
+                    .iter()
+                    .position(|(path, _)| {
+                        path.file_name().and_then(|name| name.to_str()) == Some("main.rua")
+                    })
+                    .unwrap_or(0);
+                let root_file = self.ensure_file_id_for_path(&files[root_file_index].0);
+                self.projects.insert(
+                    project_id,
+                    WorkspaceProject {
+                        root_file,
+                        workspace_roots: vec![ProjectRoot::new(root_id, logical_base)],
+                    },
+                );
+                change.set_source_root(root_id, SourceRootKind::Workspace);
+                for (path, text) in &files {
                     let file_id = self.ensure_file_id_for_path(path);
-                    change.set_file(
+                    self.file_projects.insert(file_id, project_id);
+                    self.disk_files.insert(
                         file_id,
-                        root_id,
-                        FileKind::Source,
-                        text,
+                        DiskFile {
+                            path: path.clone(),
+                            analysis_path: path.clone(),
+                            text: text.clone(),
+                            source_root: root_id,
+                            kind: FileKind::Source,
+                        },
                     );
-                    count += 1;
-                });
+                    change.set_file_with_path(file_id, root_id, FileKind::Source, path, &**text);
+                }
                 eprintln!(
-                    "rua-lsp: indexed {count} source(s) under {}",
+                    "rua-lsp: indexed {} source(s) under {}",
+                    files.len(),
                     root.display()
                 );
             }
         }
-        self.host.apply_change(change);
+        self.rebuild_project_dependency_roots();
+        self.set_project_changes(&mut change);
+        self.apply_analysis_change(change);
     }
-}
-
-fn scan_workspace_files(
-    root: &Path,
-    cb: &mut dyn FnMut(&Path, &str),
-) {
-    if let Ok(canonical) = std::fs::canonicalize(root) {
-        if canonical.is_dir() {
-            scan_workspace_dir(&canonical, cb);
-        } else if canonical.is_file()
-            && let Ok(text) = std::fs::read_to_string(&canonical) {
-                cb(&canonical, &text);
-            }
-    }
-}
-
-fn scan_workspace_dir(dir: &Path, cb: &mut dyn FnMut(&Path, &str)) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        paths.sort();
-        for path in paths {
-            if path.is_dir() {
-                if !is_hidden(&path) {
-                    scan_workspace_dir(&path, cb);
-                }
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rua")
-                && let Ok(text) = std::fs::read_to_string(&path) {
-                    cb(&path, &text);
-                }
-        }
-    }
-}
-
-fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with('.'))
 }
 
 // ---------------------------------------------------------------------------
@@ -3499,33 +3002,49 @@ fn to_lsp_hover(hover: &HoverResult) -> Hover {
     }
 }
 
-/// Minimal resolve token: (file_id, name) so the resolve handler can
-/// look up doc comments lazily.
-fn make_resolve_data(file_id: FileId, name: &str) -> Option<serde_json::Value> {
-    serde_json::json!({
-        "file_id": file_id.index(),
-        "name": name,
-    })
-    .into()
+/// Exact semantic declaration target used by completion resolve.
+fn make_resolve_data(target: Option<rua_analysis::FileRange>) -> Option<serde_json::Value> {
+    let target = target?;
+    Some(serde_json::json!({
+        "file_id": target.file_id.index(),
+        "start": target.range.start(),
+        "end": target.range.end(),
+    }))
 }
 
-fn parse_resolve_data(value: &serde_json::Value) -> Option<(u32, String)> {
-    let file_id = value.get("file_id")?.as_u64()? as u32;
-    let name = value.get("name")?.as_str()?.to_string();
-    Some((file_id, name))
+fn parse_resolve_data(value: &serde_json::Value) -> Option<rua_analysis::FileRange> {
+    let file_id = FileId::new(value.get("file_id")?.as_u64()? as u32);
+    let start = value.get("start")?.as_u64()? as u32;
+    let end = value.get("end")?.as_u64()? as u32;
+    Some(rua_analysis::FileRange::new(
+        file_id,
+        TextRange::new(start, end),
+    ))
+}
+
+fn hierarchy_data(project_id: ProjectId, target: DefId) -> serde_json::Value {
+    serde_json::json!({
+        "project": project_id.index(),
+        "target": target.index(),
+    })
+}
+
+fn hierarchy_identity(data: Option<&serde_json::Value>) -> Option<(ProjectId, DefId)> {
+    let data = data?;
+    let project = u32::try_from(data.get("project")?.as_u64()?).ok()?;
+    let target = u32::try_from(data.get("target")?.as_u64()?).ok()?;
+    Some((ProjectId::new(project), DefId::from_index(target)))
 }
 
 fn completion_to_lsp(
     item: &rua_analysis::CompletionItem,
     line_index: &LineIndex,
     source: &str,
-    file_id: rua_analysis::FileId,
+    _file_id: rua_analysis::FileId,
 ) -> CompletionItem {
     let kind = match item.kind() {
         CompletionKind::Keyword => Some(CompletionItemKind::KEYWORD),
-        CompletionKind::Variable | CompletionKind::Parameter => {
-            Some(CompletionItemKind::VARIABLE)
-        }
+        CompletionKind::Variable | CompletionKind::Parameter => Some(CompletionItemKind::VARIABLE),
         CompletionKind::Function => Some(CompletionItemKind::FUNCTION),
         CompletionKind::Method => Some(CompletionItemKind::METHOD),
         CompletionKind::Field => Some(CompletionItemKind::FIELD),
@@ -3554,10 +3073,7 @@ fn completion_to_lsp(
             };
             (Some(snippet), Some(InsertTextFormat::SNIPPET))
         }
-        Some(CompletionInsert::MacroCall {
-            name,
-            delimiter,
-        }) => {
+        Some(CompletionInsert::MacroCall { name, delimiter }) => {
             let snippet = match delimiter {
                 MacroDelimiter::Parentheses => format!("{name}!($0)"),
                 MacroDelimiter::Brackets => format!("{name}![$0]"),
@@ -3565,8 +3081,12 @@ fn completion_to_lsp(
             };
             (Some(snippet), Some(InsertTextFormat::SNIPPET))
         }
-        Some(CompletionInsert::Plain(text)) => (Some(text.clone()), Some(InsertTextFormat::PLAIN_TEXT)),
-        Some(CompletionInsert::Snippet(text)) => (Some(text.clone()), Some(InsertTextFormat::SNIPPET)),
+        Some(CompletionInsert::Plain(text)) => {
+            (Some(text.clone()), Some(InsertTextFormat::PLAIN_TEXT))
+        }
+        Some(CompletionInsert::Snippet(text)) => {
+            (Some(text.clone()), Some(InsertTextFormat::SNIPPET))
+        }
         None => (None, None),
     };
 
@@ -3656,9 +3176,8 @@ fn completion_to_lsp(
         None
     };
 
-    // data for resolve provider — stored as a JSON token so the resolve
-    // handler can lazily look up documentation.
-    let data = make_resolve_data(file_id, item.label());
+    // Exact declaration target for semantic completion resolve.
+    let data = make_resolve_data(item.target());
 
     CompletionItem {
         label: item.label().to_string(),
@@ -3702,10 +3221,8 @@ fn core_diag_to_lsp(
     source: &str,
 ) -> Diagnostic {
     let range = diagnostic.range();
-    let (start_line, start_column) =
-        line_index.line_col(range.start() as usize, source);
-    let (end_line, end_column) =
-        line_index.line_col(range.end() as usize, source);
+    let (start_line, start_column) = line_index.line_col(range.start() as usize, source);
+    let (end_line, end_column) = line_index.line_col(range.end() as usize, source);
     let code_str = diagnostic.code().map(|c| c.error_code().to_string());
     let severity = match diagnostic.code() {
         Some(c) => match c.severity() {
@@ -3729,24 +3246,21 @@ fn core_diag_to_lsp(
 
 #[allow(clippy::mutable_key_type)]
 fn source_change_to_workspace_edit(
-    analysis: &rua_analysis::Analysis,
     change: &SourceChange,
-    uri_for: impl Fn(rua_analysis::FileId) -> Option<Uri>,
+    source_for: impl Fn(FileId) -> Option<(Arc<str>, Arc<LineIndex>)>,
+    uri_for: impl Fn(FileId) -> Option<Uri>,
 ) -> Option<WorkspaceEdit> {
     let mut edits = HashMap::new();
     for file_edit in change.file_edits() {
-        let source = analysis
-            .parse(file_edit.file_id())
-            .syntax_node()
-            .text()
-            .to_string();
-        let li = LineIndex::new(&source);
+        let Some((source, line_index)) = source_for(file_edit.file_id()) else {
+            continue;
+        };
         let text_edits: Vec<TextEdit> = file_edit
             .edits()
             .iter()
             .map(|edit| {
-                let (sl, sc) = li.line_col(edit.range().start() as usize, &source);
-                let (el, ec) = li.line_col(edit.range().end() as usize, &source);
+                let (sl, sc) = line_index.line_col(edit.range().start() as usize, &source);
+                let (el, ec) = line_index.line_col(edit.range().end() as usize, &source);
                 TextEdit {
                     range: Range {
                         start: Position::new(sl as u32, sc as u32),
@@ -3899,6 +3413,7 @@ fn build_document_symbol_tree(
 
 fn to_lsp_symbol_kind(kind: DefKind) -> LspSymbolKind {
     match kind {
+        DefKind::Chunk => LspSymbolKind::MODULE,
         DefKind::Function | DefKind::ExternFunction => LspSymbolKind::FUNCTION,
         DefKind::Struct => LspSymbolKind::STRUCT,
         DefKind::Enum => LspSymbolKind::ENUM,
@@ -3941,112 +3456,6 @@ fn ranges_overlap_lsp(a: &Range, b: &Range) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// URI / Path conversion
-// ---------------------------------------------------------------------------
-
-fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    let s = uri.as_str();
-    let path_str = s.strip_prefix("file://")?;
-    let path_str = if let Some(rest) = path_str.strip_prefix("//") {
-        rest
-    } else {
-        path_str
-    };
-    let decoded = percent_decode(path_str);
-    Some(PathBuf::from(decoded))
-}
-
-/// Safe fallback URI when a real file path isn't available.
-/// Uses a synthetic `file:///unknown/N` URI that won't crash.
-fn fallback_uri(file_id: rua_analysis::FileId) -> Uri {
-    format!("file:///unknown/{}", file_id.index())
-        .parse()
-        .unwrap_or_else(|_| "file:///unknown.rua".parse().unwrap())
-}
-
-/// Find the byte offset at which a new `use` import statement should be
-/// inserted. Looks for the last existing import/module declaration; falls
-/// back to after any initial comments, or position 0.
-fn find_import_insertion_point(source: &str) -> usize {
-    let mut last_import_end = 0usize;
-    let mut pos = 0usize;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("use ") || trimmed.starts_with("mod ") {
-            last_import_end = pos + line.len() + 1; // +1 for \n
-        }
-        pos += line.len() + 1;
-    }
-    if last_import_end > 0 {
-        return last_import_end.min(source.len());
-    }
-    // No imports found — insert after any initial comment block.
-    pos = 0;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            last_import_end = pos + line.len() + 1;
-            pos += line.len() + 1;
-        } else {
-            break;
-        }
-    }
-    last_import_end.min(source.len())
-}
-
-fn path_to_uri(path: &Path) -> Option<Uri> {
-    let s = path.to_string_lossy();
-    let encoded = percent_encode(&s);
-    let uri_str = format!("file://{}", encoded);
-    uri_str.parse().ok()
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = &s[i + 1..i + 3];
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            ' ' => result.push_str("%20"),
-            _ => result.push(c),
-        }
-    }
-    result
-}
-
-fn range_from_bytes(
-    range: rua_analysis::TextRange,
-    li: &LineIndex,
-    src: &str,
-) -> Range {
-    let start = (range.start() as usize).min(src.len());
-    let end = (range.end() as usize).min(src.len());
-    let (sl, sc) = li.line_col(start, src);
-    let (el, ec) = li.line_col(end, src);
-    Range {
-        start: Position::new(sl as u32, sc as u32),
-        end: Position::new(el as u32, ec as u32),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4054,14 +3463,104 @@ fn range_from_bytes(
 mod tests {
     use super::*;
 
-    #[test]
-    fn percent_decode_ascii_space() {
-        assert_eq!(percent_decode("a%20b"), "a b");
+    fn temp_test_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("rua-lsp-{label}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn finish_background_scans(server: &mut Server) {
+        while server.workspace_scan.is_some() || server.library_scan.is_some() {
+            let result = server
+                .background_receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("background scan must finish");
+            server.handle_background_result(result);
+        }
     }
 
     #[test]
-    fn percent_decode_multibyte_utf8() {
-        assert_eq!(percent_decode("%E4%B8%AD"), "中");
+    fn file_uri_round_trips_reserved_and_unicode_path_bytes() {
+        let temp = temp_test_dir("uri");
+        let path = temp.join("100% #? 中.rua");
+        std::fs::write(&path, "").unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        assert!(uri.as_str().contains("%25"));
+        assert!(uri.as_str().contains("%23"));
+        assert!(uri.as_str().contains("%3F"));
+        assert_eq!(
+            normalize_physical_path(&uri_to_path(&uri).unwrap()),
+            normalize_physical_path(&path)
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn uri_to_path_rejects_non_file_and_ambiguous_suffixes() {
+        let https: Uri = "https://example.com/main.rua".parse().unwrap();
+        let query: Uri = "file:///workspace/main.rua?generated=true".parse().unwrap();
+        let fragment: Uri = "file:///workspace/main.rua#selection".parse().unwrap();
+        assert_eq!(uri_to_path(&https), None);
+        assert_eq!(uri_to_path(&query), None);
+        assert_eq!(uri_to_path(&fragment), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_round_trips_windows_drive_and_unc_paths() {
+        for path in [
+            PathBuf::from(r"C:\Rua Project\main.rua"),
+            PathBuf::from(r"\\server\share\main.rua"),
+        ] {
+            let uri = path_to_uri(&path).unwrap();
+            assert_eq!(uri_to_path(&uri).unwrap(), normalize_physical_path(&path));
+        }
+    }
+
+    #[test]
+    fn recursive_scans_skip_build_dirs_and_symlink_cycles() {
+        let temp = temp_test_dir("scan");
+        std::fs::write(temp.join("main.rua"), "").unwrap();
+        for directory in ["target", "node_modules", ".git"] {
+            let path = temp.join(directory);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("ignored.rua"), "").unwrap();
+            std::fs::write(path.join("ignored.ruai"), "").unwrap();
+        }
+        std::fs::write(
+            temp.join(".ruaignore"),
+            "generated/\nignored-*.rua\nignored-*.ruai\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.join("generated")).unwrap();
+        std::fs::write(temp.join("generated/generated.rua"), "").unwrap();
+        std::fs::write(temp.join("generated/generated.ruai"), "").unwrap();
+        std::fs::write(temp.join("ignored-local.rua"), "").unwrap();
+        std::fs::write(temp.join("ignored-library.ruai"), "").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&temp, temp.join("cycle")).unwrap();
+
+        let mut workspace = Vec::new();
+        scan_workspace_files(&temp, &mut |path, _| workspace.push(path.to_path_buf()));
+        assert_eq!(
+            workspace,
+            vec![normalize_physical_path(&temp.join("main.rua"))]
+        );
+
+        let mut library = Vec::new();
+        std::fs::write(temp.join("api.ruai"), "").unwrap();
+        scan_library_root(&temp, &mut library);
+        assert_eq!(library.len(), 1);
+        assert_eq!(
+            library[0].0,
+            normalize_physical_path(&temp.join("api.ruai"))
+        );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -4109,7 +3608,10 @@ mod tests {
             (SemanticTokenKind::Function, SemanticTokenType::FUNCTION),
             (SemanticTokenKind::Method, SemanticTokenType::METHOD),
             (SemanticTokenKind::Property, SemanticTokenType::PROPERTY),
-            (SemanticTokenKind::EnumMember, SemanticTokenType::ENUM_MEMBER),
+            (
+                SemanticTokenKind::EnumMember,
+                SemanticTokenType::ENUM_MEMBER,
+            ),
             (SemanticTokenKind::Variable, SemanticTokenType::VARIABLE),
             (SemanticTokenKind::Parameter, SemanticTokenType::PARAMETER),
             (SemanticTokenKind::Macro, SemanticTokenType::MACRO),
@@ -4132,9 +3634,493 @@ mod tests {
         let uri: Uri = "file:///test.rua".parse().unwrap();
         let (server_connection, _client_connection) = lsp_server::Connection::memory();
         let mut server = Server::new(server_connection);
-        server.open_document(uri.clone(), "fn main() {}".to_string());
+        server.open_document(uri.clone(), 1, "fn main() {}".to_string());
         // Should not panic
         server.publish_diagnostics(&uri);
+    }
+
+    #[test]
+    fn overlay_versions_are_monotonic_and_close_restores_disk_text() {
+        let uri: Uri = "file:///workspace/main.rua".parse().unwrap();
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        let file_id = server.ensure_file_id(&uri);
+        let path = Server::doc_key(&uri);
+        let root = SourceRootId::new(0);
+        server.projects.insert(
+            ProjectId::new(0),
+            WorkspaceProject {
+                root_file: file_id,
+                workspace_roots: vec![ProjectRoot::new(root, "/workspace")],
+            },
+        );
+        server.file_projects.insert(file_id, ProjectId::new(0));
+        server.disk_files.insert(
+            file_id,
+            DiskFile {
+                path: path.clone(),
+                analysis_path: path.clone(),
+                text: "let value = 1;".to_string(),
+                source_root: root,
+                kind: FileKind::Source,
+            },
+        );
+        let mut disk = Change::new();
+        disk.set_source_root(root, SourceRootKind::Workspace);
+        disk.set_file_with_path(file_id, root, FileKind::Source, path, "let value = 1;");
+        server.set_project_changes(&mut disk);
+        server.host.apply_change(disk);
+
+        server.open_document(uri.clone(), 3, "let value = 2;".to_string());
+        server.change_document(uri.clone(), 4, "let value = 3;".to_string());
+        server.change_document(uri.clone(), 3, "let value = 99;".to_string());
+        assert_eq!(
+            server
+                .host
+                .analysis()
+                .parse(file_id)
+                .syntax_node()
+                .text()
+                .to_string(),
+            "let value = 3;"
+        );
+
+        server.close_document(uri.clone());
+        assert_eq!(server.file_id_for_uri(&uri), Some(file_id));
+        assert_eq!(
+            server
+                .host
+                .analysis()
+                .parse(file_id)
+                .syntax_node()
+                .text()
+                .to_string(),
+            "let value = 1;"
+        );
+    }
+
+    #[test]
+    fn changes_for_unknown_or_closed_documents_do_not_create_inputs() {
+        let uri: Uri = "file:///workspace/scratch.rua".parse().unwrap();
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+
+        server.change_document(uri.clone(), 1, "let ignored = true;".to_string());
+        assert!(server.file_id_for_uri(&uri).is_none());
+
+        server.open_document(uri.clone(), 1, "let temporary = true;".to_string());
+        let file_id = server.file_id_for_uri(&uri).unwrap();
+        server.close_document(uri.clone());
+        server.change_document(uri.clone(), 2, "let ignored = false;".to_string());
+        assert_eq!(server.file_id_for_uri(&uri), Some(file_id));
+        assert!(server.host.analysis().file_kind(file_id).is_none());
+    }
+
+    #[test]
+    fn library_reload_replaces_roots_and_clears_removed_definitions() {
+        let temp = temp_test_dir("library-reload");
+        let first = temp.join("first");
+        let second = temp.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("api.ruai"), "pub fn old_api();").unwrap();
+        std::fs::write(second.join("api.ruai"), "pub fn new_api();").unwrap();
+
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        let main: Uri = "file:///workspace/main.rua".parse().unwrap();
+        server.open_document(main, 1, "mod api;".to_string());
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [first.to_string_lossy()] }
+        }));
+        finish_background_scans(&mut server);
+        let old_root = server.library_source_root.unwrap();
+        let old_file = *server.library_file_ids.iter().next().unwrap();
+        assert!(
+            server
+                .host
+                .analysis()
+                .def_map_for_project(ProjectId::new(0))
+                .unwrap()
+                .definitions()
+                .any(|definition| definition.name() == "old_api")
+        );
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [second.to_string_lossy()] }
+        }));
+        finish_background_scans(&mut server);
+        let analysis = server.host.analysis();
+        let definitions = analysis.def_map_for_project(ProjectId::new(0)).unwrap();
+        assert!(
+            !definitions
+                .definitions()
+                .any(|definition| definition.name() == "old_api")
+        );
+        assert!(
+            definitions
+                .definitions()
+                .any(|definition| definition.name() == "new_api")
+        );
+        assert_eq!(analysis.source_root_kind(old_file), None);
+        assert_ne!(server.library_source_root, Some(old_root));
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [] }
+        }));
+        finish_background_scans(&mut server);
+        assert!(server.project_dependency_roots.is_empty());
+        assert!(server.library_file_ids.is_empty());
+        assert!(
+            !server
+                .host
+                .analysis()
+                .def_map_for_project(ProjectId::new(0))
+                .unwrap()
+                .definitions()
+                .any(|definition| definition.name() == "new_api")
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn newer_library_scan_cancels_and_supersedes_older_generation() {
+        let temp = temp_test_dir("library-scan-generation");
+        let first = temp.join("first");
+        let second = temp.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("api.ruai"), "pub fn stale_api();").unwrap();
+        std::fs::write(second.join("api.ruai"), "pub fn current_api();").unwrap();
+
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        server.open_document(
+            "file:///workspace/main.rua".parse().unwrap(),
+            1,
+            "mod api;".to_string(),
+        );
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [first] }
+        }));
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [second] }
+        }));
+        finish_background_scans(&mut server);
+
+        let definitions = server
+            .host
+            .analysis()
+            .def_map_for_project(ProjectId::new(0))
+            .unwrap();
+        assert!(
+            definitions
+                .definitions()
+                .any(|definition| definition.name() == "current_api")
+        );
+        assert!(
+            !definitions
+                .definitions()
+                .any(|definition| definition.name() == "stale_api")
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn library_mount_name_is_the_logical_module_name() {
+        let temp = temp_test_dir("library-mount");
+        let declaration = temp.join("actual-name.ruai");
+        std::fs::write(&declaration, "pub fn mounted_api();").unwrap();
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        let main: Uri = "file:///workspace/main.rua".parse().unwrap();
+        server.open_document(main, 1, "mod host;".to_string());
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "libraryMounts": { "host": declaration.to_string_lossy() } }
+        }));
+        finish_background_scans(&mut server);
+
+        assert!(
+            server
+                .host
+                .analysis()
+                .def_map_for_project(ProjectId::new(0))
+                .unwrap()
+                .definitions()
+                .any(|definition| definition.name() == "mounted_api")
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn consecutive_watcher_batches_are_all_applied_to_the_current_root() {
+        let temp = temp_test_dir("watcher-batches");
+        let library = temp.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        let main: Uri = "file:///workspace/main.rua".parse().unwrap();
+        server.open_document(main, 1, "mod one; mod two;".to_string());
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [library.to_string_lossy()] }
+        }));
+        finish_background_scans(&mut server);
+        let root = server.library_source_root;
+
+        for (name, declaration) in [
+            ("one", "pub fn first_api();"),
+            ("two", "pub fn second_api();"),
+        ] {
+            let path = library.join(format!("{name}.ruai"));
+            std::fs::write(&path, declaration).unwrap();
+            server.handle_watched_file_change(&DidChangeWatchedFilesParams {
+                changes: vec![lsp_types::FileEvent {
+                    uri: path_to_uri(&path).unwrap(),
+                    typ: lsp_types::FileChangeType::CREATED,
+                }],
+            });
+        }
+
+        assert_eq!(server.library_source_root, root);
+        let analysis = server.host.analysis();
+        let main_id = server
+            .file_id_for_uri(&"file:///workspace/main.rua".parse().unwrap())
+            .unwrap();
+        let one_id = server.ensure_file_id_for_path(&library.join("one.ruai"));
+        let resolution = analysis.resolve_module_in_project(ProjectId::new(0), main_id, "one");
+        let one_path = analysis.file_path(one_id).cloned();
+        let definitions = analysis.def_map_for_project(ProjectId::new(0)).unwrap();
+        let names: Vec<_> = definitions
+            .definitions()
+            .map(|definition| definition.name().to_string())
+            .collect();
+        assert!(
+            definitions
+                .definitions()
+                .any(|definition| definition.name() == "first_api"),
+            "{names:?}; resolution={resolution:?}; one={one_id:?} path={one_path:?}; roots={:?}",
+            server.project_dependency_roots
+        );
+        assert!(
+            definitions
+                .definitions()
+                .any(|definition| definition.name() == "second_api"),
+            "{names:?}"
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn watcher_registration_responses_update_active_and_failure_state() {
+        let temp = temp_test_dir("watcher-response-state");
+        let library = temp.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let (server_connection, client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [library.to_string_lossy()] }
+        }));
+        finish_background_scans(&mut server);
+        let Message::Request(register) = client_connection.receiver.recv().unwrap() else {
+            panic!("expected register request");
+        };
+        assert_eq!(register.method, "client/registerCapability");
+        let registration_id = server.watch_registration_id.clone().unwrap();
+        assert!(!server.watch_registrations[&registration_id].is_active());
+
+        server.handle_response(Response::new_ok(register.id, ()));
+        assert!(server.watch_registrations[&registration_id].is_active());
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [] }
+        }));
+        finish_background_scans(&mut server);
+        let Message::Request(unregister) = client_connection.receiver.recv().unwrap() else {
+            panic!("expected unregister request");
+        };
+        assert_eq!(unregister.method, "client/unregisterCapability");
+        server.handle_response(Response::new_err(
+            unregister.id,
+            lsp_server::ErrorCode::InternalError as i32,
+            "client refused unregistration".to_string(),
+        ));
+
+        assert!(server.watch_registrations[&registration_id].is_active());
+        assert_eq!(
+            server.last_watch_failure,
+            Some(WatchRegistrationFailure {
+                operation: WatchOperation::Unregister,
+                registration_id,
+                code: lsp_server::ErrorCode::InternalError as i32,
+                message: "client refused unregistration".to_string(),
+            })
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn watcher_registration_handles_unregister_response_before_register_response() {
+        let temp = temp_test_dir("watcher-response-order");
+        let library = temp.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let (server_connection, client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [library.to_string_lossy()] }
+        }));
+        finish_background_scans(&mut server);
+        let Message::Request(register) = client_connection.receiver.recv().unwrap() else {
+            panic!("expected register request");
+        };
+        let registration_id = server.watch_registration_id.clone().unwrap();
+
+        server.reload_configuration(&serde_json::json!({
+            "rua": { "library": [] }
+        }));
+        finish_background_scans(&mut server);
+        let Message::Request(unregister) = client_connection.receiver.recv().unwrap() else {
+            panic!("expected unregister request");
+        };
+        server.handle_response(Response::new_ok(unregister.id, ()));
+        assert!(server.watch_registrations.contains_key(&registration_id));
+
+        server.handle_response(Response::new_ok(register.id, ()));
+        assert!(!server.watch_registrations.contains_key(&registration_id));
+        assert!(server.pending_watch_requests.is_empty());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workspace_folders_build_separate_projects_and_definition_identities() {
+        let temp = temp_test_dir("multi-root");
+        let first = temp.join("first");
+        let second = temp.join("second");
+        for (folder, marker) in [(&first, "first_only"), (&second, "second_only")] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("main.rua"), "mod shared; shared::same();").unwrap();
+            std::fs::write(
+                folder.join("shared.rua"),
+                format!("pub fn same() {{}} pub fn {marker}() {{}}"),
+            )
+            .unwrap();
+        }
+
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        server.index_workspace_folders(&[
+            path_to_uri(&first).unwrap(),
+            path_to_uri(&second).unwrap(),
+        ]);
+        finish_background_scans(&mut server);
+        assert_eq!(server.projects.len(), 2);
+
+        let analysis = server.host.analysis();
+        let first_map = analysis.def_map_for_project(ProjectId::new(0)).unwrap();
+        let second_map = analysis.def_map_for_project(ProjectId::new(1)).unwrap();
+        assert!(
+            first_map
+                .definitions()
+                .any(|definition| definition.name() == "first_only")
+        );
+        assert!(
+            !first_map
+                .definitions()
+                .any(|definition| definition.name() == "second_only")
+        );
+        assert!(
+            second_map
+                .definitions()
+                .any(|definition| definition.name() == "second_only")
+        );
+        let first_same = first_map
+            .definitions()
+            .find(|definition| definition.name() == "same")
+            .unwrap()
+            .id();
+        let second_same = second_map
+            .definitions()
+            .find(|definition| definition.name() == "same")
+            .unwrap()
+            .id();
+        assert_ne!(first_same, second_same);
+
+        let first_main = server
+            .file_id_for_uri(&path_to_uri(&first.join("main.rua")).unwrap())
+            .unwrap();
+        let second_main = server
+            .file_id_for_uri(&path_to_uri(&second.join("main.rua")).unwrap())
+            .unwrap();
+        assert_eq!(
+            server.project_id_for_file(first_main),
+            Some(ProjectId::new(0))
+        );
+        assert_eq!(
+            server.project_id_for_file(second_main),
+            Some(ProjectId::new(1))
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workspace_settings_keep_library_roots_project_scoped() {
+        let temp = temp_test_dir("multi-root-libraries");
+        let first = temp.join("first");
+        let second = temp.join("second");
+        let first_library = first.join("types");
+        let second_library = second.join("types");
+        for (workspace, library, api) in [
+            (&first, &first_library, "pub fn first_api();"),
+            (&second, &second_library, "pub fn second_api();"),
+        ] {
+            std::fs::create_dir_all(library).unwrap();
+            std::fs::write(workspace.join("main.rua"), "mod api;").unwrap();
+            std::fs::write(library.join("api.ruai"), api).unwrap();
+        }
+
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        server.index_workspace_folders(&[
+            path_to_uri(&first).unwrap(),
+            path_to_uri(&second).unwrap(),
+        ]);
+        finish_background_scans(&mut server);
+        server.reload_configuration(&serde_json::json!({
+            "rua": {
+                "workspaceSettings": [
+                    { "projectIndex": 0, "library": [first_library] },
+                    { "projectIndex": 1, "library": [second_library] }
+                ]
+            }
+        }));
+        finish_background_scans(&mut server);
+
+        let analysis = server.host.analysis();
+        let first_map = analysis.def_map_for_project(ProjectId::new(0)).unwrap();
+        let second_map = analysis.def_map_for_project(ProjectId::new(1)).unwrap();
+        assert!(
+            first_map
+                .definitions()
+                .any(|definition| definition.name() == "first_api")
+        );
+        assert!(
+            !first_map
+                .definitions()
+                .any(|definition| definition.name() == "second_api")
+        );
+        assert!(
+            second_map
+                .definitions()
+                .any(|definition| definition.name() == "second_api")
+        );
+        assert!(
+            !second_map
+                .definitions()
+                .any(|definition| definition.name() == "first_api")
+        );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -4143,6 +4129,89 @@ mod tests {
         let server = Server::new(connection);
         assert!(server.file_ids.is_empty());
         assert!(server.open_buffers.is_empty());
+        assert!(server.open_versions.is_empty());
+        assert!(server.disk_files.is_empty());
+    }
+
+    #[test]
+    fn cancelled_background_query_returns_request_cancelled() {
+        let (connection, client) = lsp_server::Connection::memory();
+        let mut server = Server::new(connection);
+        let request_id = RequestId::from(7);
+        let cancellation = CancellationToken::new();
+        server.pending_queries.insert(
+            1,
+            PendingQuery {
+                request_id: request_id.clone(),
+                input_generation: 0,
+                cancellation,
+            },
+        );
+
+        server.cancel_request(request_id.clone());
+        server.handle_background_result(BackgroundResult::References {
+            task_id: 1,
+            result: Some(Vec::new()),
+        });
+
+        let Message::Response(response) = client.receiver.recv().unwrap() else {
+            panic!("expected cancellation response");
+        };
+        assert_eq!(response.id, request_id);
+        assert_eq!(
+            response.error.unwrap().code,
+            lsp_server::ErrorCode::RequestCanceled as i32
+        );
+    }
+
+    #[test]
+    fn changed_input_rejects_stale_background_result() {
+        let (connection, client) = lsp_server::Connection::memory();
+        let mut server = Server::new(connection);
+        let request_id = RequestId::from(8);
+        server.pending_queries.insert(
+            2,
+            PendingQuery {
+                request_id: request_id.clone(),
+                input_generation: 0,
+                cancellation: CancellationToken::new(),
+            },
+        );
+        server.input_generation = 1;
+
+        server.handle_background_result(BackgroundResult::References {
+            task_id: 2,
+            result: Some(Vec::new()),
+        });
+
+        let Message::Response(response) = client.receiver.recv().unwrap() else {
+            panic!("expected stale response rejection");
+        };
+        assert_eq!(response.id, request_id);
+        assert_eq!(
+            response.error.unwrap().code,
+            lsp_server::ErrorCode::ContentModified as i32
+        );
+    }
+
+    #[test]
+    fn line_index_cache_reuses_revision_and_rebuilds_after_change() {
+        let (connection, _client) = lsp_server::Connection::memory();
+        let mut server = Server::new(connection);
+        let uri: Uri = "file:///workspace/main.rua".parse().unwrap();
+        server.open_document(uri.clone(), 1, "fn before() {}\n".into());
+        let file_id = server.file_id_for_uri(&uri).unwrap();
+
+        let (first_source, first_index) = server.source_line_index(file_id).unwrap();
+        let (same_source, same_index) = server.source_line_index(file_id).unwrap();
+        assert!(Arc::ptr_eq(&first_source, &same_source));
+        assert!(Arc::ptr_eq(&first_index, &same_index));
+
+        server.change_document(uri, 2, "fn after() {}\n".into());
+        let (changed_source, changed_index) = server.source_line_index(file_id).unwrap();
+        assert_eq!(&*changed_source, "fn after() {}\n");
+        assert!(!Arc::ptr_eq(&first_source, &changed_source));
+        assert!(!Arc::ptr_eq(&first_index, &changed_index));
     }
 
     // -- completion_to_lsp unit tests ---------------------------------------
@@ -4154,12 +4223,14 @@ mod tests {
     #[test]
     fn sort_text_higher_relevance_sorts_first() {
         // Locals (relevance 95) should sort before keywords (relevance 50).
-        let local = rua_analysis::CompletionItem::new("my_var", rua_analysis::CompletionKind::Variable)
-            .with_detail("my_var: i64")
-            .with_relevance(rua_analysis::CompletionRelevance::local(0));
-        let keyword = rua_analysis::CompletionItem::new("fn", rua_analysis::CompletionKind::Keyword)
-            .with_detail("keyword fn")
-            .with_relevance(rua_analysis::CompletionRelevance::keyword());
+        let local =
+            rua_analysis::CompletionItem::new("my_var", rua_analysis::CompletionKind::Variable)
+                .with_detail("my_var: i64")
+                .with_relevance(rua_analysis::CompletionRelevance::local(0));
+        let keyword =
+            rua_analysis::CompletionItem::new("fn", rua_analysis::CompletionKind::Keyword)
+                .with_detail("keyword fn")
+                .with_relevance(rua_analysis::CompletionRelevance::keyword());
 
         let li = empty_line_index();
         let lsp_local = completion_to_lsp(&local, &li, "", FileId::new(0));
@@ -4203,7 +4274,10 @@ mod tests {
         let li = empty_line_index();
         let lsp = completion_to_lsp(&m, &li, "", FileId::new(0));
         assert_eq!(lsp.insert_text.as_deref(), Some("println!($0)"));
-        assert_eq!(lsp.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+        assert_eq!(
+            lsp.insert_text_format,
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        );
     }
 
     #[test]
@@ -4217,16 +4291,20 @@ mod tests {
         let li = empty_line_index();
         let lsp = completion_to_lsp(&f, &li, "", FileId::new(0));
         assert_eq!(lsp.insert_text.as_deref(), Some("greet($0)"));
-        assert_eq!(lsp.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+        assert_eq!(
+            lsp.insert_text_format,
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        );
     }
 
     #[test]
     fn function_completion_with_params_has_placeholder_snippets() {
-        let f = rua_analysis::CompletionItem::new("translate", rua_analysis::CompletionKind::Method)
-            .with_insert(rua_analysis::CompletionInsert::Call {
-                callee: "translate".to_string(),
-                params: vec!["dx: i64".to_string(), "dy: i64".to_string()],
-            });
+        let f =
+            rua_analysis::CompletionItem::new("translate", rua_analysis::CompletionKind::Method)
+                .with_insert(rua_analysis::CompletionInsert::Call {
+                    callee: "translate".to_string(),
+                    params: vec!["dx: i64".to_string(), "dy: i64".to_string()],
+                });
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&f, &li, "", FileId::new(0));
@@ -4234,7 +4312,10 @@ mod tests {
             lsp.insert_text.as_deref(),
             Some("translate(${1:dx: i64}, ${2:dy: i64})$0")
         );
-        assert_eq!(lsp.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+        assert_eq!(
+            lsp.insert_text_format,
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        );
     }
 
     #[test]
@@ -4255,30 +4336,39 @@ mod tests {
 
     #[test]
     fn text_edit_converts_replacement_range() {
-        let item = rua_analysis::CompletionItem::new("my_var", rua_analysis::CompletionKind::Variable)
-            .with_replacement_range(rua_analysis::TextRange::new(5, 7));
+        let item =
+            rua_analysis::CompletionItem::new("my_var", rua_analysis::CompletionKind::Variable)
+                .with_replacement_range(rua_analysis::TextRange::new(5, 7));
 
         let source = "abc def ghi";
         // replacement range 5..7 = "de"
         let li = LineIndex::new(source);
         let lsp = completion_to_lsp(&item, &li, source, FileId::new(0));
-        assert!(lsp.text_edit.is_some(), "text_edit should be set when replacement_range is set");
+        assert!(
+            lsp.text_edit.is_some(),
+            "text_edit should be set when replacement_range is set"
+        );
     }
 
     #[test]
     fn deprecated_item_has_deprecated_tag() {
-        let item = rua_analysis::CompletionItem::new("old_fn", rua_analysis::CompletionKind::Function)
-            .deprecated(true);
+        let item =
+            rua_analysis::CompletionItem::new("old_fn", rua_analysis::CompletionKind::Function)
+                .deprecated(true);
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
         assert_eq!(lsp.deprecated, Some(true));
-        assert!(lsp.tags.is_some_and(|t| t.contains(&lsp_types::CompletionItemTag::DEPRECATED)));
+        assert!(
+            lsp.tags
+                .is_some_and(|t| t.contains(&lsp_types::CompletionItemTag::DEPRECATED))
+        );
     }
 
     #[test]
     fn normal_item_has_no_deprecated_tag() {
-        let item = rua_analysis::CompletionItem::new("new_fn", rua_analysis::CompletionKind::Function);
+        let item =
+            rua_analysis::CompletionItem::new("new_fn", rua_analysis::CompletionKind::Function);
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
@@ -4295,8 +4385,7 @@ mod tests {
             rua_analysis::CompletionKind::Parameter,
             rua_analysis::CompletionKind::Variant,
         ] {
-            let item =
-                rua_analysis::CompletionItem::new("x", kind).with_detail("i64");
+            let item = rua_analysis::CompletionItem::new("x", kind).with_detail("i64");
             let li = empty_line_index();
             let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
             let ld = lsp

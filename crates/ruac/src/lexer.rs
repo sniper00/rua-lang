@@ -4,7 +4,7 @@
 //! `bump()` advances, `peek_next()` looks one further. The parser drives this.
 
 use crate::token::{RuaTokenKind, SourceRange, TokenData};
-use crate::tokenize::RuaTokenize;
+use crate::tokenize::{RuaTokenize, StrictTokenStream, TokenizeError};
 
 pub struct RuaLexer<'a> {
     text: &'a str,
@@ -15,8 +15,13 @@ pub struct RuaLexer<'a> {
 }
 
 impl<'a> RuaLexer<'a> {
-    pub fn new(text: &'a str) -> Result<RuaLexer<'a>, String> {
-        let mut tokenizer = RuaTokenize::new(text);
+    pub fn new(text: &'a str) -> Result<RuaLexer<'a>, TokenizeError> {
+        Self::from_stream(StrictTokenStream::unlimited(text))
+    }
+
+    pub fn from_stream(stream: StrictTokenStream<'a>) -> Result<RuaLexer<'a>, TokenizeError> {
+        let text = stream.text;
+        let mut tokenizer = RuaTokenize::from_stream(stream);
         let current = tokenizer.next_token()?;
         let next = tokenizer.next_token()?;
         Ok(RuaLexer {
@@ -58,7 +63,12 @@ impl<'a> RuaLexer<'a> {
         &self.text[r.start..r.end()]
     }
 
-    pub fn bump(&mut self) -> Result<(), String> {
+    pub fn current_leading_trivia(&self) -> &'a str {
+        let range = self.current.leading_trivia;
+        &self.text[range.start..range.end()]
+    }
+
+    pub fn bump(&mut self) -> Result<(), TokenizeError> {
         self.previous = Some(self.current.range);
         self.current = self.next;
         if self.current.kind != RuaTokenKind::Eof {

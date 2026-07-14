@@ -14,26 +14,25 @@ pub mod ide;
 pub mod semantic;
 pub mod vfs;
 
-pub use db::BaseDb;
+pub use db::{BaseDb, CacheSizes, QueryStats};
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity,
     normalize_diagnostics, reconcile_diagnostics,
 };
 pub use hir::{
     AggregateSignature, BinaryOp, Binding, BindingId, BindingKind, Block, Body, BodyId,
-    BodyResolution, BodyScopes, BodySourceId, BodySourceMap, CallableSignature, Condition, DefId,
-    DefKind, DefMap, Definition, DefinitionSource, DefinitionSourceKind, Expr, ExprId,
-    BuiltinMemberId, BuiltinType, CallInfo, CallTarget, CallableTy, GenericParamData,
-    GenericParamId, GenericParamTy, ImplSignature, Import, InferenceDiagnostic, InferenceResult,
-    InferenceSource, ItemKind,
-    ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, Literal, LiteralKind, LocalBindingId,
-    CaptureKind, LocalCapture, LocalResolveResult, LocalUse, LocalUseKind, MatchArm, MemberId, ModuleData,
-    MemberCandidate, MemberIndex, MemberKind, MemberOrigin, MemberResolution, MemberTarget,
-    ModuleId, ModuleKind, NameRef, NameRefId, NameRefKind, NamedTy, NamedTypeResolver,
-    ParameterData, Pat, PatId, PatternField, PrimitiveTy, ReceiverKind, ScopeData, ScopeId,
-    ScopeKind, SignatureFingerprint, Statement, StructField, Substitution, Ty,
-    TraitBound, TypeLoweringContext, TypeMismatchContext, TypeRef, UnaryOp, UnifyResult,
-    VariantKind, VariantSignature, Visibility, WherePredicateData, unify,
+    BodyResolution, BodyScopes, BodySourceId, BodySourceMap, BuiltinMemberId, BuiltinType,
+    CallInfo, CallTarget, CallableSignature, CallableTy, CaptureKind, Condition, DefId, DefKind,
+    DefMap, Definition, DefinitionSource, DefinitionSourceKind, Expr, ExprId, GenericParamData,
+    GenericParamId, GenericParamTy, ImplSignature, ImplementationData, Import, InferenceDiagnostic,
+    InferenceResult, InferenceSource, ItemKind, ItemSignature, ItemSourceKind, ItemTree,
+    ItemTreeItem, Literal, LiteralKind, LocalBindingId, LocalCapture, LocalResolveResult, LocalUse,
+    LocalUseKind, MatchArm, MemberCandidate, MemberId, MemberIndex, MemberKind, MemberOrigin,
+    MemberResolution, MemberTarget, ModuleData, ModuleId, ModuleKind, NameRef, NameRefId,
+    NameRefKind, NamedTy, NamedTypeResolver, ParameterData, Pat, PatId, PatternField, PrimitiveTy,
+    ReceiverKind, ScopeData, ScopeId, ScopeKind, SignatureFingerprint, Statement, StructField,
+    Substitution, TraitBound, Ty, TypeLoweringContext, TypeMismatchContext, TypeRef, UnaryOp,
+    UnifyResult, VariantKind, VariantSignature, Visibility, WherePredicateData, unify,
 };
 pub use ide::{
     Analysis, AnalysisHost, CallHierarchyItem, ClosureParameterInfo, CompletionInsert,

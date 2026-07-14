@@ -6,7 +6,7 @@
 //!   2. **real** tokens — one variant per Rua language token,
 //!   3. **node** kinds — the grammar productions the CST parser (P6-1) builds.
 //!
-//! Token classification (keywords/operators/literals) is owned by this crate.
+//! Token classification is shared through `rua-lex`; this enum adds CST nodes.
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -180,7 +180,10 @@ impl rowan::Language for RuaLanguage {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> SyntaxKind {
-        assert!(raw.0 <= SyntaxKind::__Last as u16, "invalid SyntaxKind raw value");
+        assert!(
+            raw.0 <= SyntaxKind::__Last as u16,
+            "invalid SyntaxKind raw value"
+        );
         // Safe: discriminants are the contiguous range `0..=__Last` because the
         // enum uses default discriminants, and the assert bounds `raw`.
         unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }

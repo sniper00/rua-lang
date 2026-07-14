@@ -11,7 +11,7 @@
 //! ever rejecting a program that would actually run.
 
 use crate::ast::*;
-use crate::diag::{Diag, render_all};
+use crate::diag::Diag;
 use crate::token::SourceRange;
 use std::collections::HashMap;
 
@@ -83,8 +83,11 @@ enum Ty {
     Bool,
     Str,
     Unit,
-    /// A user struct or enum, by name.
-    Named(String),
+    /// A user struct or enum, keyed by its declaration identity.
+    Named {
+        def: crate::hir::DefId,
+        name: String,
+    },
     /// `Vec<T>` / `[T]`.
     Vec(Box<Ty>),
     /// `Option<T>` (represented at runtime as pure nil, but typed here).
@@ -104,7 +107,10 @@ enum Ty {
     /// A generic type parameter in scope (e.g. `T`). Behaves like `Unknown` for
     /// compatibility (never a mismatch), but carries its name so method calls can
     /// be resolved through the parameter's trait bounds.
-    Generic(String),
+    Generic {
+        id: GenericParamId,
+        name: String,
+    },
     /// Unknown / any — unifies with everything, suppresses all errors.
     Unknown,
 }
@@ -116,7 +122,7 @@ impl Ty {
     /// Concrete = we are sure what it is (so a mismatch is a real error). A
     /// generic parameter is *not* concrete: it stands for an unknown instantiation.
     fn is_concrete(&self) -> bool {
-        !matches!(self, Ty::Unknown | Ty::Generic(_))
+        !matches!(self, Ty::Unknown | Ty::Generic { .. })
     }
     fn name(&self) -> String {
         match self {
@@ -125,7 +131,7 @@ impl Ty {
             Ty::Bool => "bool".into(),
             Ty::Str => "String".into(),
             Ty::Unit => "()".into(),
-            Ty::Named(n) => n.clone(),
+            Ty::Named { name, .. } => name.clone(),
             Ty::Vec(t) => format!("Vec<{}>", t.name()),
             Ty::Option(t) => format!("Option<{}>", t.name()),
             Ty::Result(t, e) => format!("Result<{}, {}>", t.name(), e.name()),
@@ -140,7 +146,7 @@ impl Ty {
                 params.iter().map(Ty::name).collect::<Vec<_>>().join(", "),
                 ret.name()
             ),
-            Ty::Generic(n) => n.clone(),
+            Ty::Generic { name, .. } => name.clone(),
             Ty::Unknown => "?".into(),
         }
     }
@@ -215,7 +221,9 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
             ClosureBody::Expr(expr) => collect_calls_on_expr(name, expr, out),
             ClosureBody::Block(block) => collect_calls_on_block(name, block, out),
         },
-        ExprKind::MethodCall { recv, method, args, .. } => {
+        ExprKind::MethodCall {
+            recv, method, args, ..
+        } => {
             if let ExprKind::Path(segs) = &recv.kind
                 && segs.len() == 1
                 && segs[0] == name
@@ -267,14 +275,23 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
                 collect_calls_on_expr(name, a, out);
             }
         }
-        ExprKind::If { cond, then_block, else_block } => {
+        ExprKind::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
             collect_calls_on_expr(name, cond, out);
             collect_calls_on_block(name, then_block, out);
             if let Some(eb) = else_block {
                 collect_calls_on_else(name, eb, out);
             }
         }
-        ExprKind::IfLet { expr, then_block, else_block, .. } => {
+        ExprKind::IfLet {
+            expr,
+            then_block,
+            else_block,
+            ..
+        } => {
             collect_calls_on_expr(name, expr, out);
             collect_calls_on_block(name, then_block, out);
             if let Some(eb) = else_block {
@@ -294,11 +311,7 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
     }
 }
 
-fn collect_calls_on_else<'a>(
-    name: &str,
-    eb: &'a ElseBranch,
-    out: &mut Vec<(&'a str, &'a [Expr])>,
-) {
+fn collect_calls_on_else<'a>(name: &str, eb: &'a ElseBranch, out: &mut Vec<(&'a str, &'a [Expr])>) {
     match eb {
         ElseBranch::Block(b) => collect_calls_on_block(name, b, out),
         ElseBranch::If(e) => collect_calls_on_expr(name, e, out),
@@ -473,11 +486,11 @@ fn join(a: &Ty, b: &Ty) -> Ty {
 /// Infer bindings for generic parameters by structurally matching a declared
 /// parameter type against a concrete argument type. Only concrete bindings are
 /// recorded; conflicting bindings are joined (falling back to `Unknown`).
-fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) {
+fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<GenericParamId, Ty>) {
     match (param, arg) {
-        (Ty::Generic(g), a) if a.is_concrete() => {
+        (Ty::Generic { id, .. }, a) if a.is_concrete() => {
             subst
-                .entry(g.clone())
+                .entry(*id)
                 .and_modify(|cur| *cur = join(cur, a))
                 .or_insert_with(|| a.clone());
         }
@@ -509,9 +522,9 @@ fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) {
 
 /// Replace generic parameters in `ty` with their inferred bindings; unbound
 /// generics become `Unknown` (they carry no meaning outside the callee).
-fn subst_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+fn subst_ty(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Ty {
     match ty {
-        Ty::Generic(g) => subst.get(g).cloned().unwrap_or(Ty::Unknown),
+        Ty::Generic { id, .. } => subst.get(id).cloned().unwrap_or(Ty::Unknown),
         Ty::Vec(t) => Ty::Vec(Box::new(subst_ty(t, subst))),
         Ty::Option(t) => Ty::Option(Box::new(subst_ty(t, subst))),
         Ty::Result(t, e) => Ty::Result(Box::new(subst_ty(t, subst)), Box::new(subst_ty(e, subst))),
@@ -526,6 +539,7 @@ fn subst_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
     }
 }
 
+#[derive(Clone)]
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
@@ -533,6 +547,7 @@ struct FnSig {
     /// bound satisfaction at call sites. Empty for non-generic fns and for
     /// methods/trait signatures (where call-site checking is not yet done).
     generics: Vec<GenericParam>,
+    generic_bounds: HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
 }
 
 /// Return type of a recognized builtin method on a parameterized collection
@@ -549,108 +564,6 @@ fn builtin_method_ret(recv: &Ty, method: &str) -> Ty {
         (Ty::Map(_, _), "insert") => Ty::Unit,
         _ => Ty::Unknown,
     }
-}
-
-/// Human-readable signature detail for a recognized builtin method on a
-/// parameterized collection type. Returns `None` when the method is not a
-/// recognized builtin (the caller falls back to `Unknown` for the return type
-/// without recording a member hit).
-fn builtin_method_detail(recv: &Ty, method: &str) -> Option<String> {
-    match recv {
-        Ty::Vec(t) => {
-            let elem = t.name();
-            Some(match method {
-                "len" => "fn len(&self) -> i64".to_string(),
-                "get" => format!("fn get(&self, index: usize) -> Option<{}>", elem),
-                "push" => format!("fn push(&mut self, value: {})", elem),
-                "pop" => format!("fn pop(&mut self) -> Option<{}>", elem),
-                "set" => format!("fn set(&mut self, index: usize, value: {})", elem),
-                _ => return None,
-            })
-        }
-        Ty::Map(k, v) => {
-            let key = k.name();
-            let val = v.name();
-            Some(match method {
-                "len" => "fn len(&self) -> i64".to_string(),
-                "get" => format!("fn get(&self, key: &{}) -> Option<{}>", key, val),
-                "insert" => format!("fn insert(&mut self, key: {}, value: {}) -> Option<{}>", key, val, val),
-                "remove" => format!("fn remove(&mut self, key: &{}) -> Option<{}>", key, val),
-                "contains_key" => format!("fn contains_key(&self, key: &{}) -> bool", key),
-                _ => return None,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Human-readable signature detail for a recognized std `String` method.
-/// Returns `None` when the method is not part of the shimmed surface.
-fn str_method_detail(method: &str) -> Option<String> {
-    Some(match method {
-        "len" => "fn len(&self) -> i64".to_string(),
-        "is_empty" => "fn is_empty(&self) -> bool".to_string(),
-        "contains" => "fn contains(&self, pat: &str) -> bool".to_string(),
-        "starts_with" => "fn starts_with(&self, pat: &str) -> bool".to_string(),
-        "ends_with" => "fn ends_with(&self, pat: &str) -> bool".to_string(),
-        "to_uppercase" => "fn to_uppercase(&self) -> String".to_string(),
-        "to_lowercase" => "fn to_lowercase(&self) -> String".to_string(),
-        "trim" => "fn trim(&self) -> String".to_string(),
-        "trim_start" => "fn trim_start(&self) -> String".to_string(),
-        "trim_end" => "fn trim_end(&self) -> String".to_string(),
-        "replace" => "fn replace(&self, from: &str, to: &str) -> String".to_string(),
-        "repeat" => "fn repeat(&self, n: usize) -> String".to_string(),
-        "to_string" | "to_owned" | "clone" => "fn to_string(&self) -> String".to_string(),
-        "chars" => "fn chars(&self) -> Vec<String>".to_string(),
-        "split" => "fn split(&self, pat: &str) -> Vec<String>".to_string(),
-        _ => return None,
-    })
-}
-
-/// All completable members of a built-in collection / string type, for member
-/// completion (`v.` / `s.` / `map.`). Built-ins expose no fields, so every entry
-/// is a `Method`; detail text reuses the same signatures as hover. Names are
-/// kept alphabetical so the emitted list is already ordered.
-fn builtin_members(ty: &Ty) -> Vec<CompletionMember> {
-    let names: &[&str] = match ty {
-        Ty::Vec(_) => &["get", "len", "pop", "push", "set"],
-        Ty::Map(_, _) => &["contains_key", "get", "insert", "len", "remove"],
-        Ty::Str => &[
-            "chars",
-            "clone",
-            "contains",
-            "ends_with",
-            "is_empty",
-            "len",
-            "repeat",
-            "replace",
-            "split",
-            "starts_with",
-            "to_lowercase",
-            "to_owned",
-            "to_string",
-            "to_uppercase",
-            "trim",
-            "trim_end",
-            "trim_start",
-        ],
-        _ => return Vec::new(),
-    };
-    names
-        .iter()
-        .filter_map(|&m| {
-            let detail = if matches!(ty, Ty::Str) {
-                str_method_detail(m)
-            } else {
-                builtin_method_detail(ty, m)
-            }?;
-            Some(CompletionMember {
-                name: m.to_string(),
-                kind: MemberKind::Method,
-                detail,
-            })
-        })
-        .collect()
 }
 
 /// Return type of a recognized std `String` method, or `None` if the method is
@@ -670,53 +583,59 @@ fn str_method_ret(method: &str) -> Option<Ty> {
 /// Type-derived facts the backend needs: the sets of `/` and `%` expressions
 /// whose operands are both `i64`, so codegen can emit truncating integer helpers
 /// (`rt.idiv`/`rt.irem`) that match Rust rather than Lua's floored `//`/`%`.
-/// Keyed by `(span.start, span.len)`, which uniquely identifies each subexpr.
-#[derive(Default)]
+/// All expression facts are keyed by parser-owned `ExprId`; source ranges are
+/// used only for diagnostics.
+#[derive(Debug, Default)]
 pub struct TypeInfo {
-    int_divs: std::collections::HashSet<(usize, usize)>,
-    int_rems: std::collections::HashSet<(usize, usize)>,
+    int_divs: std::collections::HashSet<ExprId>,
+    int_rems: std::collections::HashSet<ExprId>,
     /// Method-call expressions whose receiver is a `String` and whose method is
     /// a recognized std string method, so codegen routes them through `rt.str`.
-    str_methods: std::collections::HashSet<(usize, usize)>,
+    str_methods: std::collections::HashSet<ExprId>,
     /// `+` expressions whose operands are both `String`, so codegen emits Lua
     /// string concatenation (`..`) instead of arithmetic.
-    str_concats: std::collections::HashSet<(usize, usize)>,
+    str_concats: std::collections::HashSet<ExprId>,
     /// Method-call expressions where the receiver is `Option<T>` and the method
     /// is `map`, so codegen inlines the closure instead of emitting `:map()`.
-    option_maps: std::collections::HashSet<(usize, usize)>,
+    option_maps: std::collections::HashSet<ExprId>,
+    result_tries: std::collections::HashSet<ExprId>,
     /// First closure encountered during type checking. The compiler entry point
     /// uses this as a temporary backend gate until fused closure codegen lands.
     first_closure: Option<SourceRange>,
-    iter_plans: HashMap<(u32, usize, usize), IterPlan>,
+    iter_plans: HashMap<ExprId, IterPlan>,
 }
 
 impl TypeInfo {
-    pub fn is_int_div(&self, start: usize, len: usize) -> bool {
-        self.int_divs.contains(&(start, len))
+    pub fn is_int_div(&self, expression: ExprId) -> bool {
+        self.int_divs.contains(&expression)
     }
 
-    pub fn is_int_rem(&self, start: usize, len: usize) -> bool {
-        self.int_rems.contains(&(start, len))
+    pub fn is_int_rem(&self, expression: ExprId) -> bool {
+        self.int_rems.contains(&expression)
     }
 
-    pub fn is_str_method(&self, start: usize, len: usize) -> bool {
-        self.str_methods.contains(&(start, len))
+    pub fn is_str_method(&self, expression: ExprId) -> bool {
+        self.str_methods.contains(&expression)
     }
 
-    pub fn is_str_concat(&self, start: usize, len: usize) -> bool {
-        self.str_concats.contains(&(start, len))
+    pub fn is_str_concat(&self, expression: ExprId) -> bool {
+        self.str_concats.contains(&expression)
     }
 
-    pub fn is_option_map(&self, start: usize, len: usize) -> bool {
-        self.option_maps.contains(&(start, len))
+    pub fn is_option_map(&self, expression: ExprId) -> bool {
+        self.option_maps.contains(&expression)
+    }
+
+    pub fn is_result_try(&self, expression: ExprId) -> bool {
+        self.result_tries.contains(&expression)
     }
 
     pub fn first_closure(&self) -> Option<SourceRange> {
         self.first_closure
     }
 
-    pub fn iter_plan(&self, file: u32, start: usize, len: usize) -> Option<&IterPlan> {
-        self.iter_plans.get(&(file, start, len))
+    pub fn iter_plan(&self, expression: ExprId) -> Option<&IterPlan> {
+        self.iter_plans.get(&expression)
     }
 
     pub fn iter_plans(&self) -> impl Iterator<Item = &IterPlan> {
@@ -729,225 +648,16 @@ impl TypeInfo {
             .filter(|plan| {
                 !plan.adapters.is_empty()
                     || plan.consumer != IterConsumerKind::For
-                    || !matches!(plan.source.kind, IterSourceKind::ExclusiveRange
-                        | IterSourceKind::InclusiveRange
-                        | IterSourceKind::Vec)
+                    || !matches!(
+                        plan.source.kind,
+                        IterSourceKind::ExclusiveRange
+                            | IterSourceKind::InclusiveRange
+                            | IterSourceKind::Vec
+                    )
             })
             .map(|plan| plan.consumer_range)
             .min_by_key(|range| (range.file, range.start))
     }
-}
-
-/// Kind of a resolved member access, for the LSP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemberKind {
-    Field,
-    Method,
-}
-
-/// One resolved member access (`x.field` or `x.method()`), keyed by the byte
-/// span of the member identifier at the **use site**. Pure data (no AST / no
-/// rowan) so the LSP crate can consume it directly for go-to-def / hover.
-#[derive(Debug, Clone)]
-pub struct MemberTarget {
-    /// File id + byte span of the member identifier at the use site.
-    pub member_file: u32,
-    pub member_start: usize,
-    pub member_len: usize,
-    /// File id + byte span of the member's definition site.
-    pub target_file: u32,
-    pub target_start: usize,
-    pub target_len: usize,
-    /// Human-readable detail for hover (e.g. `x: f64`, `fn dist(&self) -> f64`).
-    pub detail: String,
-    pub kind: MemberKind,
-}
-
-/// Member-access resolutions produced by type-checking. Only accesses whose
-/// receiver is a concrete user type (`struct`/`enum`) with the member actually
-/// declared are recorded; `Vec`/`HashMap`/`String`/extern/generic/unknown
-/// receivers are omitted (zero false positives, matching the checker's
-/// conservative stance).
-#[derive(Debug, Clone, Default)]
-pub struct MemberIndex {
-    hits: Vec<MemberTarget>,
-}
-
-impl MemberIndex {
-    /// The member-access resolution in file `file` whose member-identifier span
-    /// contains `offset`, if any.
-    pub fn at(&self, file: u32, offset: usize) -> Option<&MemberTarget> {
-        self.hits.iter().find(|h| {
-            h.member_file == file
-                && offset >= h.member_start
-                && offset < h.member_start + h.member_len
-        })
-    }
-
-    pub fn hits(&self) -> &[MemberTarget] {
-        &self.hits
-    }
-
-    pub fn len(&self) -> usize {
-        self.hits.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.hits.is_empty()
-    }
-}
-
-/// Type-check `prog` and return the [`MemberIndex`] for LSP member resolution.
-/// Diagnostics are discarded here (the LSP fetches those via `check_diags`).
-pub fn member_index(prog: &Program) -> MemberIndex {
-    let mut tc = Tc::new(prog);
-    tc.run(prog);
-    MemberIndex { hits: tc.members }
-}
-
-/// One completable member (field or method) of a user type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletionMember {
-    pub name: String,
-    pub kind: MemberKind,
-    /// Detail text: field `x: f64`, method `fn dist(&self) -> f64`.
-    pub detail: String,
-}
-
-/// Member-completion catalog: type name → fields + methods.
-/// Only user-defined types with at least one field or method are present; types
-/// with the same simple name in multiple modules are already dropped by
-/// `Tc::new`, matching the type checker's conservative stance.
-#[derive(Debug, Clone, Default)]
-pub struct TypeMembers {
-    map: HashMap<String, Vec<CompletionMember>>,
-}
-
-impl TypeMembers {
-    /// Members of `type_name` (fields then methods, each alphabetical). Empty
-    /// slice when the type is unknown or has no members.
-    pub fn get(&self, type_name: &str) -> &[CompletionMember] {
-        self.map.get(type_name).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-}
-
-/// Assemble the [`TypeMembers`] catalog for `prog`. Only needs the tables built
-/// by `Tc::new` — no `infer` pass, so it's cheap.
-pub fn type_members(prog: &Program) -> TypeMembers {
-    Tc::new(prog).build_type_members()
-}
-
-/// The receiver of a member access, typed to a concrete user type. Keyed by the
-/// receiver expression's byte span; used by member completion to answer "what
-/// are `recv.`'s fields/methods" when the member name isn't typed yet.
-#[derive(Debug, Clone)]
-pub struct ReceiverType {
-    pub recv_file: u32,
-    pub recv_start: usize,
-    pub recv_len: usize,
-    pub type_name: String,
-}
-
-/// Receiver-type index for member-completion lookups. Keyed by the receiver
-/// expression's end offset (`recv_start + recv_len`), which is the stable anchor
-/// for disambiguating nesting levels in chains like `a.b.c`.
-#[derive(Debug, Clone, Default)]
-pub struct ReceiverIndex {
-    hits: Vec<ReceiverType>,
-}
-
-impl ReceiverIndex {
-    /// The receiver in `file` whose span **ends** at `end` (i.e. the token just
-    /// before the member `.`). End is the stable anchor: for `a.b.c`, `a` and
-    /// `a.b` share a start but end differently, so `end` disambiguates the
-    /// nesting level. Matches the CST receiver node's `text_range().end()`.
-    pub fn at_end(&self, file: u32, end: usize) -> Option<&ReceiverType> {
-        self.hits
-            .iter()
-            .find(|r| r.recv_file == file && r.recv_start + r.recv_len == end)
-    }
-
-    pub fn hits(&self) -> &[ReceiverType] {
-        &self.hits
-    }
-
-    pub fn len(&self) -> usize {
-        self.hits.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.hits.is_empty()
-    }
-}
-
-/// Run type-checking on `prog` and return both the member-completion catalog
-/// and the receiver-type index in one pass.
-pub fn member_completion(prog: &Program) -> (TypeMembers, ReceiverIndex) {
-    let mut tc = Tc::new(prog);
-    tc.run(prog);
-    let mut members = tc.build_type_members();
-    // Merge built-in receiver catalogs (`Vec<..>` / `HashMap<..>` / `String`);
-    // user types already own their key, so built-ins never overwrite them.
-    for (key, list) in tc.builtin_type_members {
-        members.map.entry(key).or_insert(list);
-    }
-    (members, ReceiverIndex { hits: tc.receivers })
-}
-
-/// The inferred type of a local binding (`let`, `for` variable, or function
-/// parameter), keyed by the binding-name identifier's byte span. Powers richer
-/// LSP hover for locals (e.g. `let mut i: i64` instead of a bare `local i`).
-#[derive(Debug, Clone)]
-pub struct BindingType {
-    pub file: u32,
-    pub name_start: usize,
-    pub name_len: usize,
-    /// Ready-to-display hover text, e.g. `let mut i: i64`, `n: i64`.
-    pub display: String,
-}
-
-/// Binding-type index for LSP local-variable hover. Keyed by the binding-name
-/// span; only bindings whose inferred type is *not* `Unknown` are recorded (so
-/// an un-inferable local degrades to the plain `local <name>` hover).
-#[derive(Debug, Clone, Default)]
-pub struct BindingTypes {
-    hits: Vec<BindingType>,
-}
-
-impl BindingTypes {
-    /// The binding in `file` whose name span contains `offset`, if any.
-    pub fn at(&self, file: u32, offset: usize) -> Option<&BindingType> {
-        self.hits.iter().find(|b| {
-            b.file == file && offset >= b.name_start && offset < b.name_start + b.name_len
-        })
-    }
-
-    pub fn hits(&self) -> &[BindingType] {
-        &self.hits
-    }
-
-    pub fn len(&self) -> usize {
-        self.hits.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.hits.is_empty()
-    }
-}
-
-/// Type-check `prog` and return the [`BindingTypes`] index for LSP local hover.
-pub fn binding_types(prog: &Program) -> BindingTypes {
-    let mut tc = Tc::new(prog);
-    tc.run(prog);
-    BindingTypes { hits: tc.bindings }
 }
 
 /// Resolved payload of a user enum variant, used to type the bindings a
@@ -964,23 +674,14 @@ enum VariantPayload {
 /// `Err(e)`) matched against scrutinee type `ty`. Returns one type per pattern
 /// element, or `None` when the path isn't a recognized built-in (the caller
 /// then binds the elements as `Unknown`).
-fn builtin_payload(path: &[String], ty: &Ty) -> Option<Vec<Ty>> {
-    match (path.last()?.as_str(), ty) {
-        ("Some", Ty::Option(inner)) => Some(vec![(**inner).clone()]),
-        ("Ok", Ty::Result(ok, _)) => Some(vec![(**ok).clone()]),
-        ("Err", Ty::Result(_, err)) => Some(vec![(**err).clone()]),
-        _ => None,
-    }
-}
-
-/// Depth-first list of every item including those nested in modules (the `Mod`
-/// items themselves are included but ignored by the collection passes).
-fn flatten_items<'p>(items: &'p [Item], out: &mut Vec<&'p Item>) {
-    for it in items {
-        out.push(it);
-        if let Item::Mod(m) = it {
-            flatten_items(&m.items, out);
+fn builtin_payload(builtin: rua_core::BuiltinId, ty: &Ty) -> Option<Vec<Ty>> {
+    match (builtin, ty) {
+        (rua_core::BuiltinId::VariantOptionSome, Ty::Option(inner)) => {
+            Some(vec![(**inner).clone()])
         }
+        (rua_core::BuiltinId::VariantResultOk, Ty::Result(ok, _)) => Some(vec![(**ok).clone()]),
+        (rua_core::BuiltinId::VariantResultErr, Ty::Result(_, err)) => Some(vec![(**err).clone()]),
+        _ => None,
     }
 }
 
@@ -994,13 +695,33 @@ fn merge_generics(outer: &[GenericParam], inner: &[GenericParam]) -> Vec<Generic
 /// Run type-checking and return every diagnostic. The returned vec is suitable
 /// for LSP consumption (byte-offset spans are preserved from `Expr`).
 pub fn collect_diags(prog: &Program) -> Vec<Diag> {
-    let mut tc = Tc::new(prog);
+    let hir = crate::hir::resolve(prog);
+    collect_diags_resolved(prog, &hir)
+}
+
+pub fn collect_diags_resolved(prog: &Program, hir: &crate::hir::ResolvedHir) -> Vec<Diag> {
+    let mut tc = Tc::new(prog, hir);
     tc.run(prog);
     tc.errs
 }
 
-pub fn check(prog: &Program, files: &[String]) -> Result<TypeInfo, String> {
-    let mut tc = Tc::new(prog);
+pub fn check(prog: &Program) -> Result<TypeInfo, Vec<Diag>> {
+    let hir = crate::hir::resolve(prog);
+    check_resolved(prog, &hir)
+}
+
+pub fn check_resolved(
+    prog: &Program,
+    hir: &crate::hir::ResolvedHir,
+) -> Result<TypeInfo, Vec<Diag>> {
+    check_resolved_diagnostics(prog, hir)
+}
+
+pub fn check_resolved_diagnostics(
+    prog: &Program,
+    hir: &crate::hir::ResolvedHir,
+) -> Result<TypeInfo, Vec<Diag>> {
+    let mut tc = Tc::new(prog, hir);
     tc.run(prog);
     if tc.errs.is_empty() {
         Ok(TypeInfo {
@@ -1009,81 +730,30 @@ pub fn check(prog: &Program, files: &[String]) -> Result<TypeInfo, String> {
             str_methods: tc.str_methods,
             str_concats: tc.str_concats,
             option_maps: tc.option_maps,
+            result_tries: tc.result_tries,
             first_closure: tc.first_closure,
             iter_plans: tc.iter_plans,
         })
     } else {
-        Err(render_all(&tc.errs, files))
+        Err(tc.errs)
     }
-}
-
-/// Format an AST `Type` node as a human-readable string for hover details.
-fn type_display(t: &Type) -> String {
-    match t {
-        Type::Unit => "()".into(),
-        Type::Ref { mutable, inner } => {
-            if *mutable {
-                format!("&mut {}", type_display(inner))
-            } else {
-                format!("&{}", type_display(inner))
-            }
-        }
-        Type::Path { name, args } => {
-            if args.is_empty() {
-                name.clone()
-            } else {
-                let args: Vec<String> = args.iter().map(type_display).collect();
-                format!("{}<{}>", name, args.join(", "))
-            }
-        }
-    }
-}
-
-/// Build a signature display string from a method declaration.
-fn method_detail(name: &str, has_self: bool, params: &[Param], ret: Option<&Type>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if has_self {
-        parts.push("&self".to_string());
-    }
-    for p in params {
-        parts.push(format!("{}: {}", p.name, type_display(&p.ty)));
-    }
-    let ret_str = match ret {
-        Some(t) => format!(" -> {}", type_display(t)),
-        None => String::new(),
-    };
-    format!("fn {}({}){}", name, parts.join(", "), ret_str)
 }
 
 struct Tc {
-    fns: HashMap<String, FnSig>,
-    /// Fully-qualified path (`a::b::f`) -> signature, for free/extern functions
-    /// in nested modules and `.ruai` declaration files. Keys are unambiguous by
-    /// construction, so qualified call sites are checked even when the same
-    /// simple name is dropped from `fns`.
-    qual_fns: HashMap<String, FnSig>,
-    /// struct name -> [(field_name, field_type, name_definition_span)]
-    structs: HashMap<String, Vec<(String, Ty, SourceRange)>>,
-    enums: std::collections::HashSet<String>,
-    /// type name -> (method name -> signature). Populated from `impl` blocks
-    /// (inherent + trait impls) plus inherited trait default methods.
-    methods: HashMap<String, HashMap<String, FnSig>>,
-    /// type name -> (method name -> (definition span, signature detail))
-    /// Populated from `impl` blocks (inherent + trait impls) plus inherited
-    /// trait defaults. Detail is human-readable like `fn dist(&self) -> f64`.
-    method_defs: HashMap<String, HashMap<String, (SourceRange, String)>>,
-    /// trait name -> (method name -> signature). Used to resolve method calls on
-    /// values typed as a generic parameter via its trait bounds.
-    trait_methods: HashMap<String, HashMap<String, FnSig>>,
-    /// trait name -> (method name -> (definition span, signature detail))
-    trait_method_defs: HashMap<String, HashMap<String, (SourceRange, String)>>,
-    /// type name -> set of trait names it implements (`impl Trait for Type`).
-    /// Used at call sites to verify a concrete type argument satisfies the
-    /// declared trait bounds of a generic function.
-    impls: HashMap<String, std::collections::HashSet<String>>,
+    hir: crate::hir::ResolvedHir,
+    /// Resolved function declaration -> signature. Calls consume the target
+    /// selected by name resolution; the type checker never reconstructs it from
+    /// source path strings.
+    fn_sigs: HashMap<crate::hir::DefId, FnSig>,
+    /// Resolved struct declaration -> fields.
+    struct_defs: HashMap<crate::hir::DefId, Vec<(String, Ty, SourceRange)>>,
+    /// Resolved enum variant declaration -> payload.
+    variant_payloads: HashMap<crate::hir::DefId, VariantPayload>,
+    /// Resolved impl/trait method declaration -> callable signature.
+    method_sigs: HashMap<crate::hir::DefId, FnSig>,
     /// Generic parameters in scope for the function being checked: name -> the
     /// trait names it is bounded by. Set on entry to each `check_fn`.
-    gen_bounds: HashMap<String, Vec<String>>,
+    gen_bounds: HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
     scopes: Vec<HashMap<String, Ty>>,
     mutable_scopes: Vec<std::collections::HashSet<String>>,
     /// Scope-count boundaries for nested closures. Assignments resolving below
@@ -1093,83 +763,29 @@ struct Tc {
     /// Explicit return expression types for the currently inferred closure.
     closure_returns: Vec<Vec<Ty>>,
     errs: Vec<Diag>,
-    /// `(span.start, span.len)` of every `i64 / i64` division expression.
-    int_divs: std::collections::HashSet<(usize, usize)>,
-    /// `(span.start, span.len)` of every `i64 % i64` remainder expression.
-    int_rems: std::collections::HashSet<(usize, usize)>,
-    /// `(span.start, span.len)` of recognized `String` method calls.
-    str_methods: std::collections::HashSet<(usize, usize)>,
-    /// `(span.start, span.len)` of `String + String` concatenations.
-    str_concats: std::collections::HashSet<(usize, usize)>,
-    /// `(span.start, span.len)` of `Option::map` calls that need inline codegen.
-    option_maps: std::collections::HashSet<(usize, usize)>,
-    /// Resolved member accesses (`x.field` / `x.method()`) for the LSP.
-    members: Vec<MemberTarget>,
-    /// Receiver types at member-access sites (for completion `x.`).
-    receivers: Vec<ReceiverType>,
-    /// Inferred types of local bindings (`let`/`for`/param) for LSP hover.
-    bindings: Vec<BindingType>,
-    /// User enum variant payloads: enum name → variant name → resolved payload.
-    /// Types pattern bindings in `match`/`if let` arms over user enums.
-    enum_variants: HashMap<String, HashMap<String, VariantPayload>>,
-    /// Built-in receiver member catalogs (`Vec<i64>` / `HashMap<..>` / `String`
-    /// → their methods), keyed by the receiver type's display name. Populated
-    /// lazily as built-in receivers are encountered; merged into `TypeMembers`
-    /// so `v.` / `s.` completion lists built-in methods.
-    builtin_type_members: HashMap<String, Vec<CompletionMember>>,
+    /// Every `i64 / i64` division expression.
+    int_divs: std::collections::HashSet<ExprId>,
+    /// Every `i64 % i64` remainder expression.
+    int_rems: std::collections::HashSet<ExprId>,
+    /// Recognized `String` method calls.
+    str_methods: std::collections::HashSet<ExprId>,
+    /// `String + String` concatenations.
+    str_concats: std::collections::HashSet<ExprId>,
+    /// `Option::map` calls that need inline codegen.
+    option_maps: std::collections::HashSet<ExprId>,
+    result_tries: std::collections::HashSet<ExprId>,
     first_closure: Option<SourceRange>,
-    iter_plans: HashMap<(u32, usize, usize), IterPlan>,
+    iter_plans: HashMap<ExprId, IterPlan>,
 }
 
 impl Tc {
-    fn new(prog: &Program) -> Tc {
-        // Types/fns/methods are collected by simple name across all scopes
-        // (root + nested modules), so flatten the item tree up front.
-        let mut flat: Vec<&Item> = Vec::new();
-        flatten_items(&prog.items, &mut flat);
-
-        // Count how many scopes define each top-level name. A name defined in
-        // more than one scope is ambiguous by simple name and is dropped from the
-        // registries below, so every check on it degrades to `Unknown` (zero
-        // false positives when the same type/fn/trait name lives in two modules).
-        let mut name_counts: HashMap<String, usize> = HashMap::new();
-        for it in flat.iter().copied() {
-            let n = match it {
-                Item::Struct(s) => Some(&s.name),
-                Item::Enum(e) => Some(&e.name),
-                Item::Fn(f) => Some(&f.name),
-                Item::Trait(t) => Some(&t.name),
-                _ => None,
-            };
-            if let Some(n) = n {
-                *name_counts.entry(n.clone()).or_insert(0) += 1;
-            }
-        }
-
-        let mut structs: HashMap<String, Vec<(String, Ty, SourceRange)>> = HashMap::new();
-        let mut enums = std::collections::HashSet::new();
-        // First pass: collect type names so `ty_of` can resolve Named types.
-        for item in flat.iter().copied() {
-            match item {
-                Item::Struct(s) => {
-                    structs.insert(s.name.clone(), Vec::new());
-                }
-                Item::Enum(e) => {
-                    enums.insert(e.name.clone());
-                }
-                _ => {}
-            }
-        }
+    fn new(prog: &Program, hir: &crate::hir::ResolvedHir) -> Tc {
         let mut tc = Tc {
-            fns: HashMap::new(),
-            qual_fns: HashMap::new(),
-            structs: structs.clone(),
-            enums,
-            methods: HashMap::new(),
-            method_defs: HashMap::new(),
-            trait_methods: HashMap::new(),
-            trait_method_defs: HashMap::new(),
-            impls: HashMap::new(),
+            hir: hir.clone(),
+            fn_sigs: HashMap::new(),
+            struct_defs: HashMap::new(),
+            variant_payloads: HashMap::new(),
+            method_sigs: HashMap::new(),
             gen_bounds: HashMap::new(),
             scopes: Vec::new(),
             mutable_scopes: Vec::new(),
@@ -1182,256 +798,18 @@ impl Tc {
             str_methods: std::collections::HashSet::new(),
             str_concats: std::collections::HashSet::new(),
             option_maps: std::collections::HashSet::new(),
-            members: Vec::new(),
-            receivers: Vec::new(),
-            bindings: Vec::new(),
-            enum_variants: HashMap::new(),
-            builtin_type_members: HashMap::new(),
+            result_tries: std::collections::HashSet::new(),
             first_closure: None,
             iter_plans: HashMap::new(),
         };
-        // Second pass: field types, free-fn signatures, and trait method sigs
-        // (now that names resolve).
-        let mut traits: HashMap<String, HashMap<String, (FnSig, bool)>> = HashMap::new();
-        for item in flat.iter().copied() {
-            match item {
-                Item::Struct(s) => {
-                    let fields = s
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), tc.ty_of(&f.ty), f.name_span))
-                        .collect();
-                    tc.structs.insert(s.name.clone(), fields);
-                }
-                Item::Enum(e) => {
-                    // Resolve each variant's payload types. The enum's own
-                    // generics map to `Ty::Generic` while resolving (so a
-                    // `Circle(T)` payload stays abstract rather than Unknown).
-                    tc.set_gen_bounds(&e.generics);
-                    let mut variants = HashMap::new();
-                    for v in &e.variants {
-                        let payload = match &v.kind {
-                            VariantKind::Unit => continue,
-                            VariantKind::Tuple(tys) => {
-                                VariantPayload::Tuple(tys.iter().map(|t| tc.ty_of(t)).collect())
-                            }
-                            VariantKind::Struct(fields) => VariantPayload::Struct(
-                                fields
-                                    .iter()
-                                    .map(|f| (f.name.clone(), tc.ty_of(&f.ty)))
-                                    .collect(),
-                            ),
-                        };
-                        variants.insert(v.name.clone(), payload);
-                    }
-                    tc.gen_bounds.clear();
-                    tc.enum_variants.insert(e.name.clone(), variants);
-                }
-                Item::Fn(f) => {
-                    // Map the fn's own generic params to `Ty::Generic` while
-                    // building its signature, so call sites can see which
-                    // parameters are generic (and check their bounds).
-                    tc.set_gen_bounds(&f.generics);
-                    let mut sig = tc.sig_of(&f.params, f.ret.as_ref());
-                    tc.gen_bounds.clear();
-                    sig.generics = f.generics.clone();
-                    tc.fns.insert(f.name.clone(), sig);
-                }
-                Item::Trait(t) => {
-                    let mut ms = HashMap::new();
-                    let mut sigs = HashMap::new();
-                    for tm in &t.methods {
-                        // Map the trait's and method's own generics to
-                        // `Ty::Generic` while building the signature, so param /
-                        // return types referencing them stay abstract.
-                        let gens = merge_generics(&t.generics, &tm.generics);
-                        tc.set_gen_bounds(&gens);
-                        let sig = tc.sig_of(&tm.params, tm.ret.as_ref());
-                        tc.gen_bounds.clear();
-                        sigs.insert(
-                            tm.name.clone(),
-                            FnSig {
-                                params: sig.params.clone(),
-                                ret: sig.ret.clone(),
-                                // Only the method-level generics are inferable
-                                // from a call's arguments (trait-level generics
-                                // are fixed by the impl), so store just those.
-                                generics: tm.generics.clone(),
-                            },
-                        );
-                        ms.insert(tm.name.clone(), (sig, tm.default.is_some()));
-                        // Record definition span and signature detail.
-                        let detail = method_detail(
-                            &tm.name,
-                            tm.has_self,
-                            &tm.params,
-                            tm.ret.as_ref(),
-                        );
-                        tc.trait_method_defs
-                            .entry(t.name.clone())
-                            .or_default()
-                            .insert(tm.name.clone(), (tm.name_span, detail));
-                    }
-                    tc.trait_methods.insert(t.name.clone(), sigs);
-                    traits.insert(t.name.clone(), ms);
-                }
-                _ => {}
-            }
-        }
-        // Third pass: methods from impl blocks + inherited trait defaults.
-        for item in flat.iter().copied() {
-            if let Item::Impl(im) = item {
-                // Record `impl Trait for Type` so call sites can check bounds.
-                if let Some(tr) = &im.trait_name {
-                    tc.impls
-                        .entry(im.type_name.clone())
-                        .or_default()
-                        .insert(tr.clone());
-                }
-                // Build a local table first (calls `ty_of`), then merge, to avoid
-                // holding a mutable borrow of `tc.methods` across `ty_of`.
-                let mut local: HashMap<String, FnSig> = HashMap::new();
-                let mut overridden = std::collections::HashSet::new();
-                for m in &im.methods {
-                    overridden.insert(m.name.clone());
-                    // A method's effective generics are the impl's plus its own;
-                    // map them to `Ty::Generic` while building the signature so
-                    // call sites can infer type arguments and check their bounds.
-                    let gens = merge_generics(&im.generics, &m.generics);
-                    tc.set_gen_bounds(&gens);
-                    let mut sig = tc.sig_of(&m.params, m.ret.as_ref());
-                    tc.gen_bounds.clear();
-                    sig.generics = gens;
-                    local.insert(m.name.clone(), sig);
-                }
-                if let Some(tr) = &im.trait_name
-                    && let Some(tms) = traits.get(tr) {
-                        for (mname, (sig, has_default)) in tms {
-                            if *has_default && !overridden.contains(mname) {
-                                local.entry(mname.clone()).or_insert(FnSig {
-                                    params: sig.params.clone(),
-                                    ret: sig.ret.clone(),
-                                    generics: Vec::new(),
-                                });
-                            }
-                        }
-                    }
-                let table = tc.methods.entry(im.type_name.clone()).or_default();
-                for (k, v) in local {
-                    table.insert(k, v);
-                }
-                // Record definition spans and signature details for all methods
-                // attached to this type (explicit + inherited defaults).
-                let mut mdefs: HashMap<String, (SourceRange, String)> = HashMap::new();
-                for m in &im.methods {
-                    let detail = method_detail(
-                        &m.name,
-                        m.has_self,
-                        &m.params,
-                        m.ret.as_ref(),
-                    );
-                    mdefs.insert(m.name.clone(), (m.name_span, detail));
-                }
-                // Inherited trait default methods: look up their definition spans
-                // from the trait's own table.
-                if let Some(tr) = &im.trait_name
-                    && let Some(tms) = traits.get(tr) {
-                        for (mname, (_, has_default)) in tms {
-                            if *has_default && !mdefs.contains_key(mname)
-                                && let Some(tm_table) = tc.trait_method_defs.get(tr)
-                                    && let Some(&(sp, ref detail)) = tm_table.get(mname) {
-                                        mdefs.insert(mname.clone(), (sp, detail.clone()));
-                                    }
-                        }
-                    }
-                tc.method_defs.insert(im.type_name.clone(), mdefs);
-            }
-        }
-        // Register every free/extern function under its fully-qualified path so
-        // module-qualified call sites (`a::f(..)`, `moon::log(..)`) are checked.
-        tc.collect_qual_fns(&prog.items, &[]);
-        // Drop cross-scope-ambiguous names so their checks degrade to `Unknown`.
-        for (name, count) in &name_counts {
-            if *count > 1 {
-                tc.structs.remove(name);
-                tc.enums.remove(name);
-                tc.enum_variants.remove(name);
-                tc.fns.remove(name);
-                tc.trait_methods.remove(name);
-                tc.trait_method_defs.remove(name);
-                tc.methods.remove(name);
-                tc.method_defs.remove(name);
+        tc.collect_identity_declarations(&prog.items, hir.root);
+        for (inherited, origin) in hir.method_origins.iter() {
+            if let Some(signature) = tc.method_sigs.get(origin).cloned() {
+                tc.fn_sigs.insert(*inherited, signature.clone());
+                tc.method_sigs.insert(*inherited, signature);
             }
         }
         tc
-    }
-
-    /// Build the member-completion catalog from the collected struct-field and
-    /// method tables. Fields come from `structs`; methods from `method_defs`
-    /// (inherent + trait-impl + inherited-default methods).
-    fn build_type_members(&self) -> TypeMembers {
-        let mut map: HashMap<String, Vec<CompletionMember>> = HashMap::new();
-        for (ty, fields) in &self.structs {
-            let entry = map.entry(ty.clone()).or_default();
-            for (fname, fty, _span) in fields {
-                entry.push(CompletionMember {
-                    name: fname.clone(),
-                    kind: MemberKind::Field,
-                    detail: format!("{}: {}", fname, fty.name()),
-                });
-            }
-        }
-        for (ty, methods) in &self.method_defs {
-            let entry = map.entry(ty.clone()).or_default();
-            for (mname, (_span, detail)) in methods {
-                entry.push(CompletionMember {
-                    name: mname.clone(),
-                    kind: MemberKind::Method,
-                    detail: detail.clone(),
-                });
-            }
-        }
-        // Deterministic: fields before methods, each alphabetical (HashMap order
-        // is not stable, so tests need this).
-        for members in map.values_mut() {
-            let rank = |k: MemberKind| match k {
-                MemberKind::Field => 0u8,
-                MemberKind::Method => 1u8,
-            };
-            members.sort_by(|a, b| {
-                rank(a.kind)
-                    .cmp(&rank(b.kind))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
-        // Drop fieldless + methodless structs (nothing to complete).
-        map.retain(|_, v| !v.is_empty());
-        TypeMembers { map }
-    }
-
-    /// Record `span`'s receiver type for member completion. Concrete user types
-    /// (`Ty::Named`) key into `TypeMembers`; built-in `Vec`/`HashMap`/`String`
-    /// receivers key into a lazily-built built-in catalog (so `v.` / `s.` list
-    /// their methods). Extern/generic/unknown receivers are skipped (zero false
-    /// positives).
-    fn record_receiver(&mut self, span: SourceRange, ty: &Ty) {
-        let type_name = match ty {
-            Ty::Named(name) => name.clone(),
-            Ty::Vec(_) | Ty::Map(_, _) | Ty::Str => {
-                let key = ty.name();
-                self.builtin_type_members
-                    .entry(key.clone())
-                    .or_insert_with(|| builtin_members(ty));
-                key
-            }
-            _ => return,
-        };
-        self.receivers.push(ReceiverType {
-            recv_file: span.file,
-            recv_start: span.start,
-            recv_len: span.len,
-            type_name,
-        });
     }
 
     fn sig_of(&self, params: &[Param], ret: Option<&Type>) -> FnSig {
@@ -1439,26 +817,132 @@ impl Tc {
             params: params.iter().map(|p| self.ty_of(&p.ty)).collect(),
             ret: ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit),
             generics: Vec::new(),
+            generic_bounds: HashMap::new(),
         }
     }
 
-    /// Recursively register free `fn`s and `extern` functions under their
-    /// fully-qualified path (`prefix::name`). Variadic extern fns are skipped so
-    /// their arity is never (wrongly) enforced.
-    fn collect_qual_fns(&mut self, items: &[Item], prefix: &[String]) {
-        let qual = |name: &str| {
-            let mut p = prefix.to_vec();
-            p.push(name.to_string());
-            p.join("::")
+    fn resolved_target(&self, expression: &Expr) -> Option<crate::hir::ResolvedTarget> {
+        self.hir.expression_targets.get(&expression.id).copied()
+    }
+
+    fn definition_for_target(
+        &self,
+        target: crate::hir::ResolvedTarget,
+    ) -> Option<&crate::hir::DefData> {
+        match target {
+            crate::hir::ResolvedTarget::Item(definition) => Some(self.hir.definition(definition)),
+            crate::hir::ResolvedTarget::Extern(extern_id) => {
+                self.hir.definitions.iter().find(|definition| {
+                    matches!(
+                        definition.kind,
+                        crate::hir::DefKind::ExternFunction { extern_id: candidate }
+                            if candidate == extern_id
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn definition_key(&self, definition: &crate::hir::DefData) -> String {
+        let owner = match definition.kind {
+            crate::hir::DefKind::Method { owner } | crate::hir::DefKind::TraitMethod { owner } => {
+                Some(owner)
+            }
+            _ => None,
         };
-        for it in items {
+        let module = owner
+            .map(|owner| self.hir.definition(owner).module)
+            .unwrap_or(definition.module);
+        let mut segments = self.hir.module(module).path.segments().to_vec();
+        if let Some(owner) = owner {
+            segments.push(self.hir.definition(owner).name.clone());
+        }
+        segments.push(definition.name.clone());
+        segments.join("::")
+    }
+
+    fn resolved_enum_variant_ids(
+        &self,
+        target: crate::hir::ResolvedTarget,
+    ) -> Option<(crate::hir::DefId, crate::hir::DefId)> {
+        let definition = self.definition_for_target(target)?;
+        let crate::hir::DefKind::EnumVariant { owner, .. } = definition.kind else {
+            return None;
+        };
+        Some((owner, definition.id))
+    }
+
+    fn named_type(&self, definition: crate::hir::DefId) -> Ty {
+        Ty::Named {
+            def: definition,
+            name: self.hir.definition(definition).name.clone(),
+        }
+    }
+
+    fn resolved_pattern_variant(&self, id: PatternId) -> Option<crate::hir::ResolvedTarget> {
+        self.hir.pattern_targets.get(&id).copied()
+    }
+
+    fn collect_identity_declarations(&mut self, items: &[Item], module: crate::hir::ModuleId) {
+        for (item_index, it) in items.iter().enumerate() {
             match it {
                 Item::Fn(f) => {
                     self.set_gen_bounds(&f.generics);
                     let mut sig = self.sig_of(&f.params, f.ret.as_ref());
+                    sig.generic_bounds = self.gen_bounds.clone();
                     self.gen_bounds.clear();
                     sig.generics = f.generics.clone();
-                    self.qual_fns.insert(qual(&f.name), sig);
+                    if let Some(&definition) = self.hir.module(module).scope.values.get(&f.name) {
+                        self.fn_sigs.insert(definition, sig);
+                    }
+                }
+                Item::Struct(structure) => {
+                    self.set_gen_bounds(&structure.generics);
+                    let fields = structure
+                        .fields
+                        .iter()
+                        .map(|field| (field.name.clone(), self.ty_of(&field.ty), field.name_span))
+                        .collect();
+                    self.gen_bounds.clear();
+                    if let Some(&definition) =
+                        self.hir.module(module).scope.types.get(&structure.name)
+                    {
+                        self.struct_defs.insert(definition, fields);
+                    }
+                }
+                Item::Enum(enumeration) => {
+                    self.set_gen_bounds(&enumeration.generics);
+                    let owner = self
+                        .hir
+                        .module(module)
+                        .scope
+                        .types
+                        .get(&enumeration.name)
+                        .copied();
+                    if let Some(owner) = owner {
+                        for variant in &enumeration.variants {
+                            let Some(&definition) =
+                                self.hir.enum_variants.get(&(owner, variant.name.clone()))
+                            else {
+                                continue;
+                            };
+                            let payload = match &variant.kind {
+                                VariantKind::Unit => continue,
+                                VariantKind::Tuple(types) => VariantPayload::Tuple(
+                                    types.iter().map(|ty| self.ty_of(ty)).collect(),
+                                ),
+                                VariantKind::Struct(fields) => VariantPayload::Struct(
+                                    fields
+                                        .iter()
+                                        .map(|field| (field.name.clone(), self.ty_of(&field.ty)))
+                                        .collect(),
+                                ),
+                            };
+                            self.variant_payloads.insert(definition, payload);
+                        }
+                    }
+                    self.gen_bounds.clear();
                 }
                 Item::Extern(b) => {
                     for ef in &b.fns {
@@ -1466,25 +950,83 @@ impl Tc {
                             continue;
                         }
                         let sig = self.sig_of(&ef.params, ef.ret.as_ref());
-                        self.qual_fns.insert(qual(&ef.name), sig);
+                        if let Some(&definition) =
+                            self.hir.module(module).scope.values.get(&ef.name)
+                        {
+                            self.fn_sigs.insert(definition, sig);
+                        }
+                    }
+                }
+                Item::Impl(implementation) => {
+                    if let Some(owner) = self
+                        .hir
+                        .impl_targets
+                        .get(&(module, item_index))
+                        .map(|target| target.owner)
+                    {
+                        for method in &implementation.methods {
+                            let Some(&definition) =
+                                self.hir.associated_items.get(&(owner, method.name.clone()))
+                            else {
+                                continue;
+                            };
+                            let generics =
+                                merge_generics(&implementation.generics, &method.generics);
+                            self.set_gen_bounds(&generics);
+                            let mut signature = self.sig_of(&method.params, method.ret.as_ref());
+                            signature.generic_bounds = self.gen_bounds.clone();
+                            self.gen_bounds.clear();
+                            signature.generics = generics;
+                            self.fn_sigs.insert(definition, signature.clone());
+                            self.method_sigs.insert(definition, signature);
+                        }
+                    }
+                }
+                Item::Trait(trait_decl) => {
+                    let Some(&owner) = self.hir.module(module).scope.types.get(&trait_decl.name)
+                    else {
+                        continue;
+                    };
+                    for method in &trait_decl.methods {
+                        let Some(&definition) =
+                            self.hir.trait_items.get(&(owner, method.name.clone()))
+                        else {
+                            continue;
+                        };
+                        let generics = merge_generics(&trait_decl.generics, &method.generics);
+                        self.set_gen_bounds(&generics);
+                        let mut signature = self.sig_of(&method.params, method.ret.as_ref());
+                        signature.generic_bounds = self.gen_bounds.clone();
+                        self.gen_bounds.clear();
+                        signature.generics = method.generics.clone();
+                        self.fn_sigs.insert(definition, signature.clone());
+                        self.method_sigs.insert(definition, signature);
                     }
                 }
                 Item::Mod(m) => {
-                    let mut p = prefix.to_vec();
-                    p.push(m.name.clone());
-                    self.collect_qual_fns(&m.items, &p);
+                    if let Some(&child) = self.hir.module(module).scope.modules.get(&m.name) {
+                        self.collect_identity_declarations(&m.items, child);
+                    }
                 }
-                _ => {}
+                Item::Use(_) => {}
             }
         }
     }
 
-    /// Install `name -> bounds` for a set of generic parameters as the current
+    /// Install `GenericParamId -> bounds` for the current generic scope.
     /// generic scope (used by `ty_of` and bound-based method resolution).
     fn set_gen_bounds(&mut self, generics: &[GenericParam]) {
         self.gen_bounds = generics
             .iter()
-            .map(|g| (g.name.clone(), g.bounds.clone()))
+            .map(|g| {
+                (
+                    g.id,
+                    g.bounds
+                        .iter()
+                        .filter_map(|bound| self.hir.trait_ref_targets.get(&bound.id).copied())
+                        .collect(),
+                )
+            })
             .collect();
     }
 
@@ -1492,23 +1034,53 @@ impl Tc {
         match t {
             Type::Unit => Ty::Unit,
             Type::Ref { inner, .. } => self.ty_of(inner),
-            Type::Path { name, args } => {
+            Type::Function { params, ret } => Ty::Closure(
+                params.iter().map(|param| self.ty_of(param)).collect(),
+                Box::new(self.ty_of(ret)),
+            ),
+            Type::Tuple(items) => Ty::Tuple(items.iter().map(|item| self.ty_of(item)).collect()),
+            Type::Path { id, name, args } => {
                 let arg = |i: usize| args.get(i).map(|t| self.ty_of(t)).unwrap_or(Ty::Unknown);
-                match name.as_str() {
-                    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64"
-                    | "usize" => Ty::I64,
-                    "f32" | "f64" => Ty::F64,
-                    "bool" => Ty::Bool,
-                    "String" | "str" => Ty::Str,
-                    "Vec" => Ty::Vec(Box::new(arg(0))),
-                    "Option" => Ty::Option(Box::new(arg(0))),
-                    "Result" => Ty::Result(Box::new(arg(0)), Box::new(arg(1))),
-                    "HashMap" => Ty::Map(Box::new(arg(0)), Box::new(arg(1))),
-                    "Box" => arg(0), // transparent
-                    _ if self.gen_bounds.contains_key(name) => Ty::Generic(name.clone()),
-                    _ if self.structs.contains_key(name) => Ty::Named(name.clone()),
-                    _ if self.enums.contains(name) => Ty::Named(name.clone()),
-                    // Unknown external types.
+                match self.hir.type_targets.get(id).copied() {
+                    Some(crate::hir::TypeTarget::Primitive(crate::hir::PrimitiveType::I64)) => {
+                        Ty::I64
+                    }
+                    Some(crate::hir::TypeTarget::Primitive(crate::hir::PrimitiveType::F64)) => {
+                        Ty::F64
+                    }
+                    Some(crate::hir::TypeTarget::Primitive(crate::hir::PrimitiveType::Bool)) => {
+                        Ty::Bool
+                    }
+                    Some(crate::hir::TypeTarget::Primitive(crate::hir::PrimitiveType::Box)) => {
+                        arg(0)
+                    }
+                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeString)) => {
+                        Ty::Str
+                    }
+                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeVec)) => {
+                        Ty::Vec(Box::new(arg(0)))
+                    }
+                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeOption)) => {
+                        Ty::Option(Box::new(arg(0)))
+                    }
+                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeResult)) => {
+                        Ty::Result(Box::new(arg(0)), Box::new(arg(1)))
+                    }
+                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeHashMap)) => {
+                        Ty::Map(Box::new(arg(0)), Box::new(arg(1)))
+                    }
+                    Some(crate::hir::TypeTarget::Item(definition))
+                        if matches!(
+                            self.hir.definition(definition).kind,
+                            crate::hir::DefKind::Struct | crate::hir::DefKind::Enum
+                        ) =>
+                    {
+                        self.named_type(definition)
+                    }
+                    Some(crate::hir::TypeTarget::Generic(id)) => Ty::Generic {
+                        id,
+                        name: name.clone(),
+                    },
                     _ => Ty::Unknown,
                 }
             }
@@ -1537,22 +1109,6 @@ impl Tc {
         }
     }
 
-    /// Record a local binding's inferred type for LSP hover, keyed by its
-    /// name span. `prefix` is the leading text (e.g. `let mut i`, `n`); the
-    /// type name is appended as `: <ty>`. Bindings with an unknown type or an
-    /// empty span (parser could not locate the name) are skipped so hover
-    /// degrades cleanly to the plain `local <name>`.
-    fn record_binding(&mut self, span: &SourceRange, ty: &Ty, prefix: &str) {
-        if matches!(ty, Ty::Unknown) || span.len == 0 {
-            return;
-        }
-        self.bindings.push(BindingType {
-            file: span.file,
-            name_start: span.start,
-            name_len: span.len,
-            display: format!("{prefix}: {}", ty.name()),
-        });
-    }
     fn lookup(&self, name: &str) -> Option<Ty> {
         for s in self.scopes.iter().rev() {
             if let Some(t) = s.get(name) {
@@ -1563,12 +1119,16 @@ impl Tc {
     }
 
     fn binding_scope(&self, name: &str) -> Option<(usize, bool)> {
-        self.scopes.iter().enumerate().rev().find_map(|(index, scope)| {
-            scope.contains_key(name).then(|| {
-                let mutable = self.mutable_scopes[index].contains(name);
-                (index, mutable)
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, scope)| {
+                scope.contains_key(name).then(|| {
+                    let mutable = self.mutable_scopes[index].contains(name);
+                    (index, mutable)
+                })
             })
-        })
     }
 
     /// Best-effort, side-effect-free type of a simple argument expression:
@@ -1581,9 +1141,7 @@ impl Tc {
             ExprKind::Float(_) => Ty::F64,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Str(_) => Ty::Str,
-            ExprKind::Path(segs) if segs.len() == 1 => {
-                self.lookup(&segs[0]).unwrap_or(Ty::Unknown)
-            }
+            ExprKind::Path(segs) if segs.len() == 1 => self.lookup(&segs[0]).unwrap_or(Ty::Unknown),
             _ => Ty::Unknown,
         }
     }
@@ -1654,20 +1212,40 @@ impl Tc {
     }
 
     fn err(&mut self, sp: SourceRange, msg: String) {
-        self.errs
-            .push(Diag::new(sp.file, sp.start, sp.len, sp.line, msg));
+        self.errs.push(Diag::new(
+            rua_core::DiagnosticCode::TypeMismatch,
+            sp.file,
+            sp.start,
+            sp.len,
+            sp.line,
+            msg,
+        ));
     }
 
     // --- driver ------------------------------------------------------------
 
     fn run(&mut self, prog: &Program) {
-        for item in &prog.items {
+        self.check_items(&prog.items, self.hir.root);
+        self.block(&prog.chunk);
+    }
+
+    fn check_items(&mut self, items: &[Item], module: crate::hir::ModuleId) {
+        for (item_index, item) in items.iter().enumerate() {
             match item {
                 Item::Fn(f) => self.check_fn(&f.generics, &f.params, f.ret.as_ref(), &f.body, None),
                 Item::Impl(im) => {
-                    let self_ty = Ty::Named(im.type_name.clone());
+                    let self_ty = self
+                        .hir
+                        .impl_targets
+                        .get(&(module, item_index))
+                        .map(|target| self.named_type(target.owner))
+                        .unwrap_or(Ty::Unknown);
                     for m in &im.methods {
-                        let st = if m.has_self { Some(self_ty.clone()) } else { None };
+                        let st = if m.has_self {
+                            Some(self_ty.clone())
+                        } else {
+                            None
+                        };
                         let gens = merge_generics(&im.generics, &m.generics);
                         self.check_fn(&gens, &m.params, m.ret.as_ref(), &m.body, st);
                     }
@@ -1681,37 +1259,14 @@ impl Tc {
                         }
                     }
                 }
-                Item::Mod(m) => self.check_mod(m),
-                _ => {}
-            }
-        }
-    }
-
-    /// Check the bodies of a module's `fn`/`impl`/`trait` items (recursing into
-    /// nested modules). Free-fn signatures inside modules aren't registered
-    /// globally, so cross-module `::` calls resolve to `Unknown` (conservatively
-    /// unchecked, never a false positive); methods are keyed by simple type name.
-    fn check_mod(&mut self, m: &ModDecl) {
-        for it in &m.items {
-            match it {
-                Item::Fn(f) => self.check_fn(&f.generics, &f.params, f.ret.as_ref(), &f.body, None),
-                Item::Impl(im) => {
-                    let self_ty = Ty::Named(im.type_name.clone());
-                    for me in &im.methods {
-                        let st = if me.has_self { Some(self_ty.clone()) } else { None };
-                        let gens = merge_generics(&im.generics, &me.generics);
-                        self.check_fn(&gens, &me.params, me.ret.as_ref(), &me.body, st);
+                Item::Mod(child) => {
+                    if let Some(&child_module) =
+                        self.hir.module(module).scope.modules.get(&child.name)
+                    {
+                        self.check_items(&child.items, child_module);
+                        self.block(&child.chunk);
                     }
                 }
-                Item::Trait(t) => {
-                    for tm in &t.methods {
-                        if let Some(b) = &tm.default {
-                            let st = if tm.has_self { Some(Ty::Unknown) } else { None };
-                            self.check_fn(&t.generics, &tm.params, tm.ret.as_ref(), b, st);
-                        }
-                    }
-                }
-                Item::Mod(md) => self.check_mod(md),
                 _ => {}
             }
         }
@@ -1734,7 +1289,6 @@ impl Tc {
         }
         for p in params {
             let ty = self.ty_of(&p.ty);
-            self.record_binding(&p.name_span, &ty, &p.name);
             self.bind(&p.name, ty);
         }
         let ret_ty = ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit);
@@ -1745,19 +1299,19 @@ impl Tc {
         // Only check a concrete, non-unit declared return against a concrete tail.
         if let Some(tail) = &body.tail
             && ret_ty.is_concrete()
-                && ret_ty != Ty::Unit
-                && actual.is_concrete()
-                && !compatible(&ret_ty, &actual)
-            {
-                self.err(
-                    tail.span,
-                    format!(
-                        "expected return type `{}`, found `{}`",
-                        ret_ty.name(),
-                        actual.name()
-                    ),
-                );
-            }
+            && ret_ty != Ty::Unit
+            && actual.is_concrete()
+            && !compatible(&ret_ty, &actual)
+        {
+            self.err(
+                tail.span,
+                format!(
+                    "expected return type `{}`, found `{}`",
+                    ret_ty.name(),
+                    actual.name()
+                ),
+            );
+        }
         self.pop();
         self.gen_bounds.clear();
     }
@@ -1781,13 +1335,14 @@ impl Tc {
 
     fn stmt(&mut self, s: &Stmt, rest: &[Stmt], tail: Option<&Expr>) {
         match s {
-            Stmt::Let { name, name_span, mutable, ty, init } => {
-                let init_ty = if let ExprKind::Closure {
-                    params,
-                    ret,
-                    body,
-                } = &init.kind
-                {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                init,
+                ..
+            } => {
+                let init_ty = if let ExprKind::Closure { params, ret, body } = &init.kind {
                     let mut usage = ClosureUsage::default();
                     for statement in rest {
                         collect_closure_usage_stmt(name, statement, &mut usage);
@@ -1848,12 +1403,6 @@ impl Tc {
                 } else {
                     bind_ty
                 };
-                let prefix = if *mutable {
-                    format!("let mut {name}")
-                } else {
-                    format!("let {name}")
-                };
-                self.record_binding(name_span, &bind_ty, &prefix);
                 self.bind_mutability(name, bind_ty, *mutable);
             }
             Stmt::Expr(e) => {
@@ -1880,7 +1429,9 @@ impl Tc {
             Stmt::Loop { body } => {
                 self.block(body);
             }
-            Stmt::For { var, var_span, iter, body } => {
+            Stmt::For {
+                var, iter, body, ..
+            } => {
                 let iter_ty = self.infer(iter);
                 let elem = match iter_ty {
                     Ty::Iter(item, draft) => {
@@ -1888,6 +1439,7 @@ impl Tc {
                         self.finish_iter_plan(
                             &draft,
                             IterConsumerKind::For,
+                            iter.id,
                             iter.span,
                             &item,
                             &Ty::Unit,
@@ -1900,6 +1452,7 @@ impl Tc {
                         self.finish_iter_plan(
                             &draft,
                             IterConsumerKind::For,
+                            iter.id,
                             iter.span,
                             &item,
                             &Ty::Unit,
@@ -1907,16 +1460,12 @@ impl Tc {
                         item
                     }
                     ty if ty.is_concrete() => {
-                        self.err(
-                            iter.span,
-                            format!("type `{}` is not iterable", ty.name()),
-                        );
+                        self.err(iter.span, format!("type `{}` is not iterable", ty.name()));
                         Ty::Unknown
                     }
                     _ => Ty::Unknown,
                 };
                 self.push();
-                self.record_binding(var_span, &elem, &format!("for {var}"));
                 self.bind(var, elem);
                 self.block(body);
                 self.pop();
@@ -1934,7 +1483,10 @@ impl Tc {
 
     fn expect_bool(&mut self, ty: &Ty, sp: SourceRange, what: &str) {
         if ty.is_concrete() && *ty != Ty::Bool {
-            self.err(sp, format!("{} must be `bool`, found `{}`", what, ty.name()));
+            self.err(
+                sp,
+                format!("{} must be `bool`, found `{}`", what, ty.name()),
+            );
         }
     }
 
@@ -1988,13 +1540,7 @@ impl Tc {
                     .ty
                     .as_ref()
                     .map(|ty| self.ty_of(ty))
-                    .unwrap_or_else(|| {
-                        context
-                            .expected
-                            .get(index)
-                            .cloned()
-                            .unwrap_or(Ty::Unknown)
-                    })
+                    .unwrap_or_else(|| context.expected.get(index).cloned().unwrap_or(Ty::Unknown))
             })
             .collect();
 
@@ -2019,11 +1565,6 @@ impl Tc {
         self.closure_returns.push(Vec::new());
         self.push();
         for (param, ty) in params.iter().zip(&param_tys) {
-            self.record_binding(
-                &param.name_span,
-                ty,
-                &format!("closure parameter {}", param.name),
-            );
             self.bind(&param.name, ty.clone());
         }
         let body_ty = match body {
@@ -2085,16 +1626,13 @@ impl Tc {
         &mut self,
         draft: &IterDraft,
         consumer: IterConsumerKind,
+        consumer_expression: ExprId,
         consumer_range: SourceRange,
         item: &Ty,
         output: &Ty,
     ) {
         self.iter_plans.insert(
-            (
-                consumer_range.file,
-                consumer_range.start,
-                consumer_range.len,
-            ),
+            consumer_expression,
             IterPlan {
                 source: draft.source.clone(),
                 adapters: draft.adapters.clone(),
@@ -2171,8 +1709,10 @@ impl Tc {
         type_args: &[Type],
         arg_tys: &[Ty],
         args: &[Expr],
-        span: SourceRange,
+        call: &Expr,
     ) -> Option<Ty> {
+        let expression = call.id;
+        let span = call.span;
         if let Ty::Vec(item) = recv
             && matches!(method, "iter" | "into_iter")
         {
@@ -2183,7 +1723,10 @@ impl Tc {
                 );
             }
             if !args.is_empty() {
-                self.err(span, format!("iterator source `{method}` expects no arguments"));
+                self.err(
+                    span,
+                    format!("iterator source `{method}` expects no arguments"),
+                );
             }
             let kind = if method == "iter" {
                 IterSourceKind::VecIter
@@ -2197,15 +1740,17 @@ impl Tc {
         }
 
         // Option<T>::map(fn) -> Option<U>
-        if method == "map" && args.len() == 1
-            && let Ty::Option(inner) = recv {
-                let _param_ty = (**inner).clone();
-                let ret_ty = match &arg_tys[0] {
-                    Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
-                    _ => Ty::Unknown,
-                };
-                return Some(Ty::Option(Box::new(ret_ty)));
-            }
+        if method == "map"
+            && args.len() == 1
+            && let Ty::Option(inner) = recv
+        {
+            let _param_ty = (**inner).clone();
+            let ret_ty = match &arg_tys[0] {
+                Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
+                _ => Ty::Unknown,
+            };
+            return Some(Ty::Option(Box::new(ret_ty)));
+        }
 
         let Ty::Iter(item, draft) = recv else {
             if matches!(
@@ -2225,7 +1770,7 @@ impl Tc {
                     | "all"
                     | "find"
             ) && recv.is_concrete()
-                && !matches!(recv, Ty::Named(_))
+                && !matches!(recv, Ty::Named { .. })
             {
                 self.err(span, format!("type `{}` is not iterable", recv.name()));
                 return Some(Ty::Unknown);
@@ -2261,7 +1806,10 @@ impl Tc {
         match method {
             "map" if args.len() == 1 => {
                 let output = closure_ret(0).unwrap_or_else(|| {
-                    self.err(args[0].span, "iterator map argument must be a closure".to_string());
+                    self.err(
+                        args[0].span,
+                        "iterator map argument must be a closure".to_string(),
+                    );
                     Ty::Unknown
                 });
                 if let Some(arity) = closure_arity(0)
@@ -2333,16 +1881,13 @@ impl Tc {
                 if count.is_concrete() && *count != Ty::I64 {
                     self.err(
                         args[0].span,
-                        format!("iterator {method} count must be `i64`, found `{}`", count.name()),
+                        format!(
+                            "iterator {method} count must be `i64`, found `{}`",
+                            count.name()
+                        ),
                     );
                 }
-                if matches!(
-                    args[0].kind,
-                    ExprKind::Unary {
-                        op: UnOp::Neg,
-                        ..
-                    }
-                ) {
+                if matches!(args[0].kind, ExprKind::Unary { op: UnOp::Neg, .. }) {
                     self.err(
                         args[0].span,
                         format!("iterator {method} count must be non-negative"),
@@ -2411,6 +1956,7 @@ impl Tc {
                 self.finish_iter_plan(
                     draft,
                     IterConsumerKind::CollectVec,
+                    expression,
                     span,
                     item,
                     &output,
@@ -2444,6 +1990,7 @@ impl Tc {
                 self.finish_iter_plan(
                     draft,
                     IterConsumerKind::Fold,
+                    expression,
                     span,
                     item,
                     &accumulator,
@@ -2454,6 +2001,7 @@ impl Tc {
                 self.finish_iter_plan(
                     draft,
                     IterConsumerKind::Count,
+                    expression,
                     span,
                     item,
                     &Ty::I64,
@@ -2475,7 +2023,7 @@ impl Tc {
                     "all" => (IterConsumerKind::All, Ty::Bool),
                     _ => (IterConsumerKind::Find, Ty::Option(item.clone())),
                 };
-                self.finish_iter_plan(draft, consumer, span, item, &output);
+                self.finish_iter_plan(draft, consumer, expression, span, item, &output);
                 Some(output)
             }
             "collect" | "fold" | "count" | "any" | "all" | "find" => {
@@ -2512,31 +2060,42 @@ impl Tc {
                 ty
             }
             ExprKind::Path(segs) => {
-                if segs.len() == 1 {
-                    self.lookup(&segs[0]).unwrap_or(Ty::Unknown)
-                } else {
-                    // `Enum::Variant` value. Return the parameterized enum
-                    // type so that generic inference works.
-                    let en = &segs[segs.len() - 2];
-                    if self.enums.contains(en) {
-                        match en.as_str() {
-                            "Option" => Ty::Option(Box::new(Ty::Unknown)),
-                            "Result" => Ty::Result(
-                                Box::new(Ty::Unknown),
-                                Box::new(Ty::Unknown),
-                            ),
-                            _ => Ty::Named(en.clone()),
+                let target = self.resolved_target(e);
+                if matches!(target, Some(crate::hir::ResolvedTarget::Local(_))) {
+                    return self.lookup(&segs[0]).unwrap_or(Ty::Unknown);
+                }
+                if let Some(target) = target {
+                    if let Some((owner, _)) = self.resolved_enum_variant_ids(target) {
+                        return self.named_type(owner);
+                    }
+                    if let Some(definition) = self.definition_for_target(target)
+                        && matches!(
+                            definition.kind,
+                            crate::hir::DefKind::Struct | crate::hir::DefKind::Enum
+                        )
+                    {
+                        return self.named_type(definition.id);
+                    }
+                    match target {
+                        crate::hir::ResolvedTarget::Builtin(
+                            rua_core::BuiltinId::VariantOptionNone,
+                        ) => return Ty::Option(Box::new(Ty::Unknown)),
+                        crate::hir::ResolvedTarget::Builtin(
+                            rua_core::BuiltinId::VariantResultOk
+                            | rua_core::BuiltinId::VariantResultErr,
+                        ) => {
+                            return Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown));
                         }
-                    } else {
-                        Ty::Unknown
+                        _ => {}
                     }
                 }
+                Ty::Unknown
             }
             ExprKind::Unary { op, expr } => {
                 let t = self.infer(expr);
                 match op {
                     UnOp::Neg => {
-                        if t.is_concrete() && !t.is_numeric() && !matches!(t, Ty::Named(_)) {
+                        if t.is_concrete() && !t.is_numeric() && !matches!(t, Ty::Named { .. }) {
                             self.err(sp, format!("cannot negate `{}`", t.name()));
                         }
                         t
@@ -2554,14 +2113,14 @@ impl Tc {
                 // truncating integer helpers (`rt.idiv`/`rt.irem`).
                 if matches!(l, Ty::I64) && matches!(r, Ty::I64) {
                     if *op == BinOp::Div {
-                        self.int_divs.insert((e.span.start, e.span.len));
+                        self.int_divs.insert(e.id);
                     } else if *op == BinOp::Rem {
-                        self.int_rems.insert((e.span.start, e.span.len));
+                        self.int_rems.insert(e.id);
                     }
                 }
                 // Record `String + String` so codegen emits Lua concatenation.
                 if *op == BinOp::Add && matches!(l, Ty::Str) && matches!(r, Ty::Str) {
-                    self.str_concats.insert((e.span.start, e.span.len));
+                    self.str_concats.insert(e.id);
                 }
                 self.infer_binary(*op, &l, &r, sp)
             }
@@ -2571,103 +2130,84 @@ impl Tc {
                 method,
                 type_args,
                 args,
-                method_span,
+                ..
             } => {
                 let rt = self.infer(recv);
-                self.record_receiver(recv.span, &rt); // C1
                 // Track Option::map calls for codegen inlining.
                 if method == "map" && matches!(rt, Ty::Option(_)) {
-                    self.option_maps.insert((sp.start, sp.len));
+                    self.option_maps.insert(e.id);
                 }
                 let arg_tys = self.infer_method_args(&rt, method, args);
                 for (arg, ty) in args.iter().zip(&arg_tys) {
                     self.reject_iter_escape(ty, arg.span);
                 }
-                // Only check calls whose receiver is a known user type that
-                // actually declares the method; everything else is Unknown so
-                // Vec/HashMap/String/extern method calls are never flagged.
-                if let Ty::Named(tname) = &rt
-                    && let Some(sig) = self.methods.get(tname).and_then(|m| m.get(method)) {
-                        let params = sig.params.clone();
-                        let ret = sig.ret.clone();
-                        let generics = sig.generics.clone();
-                        // Record the member hit (definition span + detail) for the LSP.
-                        let mdef = self
-                            .method_defs
-                            .get(tname)
-                            .and_then(|m| m.get(method))
-                            .cloned();
-                        if let Some((dsp, detail)) = mdef {
-                            self.members.push(MemberTarget {
-                                member_file: method_span.file,
-                                member_start: method_span.start,
-                                member_len: method_span.len,
-                                target_file: dsp.file,
-                                target_start: dsp.start,
-                                target_len: dsp.len,
-                                detail,
-                                kind: MemberKind::Method,
-                            });
+                if let Ty::Named {
+                    def: owner,
+                    name: type_name,
+                } = &rt
+                    && let Some(&definition) =
+                        self.hir.associated_items.get(&(*owner, method.clone()))
+                    && let Some(signature) = self.method_sigs.get(&definition)
+                {
+                    let params = signature.params.clone();
+                    let ret = signature.ret.clone();
+                    let generics = signature.generics.clone();
+                    let generic_bounds = signature.generic_bounds.clone();
+                    self.check_method_call(type_name, method, &params, &arg_tys, args, sp);
+                    if !generics.is_empty() {
+                        let mut substitution = HashMap::new();
+                        for (parameter, argument) in params.iter().zip(arg_tys.iter()) {
+                            unify_generic(parameter, argument, &mut substitution);
                         }
-                        self.check_method_call(tname, method, &params, &arg_tys, args, sp);
-                        if !generics.is_empty() {
-                            // Infer the method's type arguments from the call's
-                            // arguments, verify their bounds, and substitute them
-                            // into the return type.
-                            let mut subst: HashMap<String, Ty> = HashMap::new();
-                            for (p, a) in params.iter().zip(arg_tys.iter()) {
-                                unify_generic(p, a, &mut subst);
-                            }
-                            let owner = format!("{}::{}", tname, method);
-                            self.check_bound_satisfaction(&owner, &generics, &subst, sp);
-                            return subst_ty(&ret, &subst);
-                        }
-                        return ret;
+                        let display = format!("{}::{}", type_name, method);
+                        self.check_bound_satisfaction(
+                            &display,
+                            &generics,
+                            &generic_bounds,
+                            &substitution,
+                            sp,
+                        );
+                        return subst_ty(&ret, &substitution);
                     }
+                    return ret;
+                }
                 // Receiver typed as a generic parameter: resolve the method via
                 // its trait bounds. If some bound trait declares the method, use
                 // that signature; otherwise stay silent (Unknown).
-                if let Ty::Generic(gname) = &rt
-                    && let Some((tname, params, ret, generics)) =
-                        self.resolve_generic_method(gname, method)
-                    {
-                        self.check_method_call(&tname, method, &params, &arg_tys, args, sp);
-                        if !generics.is_empty() {
-                            // Method-level generics: infer them from the call's
-                            // arguments, verify their bounds, and substitute into
-                            // the return type.
-                            let mut subst: HashMap<String, Ty> = HashMap::new();
-                            for (p, a) in params.iter().zip(arg_tys.iter()) {
-                                unify_generic(p, a, &mut subst);
-                            }
-                            let owner = format!("{}::{}", tname, method);
-                            self.check_bound_satisfaction(&owner, &generics, &subst, sp);
-                            return subst_ty(&ret, &subst);
+                if let Ty::Generic { id, .. } = &rt
+                    && let Some((tname, signature)) = self.resolve_generic_method(*id, method)
+                {
+                    self.check_method_call(&tname, method, &signature.params, &arg_tys, args, sp);
+                    if !signature.generics.is_empty() {
+                        // Method-level generics: infer them from the call's
+                        // arguments, verify their bounds, and substitute into
+                        // the return type.
+                        let mut subst: HashMap<GenericParamId, Ty> = HashMap::new();
+                        for (p, a) in signature.params.iter().zip(arg_tys.iter()) {
+                            unify_generic(p, a, &mut subst);
                         }
-                        return ret;
+                        let owner = format!("{}::{}", tname, method);
+                        self.check_bound_satisfaction(
+                            &owner,
+                            &signature.generics,
+                            &signature.generic_bounds,
+                            &subst,
+                            sp,
+                        );
+                        return subst_ty(&signature.ret, &subst);
                     }
+                    return signature.ret;
+                }
                 // Std `String` methods: record the call so codegen routes it
                 // through `rt.str`, and yield the method's return type.
                 if matches!(rt, Ty::Str)
-                    && let Some(ret) = str_method_ret(method) {
-                        self.str_methods.insert((sp.start, sp.len));
-                        // Record a member hit for LSP hover (no real def site).
-                        if let Some(detail) = str_method_detail(method) {
-                            self.members.push(MemberTarget {
-                                member_file: method_span.file,
-                                member_start: method_span.start,
-                                member_len: method_span.len,
-                                target_file: 0,
-                                target_start: 0,
-                                target_len: 0, // sentinel: no jump target
-                                detail,
-                                kind: MemberKind::Method,
-                            });
-                        }
-                        return ret;
-                    }
+                    && let Some(ret) = str_method_ret(method)
+                {
+                    self.str_methods.insert(e.id);
+                    return ret;
+                }
                 if let Some(ret) =
-                    self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, sp)
+                    self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, e)
                 {
                     return ret;
                 }
@@ -2676,62 +2216,29 @@ impl Tc {
                 // parameters, then infer the return type. Unmodeled methods stay
                 // silently `Unknown` and are never flagged.
                 self.check_builtin_method_call(&rt, method, &arg_tys, args);
-                let ret = builtin_method_ret(&rt, method);
-                // Record a member hit for LSP hover when this is a recognized
-                // builtin (Vec/HashMap method with a real return type). Sentinel
-                // target spans (0, 0) signal "no jump target" to the LSP layer.
-                if ret != Ty::Unknown
-                    && let Some(detail) = builtin_method_detail(&rt, method) {
-                        self.members.push(MemberTarget {
-                            member_file: method_span.file,
-                            member_start: method_span.start,
-                            member_len: method_span.len,
-                            target_file: 0,
-                            target_start: 0,
-                            target_len: 0, // sentinel: no jump target
-                            detail,
-                            kind: MemberKind::Method,
-                        });
-                    }
-                ret
+                builtin_method_ret(&rt, method)
             }
-            ExprKind::Field {
-                base,
-                name,
-                name_span,
-            } => {
+            ExprKind::Field { base, name, .. } => {
                 let bt = self.infer(base);
-                self.record_receiver(base.span, &bt); // C1
-                if let Ty::Named(sname) = &bt {
+                if let Ty::Named {
+                    def: definition,
+                    name: sname,
+                } = &bt
+                {
                     // Pull the field's type + definition span out from under the
                     // immutable borrow so we can record a member hit afterwards.
-                    let field = self.structs.get(sname).map(|fields| {
+                    let fields = self.struct_defs.get(definition);
+                    let field = fields.map(|fields| {
                         fields
                             .iter()
-                            .find(|(f, _, _)| f == name)
-                            .map(|(_, ft, fsp)| (ft.clone(), *fsp))
+                            .find(|(field, _, _)| field == name)
+                            .map(|(_, ty, _)| ty.clone())
                     });
                     match field {
-                        // Struct known, field found: record the member and yield its type.
-                        Some(Some((ft, fsp))) => {
-                            self.members.push(MemberTarget {
-                                member_file: name_span.file,
-                                member_start: name_span.start,
-                                member_len: name_span.len,
-                                target_file: fsp.file,
-                                target_start: fsp.start,
-                                target_len: fsp.len,
-                                detail: format!("{}: {}", name, ft.name()),
-                                kind: MemberKind::Field,
-                            });
-                            ft
-                        }
+                        Some(Some(field_type)) => field_type,
                         // Struct known, field absent: report the error.
                         Some(None) => {
-                            self.err(
-                                sp,
-                                format!("struct `{}` has no field `{}`", sname, name),
-                            );
+                            self.err(sp, format!("struct `{}` has no field `{}`", sname, name));
                             Ty::Unknown
                         }
                         // Named enum or not-yet-known: don't claim a field error.
@@ -2760,7 +2267,10 @@ impl Tc {
                     if ty.is_concrete() && ty != Ty::I64 {
                         self.err(
                             bound.span,
-                            format!("range bound must be integer-compatible, found `{}`", ty.name()),
+                            format!(
+                                "range bound must be integer-compatible, found `{}`",
+                                ty.name()
+                            ),
                         );
                     }
                 }
@@ -2774,19 +2284,23 @@ impl Tc {
                     Box::new(self.iter_source(kind, e.span, &Ty::I64)),
                 )
             }
-            ExprKind::MacroCall { name, args } => {
+            ExprKind::MacroCall { args, .. } => {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
                 for (arg, ty) in args.iter().zip(&arg_tys) {
                     self.reject_iter_escape(ty, arg.span);
                 }
-                match name.as_str() {
-                    "format" => Ty::Str,
-                    "println" | "print" | "panic" => Ty::Unit,
-                    "vec" => {
+                match self.resolved_target(e) {
+                    Some(crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroFormat)) => {
+                        Ty::Str
+                    }
+                    Some(crate::hir::ResolvedTarget::Builtin(
+                        rua_core::BuiltinId::MacroPrintln
+                        | rua_core::BuiltinId::MacroPrint
+                        | rua_core::BuiltinId::MacroPanic,
+                    )) => Ty::Unit,
+                    Some(crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroVec)) => {
                         // Element type is the join of the literal's elements.
-                        let elem = arg_tys
-                            .iter()
-                            .fold(Ty::Unknown, |acc, t| join(&acc, t));
+                        let elem = arg_tys.iter().fold(Ty::Unknown, |acc, t| join(&acc, t));
                         Ty::Vec(Box::new(elem))
                     }
                     _ => Ty::Unknown,
@@ -2797,12 +2311,18 @@ impl Tc {
                     let ty = self.infer(field);
                     self.reject_iter_escape(&ty, field.span);
                 }
-                let name = path.last().cloned().unwrap_or_default();
-                if self.structs.contains_key(&name) {
-                    Ty::Named(name)
-                } else if path.len() >= 2 && self.enums.contains(&path[path.len() - 2]) {
-                    Ty::Named(path[path.len() - 2].clone())
+                let target = self.resolved_target(e);
+                if let Some(target) = target
+                    && let Some((owner, _)) = self.resolved_enum_variant_ids(target)
+                {
+                    self.named_type(owner)
+                } else if let Some(definition) =
+                    target.and_then(|target| self.definition_for_target(target))
+                    && definition.kind == crate::hir::DefKind::Struct
+                {
+                    self.named_type(definition.id)
                 } else {
+                    let _ = path;
                     Ty::Unknown
                 }
             }
@@ -2810,7 +2330,11 @@ impl Tc {
                 // `e?` unwraps a Result<T,_> or Option<T> to T.
                 let inner = self.infer(expr);
                 match &inner {
-                    Ty::Result(t, _) | Ty::Option(t) => t.as_ref().clone(),
+                    Ty::Result(t, _) => {
+                        self.result_tries.insert(e.id);
+                        t.as_ref().clone()
+                    }
+                    Ty::Option(t) => t.as_ref().clone(),
                     ty => {
                         self.err(
                             expr.span,
@@ -2925,18 +2449,49 @@ impl Tc {
                 if op == Add && matches!(l, Ty::Str) && matches!(r, Ty::Str) {
                     return Ty::Str;
                 }
-                // Named types may implement operator traits (Add/Mul/...), so we
-                // only flag operands that can never be arithmetic: bool / unit.
-                for t in [l, r] {
-                    if matches!(t, Ty::Bool | Ty::Unit) {
+                if let Ty::Named { def: owner, .. } = l {
+                    let (trait_id, method) = arithmetic_trait(op);
+                    let target = crate::hir::TraitTarget::Builtin(trait_id);
+                    if !self
+                        .hir
+                        .type_traits
+                        .get(owner)
+                        .is_some_and(|traits| traits.contains(&target))
+                    {
                         self.err(
                             sp,
-                            format!("arithmetic operator applied to `{}`", t.name()),
+                            format!(
+                                "type `{}` does not implement operator trait `{}`",
+                                l.name(),
+                                trait_id.name()
+                            ),
                         );
+                        return Ty::Unknown;
+                    }
+                    return self
+                        .hir
+                        .associated_items
+                        .get(&(*owner, method.to_string()))
+                        .and_then(|definition| self.method_sigs.get(definition))
+                        .map(|signature| signature.ret.clone())
+                        .unwrap_or(Ty::Unknown);
+                }
+                // Non-overloaded operands must be arithmetic primitives.
+                for t in [l, r] {
+                    if matches!(t, Ty::Bool | Ty::Unit) {
+                        self.err(sp, format!("arithmetic operator applied to `{}`", t.name()));
                     }
                 }
-                if matches!(l, Ty::Named(_)) || matches!(r, Ty::Named(_)) {
-                    Ty::Unknown // result of an overloaded operator: unknown
+                if matches!(r, Ty::Named { .. }) {
+                    self.err(
+                        sp,
+                        format!(
+                            "cannot apply arithmetic operator to `{}` and `{}`",
+                            l.name(),
+                            r.name()
+                        ),
+                    );
+                    Ty::Unknown
                 } else if *l == Ty::F64 || *r == Ty::F64 {
                     Ty::F64
                 } else if l.is_numeric() && r.is_numeric() {
@@ -2945,7 +2500,9 @@ impl Tc {
                     // Catch mixed-type operands (e.g. int + string, float + string).
                     // Bool/Unit are already reported above; Named may be overloaded.
                     let is_compat = |t: &Ty| {
-                        matches!(t, Ty::Unknown | Ty::Named(_)) || t.is_numeric() || *t == Ty::Str
+                        matches!(t, Ty::Unknown | Ty::Named { .. })
+                            || t.is_numeric()
+                            || *t == Ty::Str
                     };
                     let lhs_str = matches!(l, Ty::Str);
                     let rhs_str = matches!(r, Ty::Str);
@@ -2957,9 +2514,7 @@ impl Tc {
                     } else if !is_compat(l) || !is_compat(r) {
                         // Already reported above for Bool/Unit, but catch
                         // other mismatches like passing a struct to arithmetic.
-                        if !matches!(l, Ty::Bool | Ty::Unit)
-                            && !matches!(r, Ty::Bool | Ty::Unit)
-                        {
+                        if !matches!(l, Ty::Bool | Ty::Unit) && !matches!(r, Ty::Bool | Ty::Unit) {
                             self.err(
                                 sp,
                                 format!(
@@ -3007,27 +2562,26 @@ impl Tc {
             let callee_ty = self.infer(callee);
             return self.check_closure_call("closure", &callee_ty, &arg_tys, args, callee.span);
         };
-        // Option/Result constructors carry element types.
-        if segs.len() == 1 {
+        let target = self.resolved_target(callee);
+        if let Some(crate::hir::ResolvedTarget::Builtin(builtin)) = target {
             let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
-            match segs[0].as_str() {
-                "Some" => return Ty::Option(Box::new(a0())),
-                "None" => return Ty::Option(Box::new(Ty::Unknown)),
-                "Ok" => return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown)),
-                "Err" => return Ty::Result(Box::new(Ty::Unknown), Box::new(a0())),
-                _ => {}
-            }
-        }
-        // Qualified builtin constructors: Option::Some/None, Result::Ok/Err.
-        if segs.len() == 2 {
-            let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
-            match (segs[0].as_str(), segs[1].as_str()) {
-                ("Option", "Some") => return Ty::Option(Box::new(a0())),
-                ("Option", "None") => return Ty::Option(Box::new(Ty::Unknown)),
-                ("Result", "Ok") => return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown)),
-                ("Result", "Err") => return Ty::Result(Box::new(Ty::Unknown), Box::new(a0())),
-                ("Vec", "new") => return Ty::Vec(Box::new(Ty::Unknown)),
-                ("HashMap", "new") => {
+            match builtin {
+                rua_core::BuiltinId::VariantOptionSome => {
+                    return Ty::Option(Box::new(a0()));
+                }
+                rua_core::BuiltinId::VariantOptionNone => {
+                    return Ty::Option(Box::new(Ty::Unknown));
+                }
+                rua_core::BuiltinId::VariantResultOk => {
+                    return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown));
+                }
+                rua_core::BuiltinId::VariantResultErr => {
+                    return Ty::Result(Box::new(Ty::Unknown), Box::new(a0()));
+                }
+                rua_core::BuiltinId::AssociatedVecNew => {
+                    return Ty::Vec(Box::new(Ty::Unknown));
+                }
+                rua_core::BuiltinId::AssociatedHashMapNew => {
                     return Ty::Map(Box::new(Ty::Unknown), Box::new(Ty::Unknown));
                 }
                 _ => {}
@@ -3035,41 +2589,42 @@ impl Tc {
         }
         // A local closure shadows free functions and is callable through its
         // inferred signature.
-        if segs.len() == 1
+        if matches!(target, Some(crate::hir::ResolvedTarget::Local(_)))
+            && segs.len() == 1
             && let Some(closure @ Ty::Closure(_, _)) = self.lookup(&segs[0])
         {
-            return self.check_closure_call(
-                &segs[0],
-                &closure,
+            return self.check_closure_call(&segs[0], &closure, &arg_tys, args, callee.span);
+        }
+        if let Some(definition) = target.and_then(|target| self.definition_for_target(target))
+            && matches!(
+                definition.kind,
+                crate::hir::DefKind::Function
+                    | crate::hir::DefKind::Method { .. }
+                    | crate::hir::DefKind::TraitMethod { .. }
+                    | crate::hir::DefKind::ExternFunction { .. }
+            )
+            && let Some(sig) = self.fn_sigs.get(&definition.id)
+        {
+            let display = self.definition_key(definition);
+            let signature = sig.clone();
+            return self.check_free_call(
+                &display,
+                &signature.params,
+                &signature.ret,
+                &signature.generics,
+                &signature.generic_bounds,
                 &arg_tys,
                 args,
                 callee.span,
             );
         }
-        // User free function (unqualified): check arity + argument types.
-        if segs.len() == 1
-            && let Some(sig) = self.fns.get(&segs[0])
+        if let Some(target) = target
+            && let Some((owner, _)) = self.resolved_enum_variant_ids(target)
         {
-            let (params, ret, generics) =
-                (sig.params.clone(), sig.ret.clone(), sig.generics.clone());
-            return self.check_free_call(&segs[0], &params, &ret, &generics, &arg_tys, args, callee.span);
+            return self.named_type(owner);
         }
-        // Module-qualified free/extern function (incl. `.ruai` declarations):
-        // check against its fully-qualified declared signature.
-        if segs.len() >= 2 {
-            let key = segs.join("::");
-            if let Some(sig) = self.qual_fns.get(&key) {
-                let (params, ret, generics) =
-                    (sig.params.clone(), sig.ret.clone(), sig.generics.clone());
-                return self
-                    .check_free_call(&key, &params, &ret, &generics, &arg_tys, args, callee.span);
-            }
-        }
-        // Enum tuple-variant constructor -> the enum type.
-        if segs.len() >= 2 && self.enums.contains(&segs[segs.len() - 2]) {
-            return Ty::Named(segs[segs.len() - 2].clone());
-        }
-        // Some/Ok/Err, collection constructors, extern fns: unknown.
+        // Unresolved calls remain unknown; semantic checks never guess a target
+        // from the source spelling.
         Ty::Unknown
     }
 
@@ -3112,25 +2667,28 @@ impl Tc {
     }
 
     /// Resolve `method` on a value typed as the generic parameter `gname` by
-    /// scanning its trait bounds. Returns `(trait_name, params, ret, generics)`
+    /// scanning its trait bounds. Returns the trait name and method signature
     /// for the first bound that declares the method (a real conflict would be a
     /// genuine ambiguity we simply don't diagnose here). `generics` are the
     /// method's own (method-level) generic parameters.
     fn resolve_generic_method(
         &self,
-        gname: &str,
+        generic: GenericParamId,
         method: &str,
-    ) -> Option<(String, Vec<Ty>, Ty, Vec<GenericParam>)> {
-        let bounds = self.gen_bounds.get(gname)?;
-        for tr in bounds {
-            if let Some(sig) = self.trait_methods.get(tr).and_then(|m| m.get(method)) {
-                return Some((
-                    tr.clone(),
-                    sig.params.clone(),
-                    sig.ret.clone(),
-                    sig.generics.clone(),
-                ));
-            }
+    ) -> Option<(String, FnSig)> {
+        let bounds = self.gen_bounds.get(&generic)?;
+        for target in bounds {
+            let crate::hir::TraitTarget::Item(trait_id) = target else {
+                continue;
+            };
+            let Some(definition) = self.hir.trait_items.get(&(*trait_id, method.to_string()))
+            else {
+                continue;
+            };
+            let Some(sig) = self.method_sigs.get(definition) else {
+                continue;
+            };
+            return Some((self.hir.definition(*trait_id).name.clone(), sig.clone()));
         }
         None
     }
@@ -3145,6 +2703,7 @@ impl Tc {
         params: &[Ty],
         ret: &Ty,
         generics: &[GenericParam],
+        generic_bounds: &HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
         arg_tys: &[Ty],
         args: &[Expr],
         callee_sp: SourceRange,
@@ -3178,11 +2737,11 @@ impl Tc {
         // Generic instantiation: infer type arguments from the call's arguments,
         // verify each satisfies its trait bounds, substitute into the return type.
         if !generics.is_empty() {
-            let mut subst: HashMap<String, Ty> = HashMap::new();
+            let mut subst: HashMap<GenericParamId, Ty> = HashMap::new();
             for (p, a) in params.iter().zip(arg_tys.iter()) {
                 unify_generic(p, a, &mut subst);
             }
-            self.check_bound_satisfaction(dispname, generics, &subst, callee_sp);
+            self.check_bound_satisfaction(dispname, generics, generic_bounds, &subst, callee_sp);
             return subst_ty(ret, &subst);
         }
         ret.clone()
@@ -3196,27 +2755,34 @@ impl Tc {
         &mut self,
         fname: &str,
         generics: &[GenericParam],
-        subst: &HashMap<String, Ty>,
+        generic_bounds: &HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
+        subst: &HashMap<GenericParamId, Ty>,
         sp: SourceRange,
     ) {
         for g in generics {
-            let Some(Ty::Named(c)) = subst.get(&g.name) else {
+            let Some(Ty::Named {
+                def: concrete,
+                name: concrete_name,
+            }) = subst.get(&g.id)
+            else {
                 continue;
             };
-            if !self.structs.contains_key(c) && !self.enums.contains(c) {
-                continue;
-            }
-            for b in &g.bounds {
-                if !self.trait_methods.contains_key(b) {
-                    continue; // builtin / unknown trait: not verifiable
-                }
-                let implemented = self.impls.get(c).is_some_and(|s| s.contains(b));
+            for target in generic_bounds.get(&g.id).into_iter().flatten() {
+                let crate::hir::TraitTarget::Item(trait_id) = target else {
+                    continue;
+                };
+                let implemented = self
+                    .hir
+                    .type_traits
+                    .get(concrete)
+                    .is_some_and(|traits| traits.contains(target));
                 if !implemented {
+                    let trait_name = &self.hir.definition(*trait_id).name;
                     self.err(
                         sp,
                         format!(
                             "type `{}` does not implement trait `{}` (required by bound `{}: {}` of `{}`)",
-                            c, b, g.name, b, fname
+                            concrete_name, trait_name, g.name, trait_name, fname
                         ),
                     );
                 }
@@ -3325,12 +2891,11 @@ impl Tc {
     /// per-variant field types aren't tracked), which degrades hover cleanly.
     fn bind_pattern(&mut self, p: &Pattern, ty: &Ty) {
         match p {
-            Pattern::Binding(name, span) => {
-                self.record_binding(span, ty, name);
-                self.bind(name, ty.clone());
-            }
-            Pattern::TupleVariant { path, elems } => {
-                let payload = self.tuple_payload(path, ty);
+            Pattern::Binding(name, _) => self.bind(name, ty.clone()),
+            Pattern::TupleVariant {
+                id, path, elems, ..
+            } => {
+                let payload = self.tuple_payload(*id, path, ty);
                 for (i, e) in elems.iter().enumerate() {
                     let et = payload
                         .as_ref()
@@ -3339,8 +2904,10 @@ impl Tc {
                     self.bind_pattern(e, &et);
                 }
             }
-            Pattern::StructVariant { path, fields, .. } => {
-                let field_tys = self.struct_payload(path, ty);
+            Pattern::StructVariant {
+                id, path, fields, ..
+            } => {
+                let field_tys = self.struct_payload(*id, path, ty);
                 for (fname, fp) in fields {
                     let ft = field_tys
                         .as_ref()
@@ -3356,31 +2923,52 @@ impl Tc {
     /// Tuple-variant payload element types for pattern `path` against scrutinee
     /// `ty`: built-in `Some`/`Ok`/`Err` first, then user enum variants (when the
     /// scrutinee is typed `Ty::Named(enum)`). `None` → bind elements as Unknown.
-    fn tuple_payload(&self, path: &[String], ty: &Ty) -> Option<Vec<Ty>> {
-        if let Some(v) = builtin_payload(path, ty) {
-            return Some(v);
+    fn tuple_payload(&self, id: PatternId, _path: &[String], ty: &Ty) -> Option<Vec<Ty>> {
+        let target = self.resolved_pattern_variant(id);
+        if let Some(crate::hir::ResolvedTarget::Builtin(builtin)) = target {
+            return builtin_payload(builtin, ty);
         }
-        let variant = path.last()?;
-        if let Ty::Named(enum_name) = ty
-            && let Some(VariantPayload::Tuple(tys)) =
-                self.enum_variants.get(enum_name).and_then(|m| m.get(variant))
-            {
-                return Some(tys.clone());
-            }
+        if let Some((owner, variant)) =
+            target.and_then(|target| self.resolved_enum_variant_ids(target))
+            && let Ty::Named { def: scrutinee, .. } = ty
+            && *scrutinee == owner
+            && let Some(VariantPayload::Tuple(types)) = self.variant_payloads.get(&variant)
+        {
+            return Some(types.clone());
+        }
         None
     }
 
     /// Struct-variant field types (name → type) for pattern `path` against
     /// scrutinee `ty`, when it's a user enum variant. `None` → Unknown fields.
-    fn struct_payload(&self, path: &[String], ty: &Ty) -> Option<Vec<(String, Ty)>> {
-        let variant = path.last()?;
-        if let Ty::Named(enum_name) = ty
-            && let Some(VariantPayload::Struct(fields)) =
-                self.enum_variants.get(enum_name).and_then(|m| m.get(variant))
-            {
-                return Some(fields.clone());
-            }
+    fn struct_payload(
+        &self,
+        id: PatternId,
+        _path: &[String],
+        ty: &Ty,
+    ) -> Option<Vec<(String, Ty)>> {
+        let target = self.resolved_pattern_variant(id);
+        if let Some((owner, variant)) =
+            target.and_then(|target| self.resolved_enum_variant_ids(target))
+            && let Ty::Named { def: scrutinee, .. } = ty
+            && *scrutinee == owner
+            && let Some(VariantPayload::Struct(fields)) = self.variant_payloads.get(&variant)
+        {
+            return Some(fields.clone());
+        }
         None
+    }
+}
+
+fn arithmetic_trait(op: BinOp) -> (rua_core::BuiltinTraitId, &'static str) {
+    use rua_core::BuiltinTraitId;
+    match op {
+        BinOp::Add => (BuiltinTraitId::Add, "add"),
+        BinOp::Sub => (BuiltinTraitId::Sub, "sub"),
+        BinOp::Mul => (BuiltinTraitId::Mul, "mul"),
+        BinOp::Div => (BuiltinTraitId::Div, "div"),
+        BinOp::Rem => (BuiltinTraitId::Rem, "rem"),
+        _ => unreachable!("only arithmetic operators have arithmetic traits"),
     }
 }
 
@@ -3392,37 +2980,28 @@ mod tests {
     /// Run type-checking and return the internal tables for inspection.
     fn run_tc(src: &str) -> Tc {
         let program = parser::parse(src).unwrap();
-        let mut tc = Tc::new(&program);
+        let hir = crate::hir::resolve(&program);
+        let mut tc = Tc::new(&program, &hir);
         tc.run(&program);
         tc
     }
 
+    fn root_type(tc: &Tc, name: &str) -> crate::hir::DefId {
+        tc.hir.module(tc.hir.root).scope.types[name]
+    }
+
     #[test]
-    fn b0_struct_field_spans() {
-        let src = "struct Point { x: f64, y: f64 }";
-        let tc = run_tc(src);
-        let fields = tc.structs.get("Point").expect("Point should be registered");
+    fn struct_fields_are_keyed_by_type_identity() {
+        let tc = run_tc("struct Point { x: f64, y: i64 }");
+        let point = root_type(&tc, "Point");
+        let fields = &tc.struct_defs[&point];
         assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].0, "x");
-        assert!(fields[0].2.start > 0, "field 'x' should have a non-zero span start");
-        let x_src = &src[fields[0].2.start..fields[0].2.end()];
-        assert_eq!(x_src, "x");
-        assert_eq!(fields[1].0, "y");
-        let y_src = &src[fields[1].2.start..fields[1].2.end()];
-        assert_eq!(y_src, "y");
+        assert_eq!((&fields[0].0, &fields[0].1), (&"x".to_string(), &Ty::F64));
+        assert_eq!((&fields[1].0, &fields[1].1), (&"y".to_string(), &Ty::I64));
     }
 
     #[test]
-    fn b0_struct_field_span_positions() {
-        let src = "struct Data { name: String, age: i64 }";
-        let tc = run_tc(src);
-        let fields = tc.structs.get("Data").unwrap();
-        assert_eq!(&src[fields[0].2.start..fields[0].2.end()], "name");
-        assert_eq!(&src[fields[1].2.start..fields[1].2.end()], "age");
-    }
-
-    #[test]
-    fn b0_impl_method_defs() {
+    fn impl_methods_are_keyed_by_owner_identity() {
         let src = r#"
 struct Point { x: f64, y: f64 }
 impl Point {
@@ -3431,23 +3010,15 @@ impl Point {
 }
 "#;
         let tc = run_tc(src);
-        let mdefs = tc.method_defs
-            .get("Point")
-            .expect("Point should have method defs");
-
-        // Verify method "dist" has a definition span and detail.
-        let (sp, detail) = mdefs.get("dist").expect("dist should be registered");
-        assert_eq!(&src[sp.start..sp.end()], "dist");
-        assert_eq!(detail, "fn dist(&self) -> f64");
-
-        // Verify method "move_to" has correct detail.
-        let (sp2, detail2) = mdefs.get("move_to").expect("move_to should be registered");
-        assert_eq!(&src[sp2.start..sp2.end()], "move_to");
-        assert_eq!(detail2, "fn move_to(&self, nx: f64, ny: f64)");
+        let point = root_type(&tc, "Point");
+        let dist = tc.hir.associated_items[&(point, "dist".to_string())];
+        let move_to = tc.hir.associated_items[&(point, "move_to".to_string())];
+        assert_eq!(tc.method_sigs[&dist].ret, Ty::F64);
+        assert_eq!(tc.method_sigs[&move_to].params, vec![Ty::F64, Ty::F64]);
     }
 
     #[test]
-    fn b0_trait_method_defs() {
+    fn trait_methods_are_keyed_by_trait_identity() {
         let src = r#"
 trait Area {
     fn area(&self) -> f64;
@@ -3455,21 +3026,15 @@ trait Area {
 }
 "#;
         let tc = run_tc(src);
-        let tdefs = tc.trait_method_defs
-            .get("Area")
-            .expect("Area should have trait method defs");
-
-        let (sp, detail) = tdefs.get("area").expect("area should be registered");
-        assert_eq!(&src[sp.start..sp.end()], "area");
-        assert_eq!(detail, "fn area(&self) -> f64");
-
-        let (sp2, detail2) = tdefs.get("name").expect("name should be registered");
-        assert_eq!(&src[sp2.start..sp2.end()], "name");
-        assert_eq!(detail2, "fn name(&self) -> String");
+        let area_trait = root_type(&tc, "Area");
+        let area = tc.hir.trait_items[&(area_trait, "area".to_string())];
+        let name = tc.hir.trait_items[&(area_trait, "name".to_string())];
+        assert_eq!(tc.method_sigs[&area].ret, Ty::F64);
+        assert_eq!(tc.method_sigs[&name].ret, Ty::Str);
     }
 
     #[test]
-    fn b0_trait_impl_inherits_default_method_defs() {
+    fn inherited_default_method_preserves_trait_origin() {
         let src = r#"
 trait Shape {
     fn area(&self) -> f64;
@@ -3481,32 +3046,11 @@ impl Shape for Circle {
 }
 "#;
         let tc = run_tc(src);
-        let mdefs = tc.method_defs
-            .get("Circle")
-            .expect("Circle should have method defs");
-
-        // Explicit method: area
-        let (sp, detail) = mdefs.get("area").expect("area should be registered");
-        assert_eq!(&src[sp.start..sp.end()], "area");
-        assert_eq!(detail, "fn area(&self) -> f64");
-
-        // Inherited default: label — span should come from trait definition
-        let (sp2, detail2) = mdefs.get("label").expect("label should be inherited");
-        assert_eq!(&src[sp2.start..sp2.end()], "label");
-        assert_eq!(detail2, "fn label(&self) -> String");
-    }
-
-    #[test]
-    fn b0_method_detail_without_self() {
-        let src = r#"
-struct Factory {}
-impl Factory {
-    fn new(x: i64) -> Factory { Factory {} }
-}
-"#;
-        let tc = run_tc(src);
-        let mdefs = tc.method_defs.get("Factory").unwrap();
-        let (_, detail) = mdefs.get("new").unwrap();
-        assert_eq!(detail, "fn new(x: i64) -> Factory");
+        let shape = root_type(&tc, "Shape");
+        let circle = root_type(&tc, "Circle");
+        let trait_label = tc.hir.trait_items[&(shape, "label".to_string())];
+        let inherited = tc.hir.associated_items[&(circle, "label".to_string())];
+        assert_eq!(tc.hir.method_origins[&inherited], trait_label);
+        assert_eq!(tc.method_sigs[&inherited].ret, Ty::Str);
     }
 }

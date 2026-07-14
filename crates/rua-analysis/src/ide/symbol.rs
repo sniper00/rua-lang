@@ -89,7 +89,7 @@ fn document_symbols_in_module(
             definition.module_id() == module_id
                 && definition.file_id() == file_id
                 && definition.owner().is_none()
-                && definition.kind() != DefKind::Impl
+                && !matches!(definition.kind(), DefKind::Impl | DefKind::Chunk)
         })
         .map(|definition| {
             let children = definition
@@ -115,7 +115,7 @@ pub(crate) fn workspace_symbols(map: &DefMap, query: &str) -> Vec<WorkspaceSymbo
     let query = query.to_lowercase();
     map.definitions()
         .filter(|definition| definition.owner().is_none())
-        .filter(|definition| definition.kind() != DefKind::Impl)
+        .filter(|definition| !matches!(definition.kind(), DefKind::Impl | DefKind::Chunk))
         .filter(|definition| query.is_empty() || definition.name().to_lowercase().contains(&query))
         .map(|definition| workspace_symbol(map, definition))
         .collect()

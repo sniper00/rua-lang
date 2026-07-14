@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn goto_impl_trait_and_struct_indexed_correctly() {
@@ -20,17 +20,21 @@ fn goto_impl_trait_and_struct_indexed_correctly() {
 
     // The file should parse cleanly
     let parse = analysis.parse(file_id);
-    assert!(parse.errors().is_empty(), "parse errors: {:?}", parse.errors());
+    assert!(
+        parse.errors().is_empty(),
+        "parse errors: {:?}",
+        parse.errors()
+    );
 
     // All expected definitions should be in the def_map
     let def_map = analysis.def_map(file_id);
     let names: Vec<&str> = def_map.definitions().map(|d| d.name()).collect();
     assert!(names.contains(&"Greet"), "trait Greet missing: {names:?}");
-    assert!(names.contains(&"Person"), "struct Person missing: {names:?}");
     assert!(
-        names.contains(&"main"),
-        "fn main missing: {names:?}"
+        names.contains(&"Person"),
+        "struct Person missing: {names:?}"
     );
+    assert!(names.contains(&"main"), "fn main missing: {names:?}");
 
     // The impl block exists
     let impl_count = def_map

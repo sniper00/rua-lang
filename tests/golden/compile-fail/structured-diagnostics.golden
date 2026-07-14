@@ -1,0 +1,88 @@
+compile-fail/arithmetic_mixed_int_string.rua
+  E0200 file=compile-fail/arithmetic_mixed_int_string.rua range=25..36 arguments=[line="2", message="cannot mix string and non-string operands in arithmetic"]
+compile-fail/arithmetic_mixed_string_int.rua
+  E0200 file=compile-fail/arithmetic_mixed_string_int.rua range=25..36 arguments=[line="2", message="cannot mix string and non-string operands in arithmetic"]
+compile-fail/call_wrong_arity_fn.rua
+  E0200 file=compile-fail/call_wrong_arity_fn.rua range=71..74 arguments=[line="4", message="function `add` expects 2 argument(s), got 1"]
+compile-fail/call_wrong_arity_method.rua
+  E0200 file=compile-fail/call_wrong_arity_method.rua range=128..142 arguments=[line="8", message="method `Counter::get` expects 0 argument(s), got 1"]
+compile-fail/call_wrong_type_fn.rua
+  E0200 file=compile-fail/call_wrong_type_fn.rua range=62..63 arguments=[line="4", message="argument 1 of `require_bool` expects `bool`, found `i64`"]
+compile-fail/call_wrong_type_method.rua
+  E0200 file=compile-fail/call_wrong_type_method.rua range=153..158 arguments=[line="8", message="argument 1 of `Counter::set` expects `i64`, found `bool`"]
+compile-fail/enum_unit_called.rua
+  E0200 file=compile-fail/enum_unit_called.rua range=48..60 arguments=[line="4", message="unit variant `State::Ready` is not called with `()`"]
+compile-fail/enum_unknown_variant.rua
+  E0105 file=compile-fail/enum_unknown_variant.rua range=48..62 arguments=[line="4", message="enum `State` has no variant `Missing`"]
+compile-fail/enum_wrong_struct_form.rua
+  E0200 file=compile-fail/enum_wrong_struct_form.rua range=72..85 arguments=[line="4", message="struct variant `Message::Move` must be built with `{ .. }`"]
+compile-fail/enum_wrong_tuple_form.rua
+  E0200 file=compile-fail/enum_wrong_tuple_form.rua range=63..91 arguments=[line="4", message="variant `Message::Move` is not a struct variant"]
+compile-fail/module_import_private.rua
+  E0102 file=compile-fail/module_import_private.rua range=0..0 arguments=[line="0", message="`value` is private to module `secrets`"]
+compile-fail/module_missing_file.rua
+  E0103 file=- range=- arguments=[message="cannot find file for module `missing` (looked for <golden>/compile-fail/missing.rua, <golden>/compile-fail/missing/mod.rua and their `.ruai` forms)"]
+compile-fail/module_private_item_access.rua
+  E0102 file=compile-fail/module_private_item_access.rua range=62..76 arguments=[line="6", message="`value` is private to module `secrets`"]
+compile-fail/module_private_submodule_access.rua
+  E0102 file=compile-fail/module_private_submodule_access.rua range=90..109 arguments=[line="8", message="`inner` is private to module `outer`"]
+compile-fail/name_duplicate_enum_variant.rua
+  E0101 file=compile-fail/name_duplicate_enum_variant.rua range=0..0 arguments=[line="0", message="duplicate variant `Ready` in enum `State`"]
+compile-fail/name_duplicate_fn.rua
+  E0101 file=compile-fail/name_duplicate_fn.rua range=0..0 arguments=[line="0", message="duplicate top-level definition `duplicate`"]
+compile-fail/name_duplicate_module_fn.rua
+  E0101 file=compile-fail/name_duplicate_module_fn.rua range=0..0 arguments=[line="0", message="duplicate definition `duplicate` in module `service`"]
+compile-fail/name_duplicate_struct_field.rua
+  E0101 file=- range=- arguments=[message="duplicate field `x` in struct `Point`"]
+compile-fail/option_some_wrong_arity.rua
+  E0203 file=compile-fail/option_some_wrong_arity.rua range=32..36 arguments=[line="2", message="`Some` takes exactly 1 argument"]
+compile-fail/parse_bad_generic_list.rua
+  E0001 file=compile-fail/parse_bad_generic_list.rua range=12..13 arguments=[message="expected identifier, found `,`"]
+compile-fail/parse_bad_pattern.rua
+  E0001 file=compile-fail/parse_bad_pattern.rua range=59..61 arguments=[message="expected pattern, found `=>`"]
+compile-fail/parse_bad_where_clause.rua
+  E0001 file=compile-fail/parse_bad_where_clause.rua range=39..40 arguments=[message="expected identifier, found `{`"]
+compile-fail/parse_missing_brace.rua
+  E0001 file=compile-fail/parse_missing_brace.rua range=31..31 arguments=[message="expected `}`, found `<eof>`"]
+compile-fail/pattern_struct_as_tuple.rua
+  E0200 file=compile-fail/pattern_struct_as_tuple.rua range=125..126 arguments=[line="5", message="struct variant `Message::Move` must be matched with `{ .. }`"]
+compile-fail/pattern_unit_payload.rua
+  E0200 file=compile-fail/pattern_unit_payload.rua range=103..108 arguments=[line="5", message="unit variant `State::Ready` has no tuple payload"]
+compile-fail/pattern_unknown_struct_field.rua
+  E0209 file=compile-fail/pattern_unknown_struct_field.rua range=134..135 arguments=[line="5", message="variant `Message::Move` has no field `z`"]
+compile-fail/pattern_variant_arity.rua
+  E0203 file=compile-fail/pattern_variant_arity.rua range=110..115 arguments=[line="5", message="variant `Pair::Values` expects 2 element(s) in pattern, got 1"]
+compile-fail/result_err_wrong_arity.rua
+  E0203 file=compile-fail/result_err_wrong_arity.rua range=40..43 arguments=[line="2", message="`Err` takes exactly 1 argument"]
+compile-fail/result_ok_wrong_arity.rua
+  E0203 file=compile-fail/result_ok_wrong_arity.rua range=40..42 arguments=[line="2", message="`Ok` takes exactly 1 argument"]
+compile-fail/struct_extra_field.rua
+  E0209 file=compile-fail/struct_extra_field.rua range=52..72 arguments=[line="4", message="struct `Point` has no field `y`"]
+compile-fail/struct_missing_field.rua
+  E0209 file=compile-fail/struct_missing_field.rua range=60..74 arguments=[line="4", message="struct `Point` is missing field `y`"]
+compile-fail/trait_bound_method_wrong_arity.rua
+  E0200 file=compile-fail/trait_bound_method_wrong_arity.rua range=99..114 arguments=[line="6", message="method `Animal::speak` expects 0 argument(s), got 1"]
+compile-fail/trait_bound_method_wrong_type.rua
+  E0200 file=compile-fail/trait_bound_method_wrong_type.rua range=107..112 arguments=[line="6", message="argument 1 of `Adder::add` expects `i64`, found `bool`"]
+compile-fail/trait_bound_unsatisfied.rua
+  E0200 file=compile-fail/trait_bound_unsatisfied.rua range=118..126 arguments=[line="10", message="type `Cat` does not implement trait `Animal` (required by bound `T: Animal` of `describe`)"]
+compile-fail/trait_method_generic_mismatch.rua
+  E0200 file=compile-fail/trait_method_generic_mismatch.rua range=187..209 arguments=[line="12", message="type `Plain` does not implement trait `Show` (required by bound `T: Show` of `Container::store`)"]
+compile-fail/trait_unknown_bound.rua
+  E0208 file=- range=- arguments=[message="unknown trait `MissingTrait` in bound `T: MissingTrait`"]
+compile-fail/trait_where_unknown_bound.rua
+  E0208 file=- range=- arguments=[message="unknown trait `MissingTrait` in bound `T: MissingTrait`"]
+compile-fail/try_on_non_result.rua
+  E0200 file=compile-fail/try_on_non_result.rua range=46..47 arguments=[line="3", message="`?` operator requires `Result` or `Option`, found `i64`"]
+compile-fail/type_binary_invalid.rua
+  E0200 file=compile-fail/type_binary_invalid.rua range=28..36 arguments=[line="2", message="arithmetic operator applied to `bool`"]
+compile-fail/type_if_condition_non_bool.rua
+  E0200 file=compile-fail/type_if_condition_non_bool.rua range=19..20 arguments=[line="2", message="`if` condition must be `bool`, found `i64`"]
+compile-fail/type_let_annotation_mismatch.rua
+  E0200 file=compile-fail/type_let_annotation_mismatch.rua range=36..37 arguments=[line="2", message="`enabled` annotated as `bool` but initialized with `i64`"]
+compile-fail/type_return_mismatch.rua
+  E0200 file=compile-fail/type_return_mismatch.rua range=27..28 arguments=[line="2", message="expected return type `bool`, found `i64`"]
+compile-fail/type_unary_invalid.rua
+  E0200 file=compile-fail/type_unary_invalid.rua range=28..33 arguments=[line="2", message="cannot negate `bool`"]
+compile-fail/type_while_condition_non_bool.rua
+  E0200 file=compile-fail/type_while_condition_non_bool.rua range=22..23 arguments=[line="2", message="`while` condition must be `bool`, found `i64`"]

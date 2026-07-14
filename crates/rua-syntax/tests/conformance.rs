@@ -27,7 +27,11 @@ const CORPUS: &[&str] = &[
 ];
 
 fn read_example(rel: &str) -> String {
-    let path = format!("{}/../../tests/fixtures/examples/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    let path = format!(
+        "{}/../../tests/fixtures/examples/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        rel
+    );
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 

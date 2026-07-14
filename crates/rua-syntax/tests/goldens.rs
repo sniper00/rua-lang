@@ -36,10 +36,7 @@ fn corpus_path(name: &str) -> String {
 }
 
 fn golden_path(name: &str) -> String {
-    format!(
-        "{}/tests/goldens/{name}.golden",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/tests/goldens/{name}.golden", env!("CARGO_MANIFEST_DIR"))
 }
 
 #[test]

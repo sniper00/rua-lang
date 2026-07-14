@@ -1,17 +1,58 @@
-//! Abstract syntax tree for the Rua subset implemented in this pass.
-//!
-//! Scope (P0 + core of P1): items are free functions; statements cover
-//! `let`/`let mut`, expression statements, `return`, `while`, `loop`, `break`,
-//! `continue`; expressions cover literals, identifiers/paths, unary/binary ops,
-//! calls, method-less field access, `if`/`else` (as expression), blocks, and
-//! assignment. `struct`/`enum`/`trait`/`impl`/`match`/generics come in later
-//! passes (see docs/rua-design.md roadmap).
+//! Compact compiler-owned AST. It preserves source order, semantic ranges, and
+//! normalized API documentation without retaining Rowan trivia.
 
 use crate::token::SourceRange;
 
 #[derive(Debug, Clone)]
 pub struct Program {
     pub items: Vec<Item>,
+    /// Executable statements in the root Lua-style chunk.
+    pub chunk: Block,
+    /// Source ordering between declarations and executable statements.
+    pub source_order: Vec<ChunkEntry>,
+    /// The root source is a declaration-only `.ruai` input.
+    pub is_decl: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkEntry {
+    Item(usize),
+    Statement(usize),
+}
+
+/// Stable expression identity within one parsed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExprId {
+    pub file: u32,
+    pub local: u32,
+}
+
+/// Stable identity for a path-bearing pattern within one parsed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PatternId {
+    pub file: u32,
+    pub local: u32,
+}
+
+/// Stable identity for a path-bearing type use within one parsed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeId {
+    pub file: u32,
+    pub local: u32,
+}
+
+/// Stable identity for one trait path used as a generic bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TraitRefId {
+    pub file: u32,
+    pub local: u32,
+}
+
+/// Stable identity for a declared generic type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GenericParamId {
+    pub file: u32,
+    pub local: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +72,12 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct ModDecl {
     pub name: String,
+    pub documentation: Option<String>,
     pub items: Vec<Item>,
+    /// Executable statements owned by this module's initialization chunk.
+    pub chunk: Block,
+    /// Source ordering between module declarations and executable statements.
+    pub source_order: Vec<ChunkEntry>,
     pub is_pub: bool,
     /// `true` for a file module (`mod name;`) whose `items` are loaded from a
     /// sibling `.rua` file during resolution; `false` for an inline `mod { .. }`.
@@ -55,17 +101,20 @@ pub struct UseImport {
     pub alias: Option<String>,
 }
 
-/// `extern "lua" { fn name(params) -> R; ... }` — declares ambient Lua symbols
-/// so the checker knows they exist. No Lua code is emitted for the block.
+/// Declares ambient Lua symbols. `lua` binds a host global directly, while
+/// `lua-result` emits an explicit tagged-Result/multi-return adapter.
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
     pub abi: String,
+    pub documentation: Option<String>,
     pub fns: Vec<ExternFn>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub name: String,
+    pub name_span: SourceRange,
+    pub documentation: Option<String>,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// `true` when the last parameter is `...` (variadic Lua function).
@@ -77,13 +126,21 @@ pub struct ExternFn {
 /// the type checker uses them to resolve method calls on generic-typed values.
 #[derive(Debug, Clone)]
 pub struct GenericParam {
+    pub id: GenericParamId,
     pub name: String,
-    pub bounds: Vec<String>,
+    pub bounds: Vec<TraitRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitRef {
+    pub id: TraitRefId,
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
     pub name: String,
+    pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub methods: Vec<TraitMethod>,
     pub is_pub: bool,
@@ -92,11 +149,13 @@ pub struct TraitDecl {
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
     pub name: String,
+    pub documentation: Option<String>,
     /// Byte-span of the method name identifier (definition site).
     pub name_span: SourceRange,
     /// Method-level generic parameters, e.g. `fn wrap<U: Clone>(&self, x: U)`.
     pub generics: Vec<GenericParam>,
     pub has_self: bool,
+    pub receiver_mutable: bool,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// `Some` for a default method with a body; `None` for a signature only.
@@ -106,6 +165,7 @@ pub struct TraitMethod {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
+    pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<Field>,
     pub is_pub: bool,
@@ -114,6 +174,7 @@ pub struct StructDecl {
 #[derive(Debug, Clone)]
 pub struct Field {
     pub name: String,
+    pub documentation: Option<String>,
     pub ty: Type,
     /// Byte-span of the field name identifier (definition site).
     pub name_span: SourceRange,
@@ -122,6 +183,7 @@ pub struct Field {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
+    pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<Variant>,
     pub is_pub: bool,
@@ -130,6 +192,7 @@ pub struct EnumDecl {
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub name: String,
+    pub documentation: Option<String>,
     pub kind: VariantKind,
 }
 
@@ -154,6 +217,7 @@ pub struct ImplDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: String,
+    pub documentation: Option<String>,
     /// Byte-span of the function name identifier (definition site).
     pub name_span: SourceRange,
     pub generics: Vec<GenericParam>,
@@ -161,6 +225,8 @@ pub struct FnDecl {
     /// True when the first parameter is a `self`/`&self`/`&mut self` receiver
     /// (that receiver is not included in `params`).
     pub has_self: bool,
+    /// True only for an explicit `&mut self` receiver.
+    pub receiver_mutable: bool,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Block,
@@ -178,9 +244,17 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub enum Type {
     /// A named/path type, optionally with generic args, e.g. `Vec<i64>`.
-    Path { name: String, args: Vec<Type> },
+    Path {
+        id: TypeId,
+        name: String,
+        args: Vec<Type>,
+    },
     /// Reference type `&T` / `&mut T` (the `mut` flag is retained for later).
     Ref { mutable: bool, inner: Box<Type> },
+    /// Callable type `fn(A, B) -> R`.
+    Function { params: Vec<Type>, ret: Box<Type> },
+    /// Tuple type `(A, B, ...)`.
+    Tuple(Vec<Type>),
     /// Unit `()`.
     Unit,
 }
@@ -233,13 +307,14 @@ pub enum Stmt {
 /// An expression plus its source span (for diagnostics and, later, typing).
 #[derive(Debug, Clone)]
 pub struct Expr {
+    pub id: ExprId,
     pub kind: ExprKind,
     pub span: SourceRange,
 }
 
 impl Expr {
-    pub fn new(kind: ExprKind, span: SourceRange) -> Self {
-        Expr { kind, span }
+    pub fn new(id: ExprId, kind: ExprKind, span: SourceRange) -> Self {
+        Expr { id, kind, span }
     }
 }
 
@@ -383,14 +458,16 @@ pub enum Pattern {
         inclusive: bool,
     },
     /// A path with no payload: unit enum variant or `None`, e.g. `Shape::Unit`.
-    Path(Vec<String>),
+    Path { id: PatternId, path: Vec<String> },
     /// Tuple variant / built-in payload: `Shape::Circle(r)`, `Some(x)`, `Ok(v)`.
     TupleVariant {
+        id: PatternId,
         path: Vec<String>,
         elems: Vec<Pattern>,
     },
     /// Struct pattern / struct variant: `Point { x, y }`, `Shape::Rect { w, h }`.
     StructVariant {
+        id: PatternId,
         path: Vec<String>,
         fields: Vec<(String, Pattern)>,
         rest: bool,

@@ -15,9 +15,10 @@
 //!   0   all files already formatted (or formatted successfully)
 //!   1   formatting needed (--check), or parse/file errors
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rua_syntax::format::{check_format, format_str};
 
@@ -99,8 +100,8 @@ fn format_stdin() -> Result<ExitCode, String> {
 // --- --stdout -------------------------------------------------------------
 
 fn format_stdout(path: &Path) -> Result<ExitCode, String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("{path}: {e}", path = path.display()))?;
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}", path = path.display()))?;
     print!("{out}", out = format_str(&src));
     Ok(ExitCode::SUCCESS)
 }
@@ -170,7 +171,10 @@ fn format_in_place(paths: &[PathBuf]) -> Result<ExitCode, String> {
     }
 
     if errors > 0 {
-        eprintln!("rua-fmt: {} file(s) formatted, {} error(s)", changed, errors);
+        eprintln!(
+            "rua-fmt: {} file(s) formatted, {} error(s)",
+            changed, errors
+        );
         Ok(ExitCode::FAILURE)
     } else {
         if changed > 0 {
@@ -184,17 +188,126 @@ fn format_in_place(paths: &[PathBuf]) -> Result<ExitCode, String> {
 /// directory, then rename over the original. This avoids truncating the
 /// user's source if the process crashes mid-write.
 fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path
         .file_name()
         .ok_or_else(|| format!("bad path: {p}", p = path.display()))?;
-    let mut tmp_name = name.to_os_string();
-    tmp_name.push(".rua-fmt-tmp");
-
-    let tmp_path = dir.join(tmp_name);
-    std::fs::write(&tmp_path, content)
-        .map_err(|e| format!("writing temp file: {e}"))?;
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("renaming temp file: {e}"))?;
+    let permissions = std::fs::metadata(path)
+        .map_err(|error| format!("reading original metadata: {error}"))?
+        .permissions();
+    let nonce = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(
+        ".{}.rua-fmt-{}-{nonce}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let mut cleanup = TempCleanup::new(tmp_path.clone());
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .map_err(|error| format!("creating temp file: {error}"))?;
+    temp.set_permissions(permissions)
+        .map_err(|error| format!("preserving file permissions: {error}"))?;
+    temp.write_all(content.as_bytes())
+        .map_err(|error| format!("writing temp file: {error}"))?;
+    temp.sync_all()
+        .map_err(|error| format!("syncing temp file: {error}"))?;
+    drop(temp);
+    std::fs::rename(&tmp_path, path).map_err(|error| format!("renaming temp file: {error}"))?;
+    cleanup.commit();
     Ok(())
+}
+
+struct TempCleanup {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TempCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rua-fmt-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_without_temp_residue() {
+        let directory = temp_dir("atomic");
+        let path = directory.join("main.rua");
+        std::fs::write(&path, "before").unwrap();
+
+        atomic_write(&path, "after").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temp_dir("permissions");
+        let path = directory.join("main.rua");
+        std::fs::write(&path, "before").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        atomic_write(&path, "after").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_cleans_temp_file_when_rename_fails() {
+        let directory = temp_dir("cleanup");
+        let target = directory.join("target.rua");
+        std::fs::create_dir(&target).unwrap();
+
+        let error = atomic_write(&target, "content").unwrap_err();
+
+        assert!(error.contains("renaming temp file"), "{error}");
+        let entries = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![target.file_name().unwrap()]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

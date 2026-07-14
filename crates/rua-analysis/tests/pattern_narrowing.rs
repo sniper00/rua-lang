@@ -88,9 +88,7 @@ where
         .exprs()
         .filter_map(|(id, expr)| {
             let range = fixture.source_map.expr_range(id)?;
-            (predicate(expr)
-                && range.file_id == fixture.file_id
-                && range.range.start() == offset)
+            (predicate(expr) && range.file_id == fixture.file_id && range.range.start() == offset)
                 .then_some((range.range.len(), id))
         })
         .max_by_key(|(length, _)| *length)
@@ -113,8 +111,13 @@ fn assert_expr_ty(fixture: &Fixture, marker: &str, expected: &Ty) {
 fn assert_binding_ty(fixture: &Fixture, marker: &str, expected: &Ty) {
     let binding = binding_at(fixture, marker);
     let actual = fixture.inference.type_of_binding(binding);
-    eprintln!("assert_binding_ty: marker={marker} binding_id={:?} name={:?} actual={:?} expected={:?}",
-        binding.index(), fixture.body.binding(binding).and_then(|b| b.name()), actual, expected);
+    eprintln!(
+        "assert_binding_ty: marker={marker} binding_id={:?} name={:?} actual={:?} expected={:?}",
+        binding.index(),
+        fixture.body.binding(binding).and_then(|b| b.name()),
+        actual,
+        expected
+    );
     assert_eq!(actual, Some(expected), "binding at {marker}");
 }
 

@@ -3,7 +3,9 @@
 //! Higher layers use this boundary instead of reaching into storage or HIR
 //! implementation details directly.
 
-use std::{rc::Rc, sync::Arc};
+mod reference_index;
+
+use std::sync::Arc;
 
 use rua_syntax::{SyntaxKind, SyntaxToken};
 
@@ -11,13 +13,14 @@ use crate::{
     BaseDb,
     base::FileRange,
     hir::{
-        Body, BodyResolution, BodySourceId, BodySourceMap, DefKind, DefMap, Definition,
-        LocalBindingId, LocalResolveResult, LocalUseKind, ModuleId, NameRefKind,
+        Body, BodyResolution, BodySourceId, BodySourceMap, DefMap, Definition, LocalBindingId,
+        LocalResolveResult, LocalUseKind, ModuleId, NameRefKind,
     },
     vfs::FileId,
 };
 
 pub use crate::base::FilePosition;
+pub use reference_index::{ReferenceIndex, ReferenceOccurrence, ReferenceOccurrenceKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalReference {
@@ -37,12 +40,12 @@ impl LocalReference {
 
 #[derive(Clone, Debug)]
 pub struct Semantics {
-    db: Rc<BaseDb>,
+    db: Arc<BaseDb>,
     def_map: Arc<DefMap>,
 }
 
 impl Semantics {
-    pub(crate) fn new(db: Rc<BaseDb>, def_map: Arc<DefMap>) -> Self {
+    pub(crate) fn new(db: Arc<BaseDb>, def_map: Arc<DefMap>) -> Self {
         Self { db, def_map }
     }
 
@@ -122,9 +125,7 @@ impl Semantics {
             .into_iter()
             .map(LocalReference::range)
             .collect::<Vec<_>>();
-        if include_declaration
-            && let Some(declaration) = self.local_definition(target)
-        {
+        if include_declaration && let Some(declaration) = self.local_definition(target) {
             references.push(declaration);
         }
         references.sort();
@@ -157,10 +158,7 @@ impl Semantics {
                 .is_some_and(|binding| !binding.is_missing())
             {
                 return LocalAtResult {
-                    result: LocalResolveResult::Resolved(LocalBindingId::new(
-                        body.id(),
-                        *binding,
-                    )),
+                    result: LocalResolveResult::Resolved(LocalBindingId::new(body.id(), *binding)),
                     blocks_item_fallback: true,
                 };
             }
@@ -213,9 +211,14 @@ impl Semantics {
             .filter(|definition| {
                 definition.file_id() == position.file_id
                     && definition.range().contains(position.offset)
-                    && matches!(definition.kind(), DefKind::Function | DefKind::Method)
+                    && definition.kind().is_body_owner()
             })
-            .min_by_key(|definition| definition.range().len())?
+            .min_by_key(|definition| {
+                (
+                    definition.range().len(),
+                    definition.kind() == crate::hir::DefKind::Chunk,
+                )
+            })?
             .id();
         Some((
             self.db.body(owner)?,
@@ -359,8 +362,11 @@ fn resolve_path_segment<'map>(
     }
 
     for (index, segment) in segments.iter().enumerate().skip(1) {
-        let module_id = definition.target_module()?;
-        definition = map.resolve_name(module_id, segment)?;
+        definition = if let Some(module_id) = definition.target_module() {
+            map.resolve_name(module_id, segment)?
+        } else {
+            map.resolve_member(definition.id(), segment)?
+        };
         if index == selected {
             return Some(definition);
         }

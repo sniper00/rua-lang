@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn on_type_formatting_doc_comment_continuation() {
@@ -10,10 +10,7 @@ fn on_type_formatting_doc_comment_continuation() {
     // get `/// ` inserted automatically.
     let uri = uri("/test/otf_doc.rua");
     let mut srv = TestServer::new();
-    srv.open(
-        &uri,
-        "/// First line\n/// Second line\nfn main() {}",
-    );
+    srv.open(&uri, "/// First line\n/// Second line\nfn main() {}");
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
@@ -35,10 +32,7 @@ fn on_type_formatting_brace_indent() {
     // When the user types Enter after `{`, the next line should be indented.
     let uri = uri("/test/otf_brace.rua");
     let mut srv = TestServer::new();
-    srv.open(
-        &uri,
-        "fn main() {\n    let x = 1;\n}",
-    );
+    srv.open(&uri, "fn main() {\n    let x = 1;\n}");
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
@@ -48,12 +42,13 @@ fn on_type_formatting_brace_indent() {
     let lines: Vec<&str> = source.lines().collect();
     let brace_line = lines.iter().position(|l| l.contains('{'));
     if let Some(idx) = brace_line
-        && let Some(next_line) = lines.get(idx + 1) {
-            assert!(
-                next_line.starts_with("    ") || next_line.starts_with('\t'),
-                "line after brace should be indented, got: '{next_line}'"
-            );
-        }
+        && let Some(next_line) = lines.get(idx + 1)
+    {
+        assert!(
+            next_line.starts_with("    ") || next_line.starts_with('\t'),
+            "line after brace should be indented, got: '{next_line}'"
+        );
+    }
 }
 
 #[test]
@@ -73,13 +68,8 @@ fn on_type_formatting_only_triggers_on_enter() {
 
     // Nested indentation should be preserved after parsing
     let lines: Vec<&str> = source.lines().collect();
-    let inner_line = lines
-        .iter()
-        .find(|l| l.contains("let x"));
-    assert!(
-        inner_line.is_some(),
-        "source should contain 'let x' line"
-    );
+    let inner_line = lines.iter().find(|l| l.contains("let x"));
+    assert!(inner_line.is_some(), "source should contain 'let x' line");
     if let Some(line) = inner_line {
         let indent = line.len() - line.trim_start().len();
         assert!(

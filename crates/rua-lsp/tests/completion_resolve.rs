@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn completion_items_have_data_for_resolve() {
@@ -21,10 +21,7 @@ fn completion_items_have_data_for_resolve() {
     // Documented items (like Point) should have documentation already attached
     // or have a data field for lazy resolution.
     let point_item = items.iter().find(|i| i.label() == "Point");
-    assert!(
-        point_item.is_some(),
-        "Point should be in completions"
-    );
+    assert!(point_item.is_some(), "Point should be in completions");
 
     if let Some(item) = point_item {
         // Either documentation is already present, or data field is set for resolve

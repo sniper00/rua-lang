@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn document_links_in_doc_comments() {
@@ -46,7 +46,10 @@ fn document_links_in_doc_comments() {
 fn document_links_no_links_in_plain_file() {
     let uri = uri("/test/links_none.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, "fn main() {\n    // regular comment, not doc\n    let x = 1;\n}");
+    srv.open(
+        &uri,
+        "fn main() {\n    // regular comment, not doc\n    let x = 1;\n}",
+    );
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
@@ -54,10 +57,7 @@ fn document_links_no_links_in_plain_file() {
 
     // No `///` doc comments should mean no document links
     let has_doc_comments = source.lines().any(|l| l.trim_start().starts_with("///"));
-    assert!(
-        !has_doc_comments,
-        "plain file should have no doc comments"
-    );
+    assert!(!has_doc_comments, "plain file should have no doc comments");
 }
 
 #[test]

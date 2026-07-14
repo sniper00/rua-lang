@@ -1,1 +1,1 @@
-<golden>/compile-fail/parse_bad_where_clause.rua: 1: expected identifier, found `{`
+<golden>/compile-fail/parse_bad_where_clause.rua:1: parse error: expected identifier, found `{`

@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn document_symbols_include_nested_modules() {
@@ -43,17 +43,14 @@ fn document_symbols_struct_has_field_children() {
     let symbols = srv.snapshot().document_symbols(file_id, file_id);
 
     // Find the Point struct symbol
-    let point_sym = symbols
-        .iter()
-        .find(|s| s.name() == "Point");
+    let point_sym = symbols.iter().find(|s| s.name() == "Point");
     assert!(point_sym.is_some(), "Point should be in symbols");
 
     if let Some(ps) = point_sym {
         // Struct fields may or may not appear as children depending on
         // the current implementation. Verify the symbol exists and has
         // the expected kind.
-        let field_names: Vec<&str> =
-            ps.children().iter().map(|c| c.name()).collect();
+        let field_names: Vec<&str> = ps.children().iter().map(|c| c.name()).collect();
         // At minimum, the struct symbol should exist. Children support
         // is tracked separately.
         let _ = field_names;
@@ -72,14 +69,11 @@ fn document_symbols_enum_variants_as_children() {
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let symbols = srv.snapshot().document_symbols(file_id, file_id);
 
-    let color_sym = symbols
-        .iter()
-        .find(|s| s.name() == "Color");
+    let color_sym = symbols.iter().find(|s| s.name() == "Color");
     assert!(color_sym.is_some(), "Color should be in symbols");
 
     if let Some(cs) = color_sym {
-        let variant_names: Vec<&str> =
-            cs.children().iter().map(|c| c.name()).collect();
+        let variant_names: Vec<&str> = cs.children().iter().map(|c| c.name()).collect();
         // Enum variants may or may not appear as children.
         // Verify the symbol exists.
         let _ = variant_names;
@@ -98,14 +92,11 @@ fn document_symbols_trait_methods_as_children() {
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let symbols = srv.snapshot().document_symbols(file_id, file_id);
 
-    let trait_sym = symbols
-        .iter()
-        .find(|s| s.name() == "Drawable");
+    let trait_sym = symbols.iter().find(|s| s.name() == "Drawable");
     assert!(trait_sym.is_some(), "Drawable should be in symbols");
 
     if let Some(ts) = trait_sym {
-        let method_names: Vec<&str> =
-            ts.children().iter().map(|c| c.name()).collect();
+        let method_names: Vec<&str> = ts.children().iter().map(|c| c.name()).collect();
         // Trait methods may or may not appear as children.
         // Verify the symbol exists.
         let _ = method_names;

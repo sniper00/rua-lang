@@ -19,12 +19,15 @@ use crate::TreeBuilder;
 use crate::ast::{AstNode, SourceFile};
 use crate::kind::{SyntaxKind, SyntaxNode};
 use crate::lexer::{LexToken, lex};
+use rua_core::DiagnosticCode;
+use rua_lex::LexErrorKind;
 
 use SyntaxKind as K;
 
 /// A parse error: a message plus the byte offset where it was detected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
+    pub code: DiagnosticCode,
     pub message: String,
     pub offset: usize,
 }
@@ -73,12 +76,28 @@ impl<T: AstNode> Parse<T> {
 /// tree still covers the whole source and `errors` is non-empty.
 pub fn parse_source_file(src: &str) -> Parse<SourceFile> {
     let tokens = lex(src);
+    let lexical_errors = tokens
+        .iter()
+        .filter_map(|token| {
+            let error = token.error?;
+            let code = match error {
+                LexErrorKind::UnterminatedString => DiagnosticCode::ParseUnterminatedString,
+                LexErrorKind::UnterminatedBlockComment => DiagnosticCode::ParseUnterminatedComment,
+                LexErrorKind::UnknownCharacter => DiagnosticCode::ParseUnexpectedToken,
+            };
+            Some(ParseError {
+                code,
+                message: error.message().to_string(),
+                offset: token.start,
+            })
+        })
+        .collect();
     let mut p = Parser {
         src,
         tokens,
         pos: 0,
         builder: TreeBuilder::new(),
-        errors: Vec::new(),
+        errors: lexical_errors,
         no_struct: false,
     };
     p.source_file();
@@ -203,7 +222,12 @@ impl<'a> Parser<'a> {
         if self.at(kind) {
             self.bump();
         } else {
-            self.error(&format!("expected `{}`", user_str(kind)));
+            let code = if matches!(kind, K::RParen | K::RBrace | K::RBracket | K::Gt) {
+                DiagnosticCode::ParseMissingDelimiter
+            } else {
+                DiagnosticCode::ParseUnexpectedToken
+            };
+            self.error_with_code(code, &format!("expected `{}`", user_str(kind)));
         }
     }
 
@@ -217,7 +241,12 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&mut self, msg: &str) {
+        self.error_with_code(DiagnosticCode::ParseUnexpectedToken, msg);
+    }
+
+    fn error_with_code(&mut self, code: DiagnosticCode, msg: &str) {
         self.errors.push(ParseError {
+            code,
             message: msg.to_string(),
             offset: self.current_offset(),
         });
@@ -246,13 +275,32 @@ impl<'a> Parser<'a> {
         while self.current() != K::Eof {
             self.eat_trivia();
             let before = self.pos;
-            self.item();
+            self.scope_entry();
             if self.pos == before {
                 self.error_bump();
             }
         }
         self.eat_trivia(); // trailing trivia
         self.builder.finish_node();
+    }
+
+    fn scope_entry(&mut self) {
+        if matches!(
+            self.current(),
+            K::KwPub
+                | K::KwFn
+                | K::KwStruct
+                | K::KwEnum
+                | K::KwTrait
+                | K::KwImpl
+                | K::KwExtern
+                | K::KwMod
+                | K::KwUse
+        ) {
+            self.item();
+        } else {
+            self.statement();
+        }
     }
 
     fn item(&mut self) {
@@ -272,7 +320,10 @@ impl<'a> Parser<'a> {
             K::KwMod => self.mod_decl(cp),
             K::KwUse => self.use_decl(cp),
             _ => {
-                self.error("expected item (fn/struct/enum/impl/trait/extern/mod/use)");
+                self.error_with_code(
+                    DiagnosticCode::ParseExpectedItem,
+                    "expected item (fn/struct/enum/impl/trait/extern/mod/use)",
+                );
                 self.error_bump();
             }
         }
@@ -379,7 +430,10 @@ impl<'a> Parser<'a> {
                     }
                 }
                 K::Eof => {
-                    self.error("unterminated `<...>`");
+                    self.error_with_code(
+                        DiagnosticCode::ParseMissingDelimiter,
+                        "unterminated `<...>`",
+                    );
                     break;
                 }
                 _ => {}
@@ -611,7 +665,7 @@ impl<'a> Parser<'a> {
         while !self.at(K::RBrace) && !self.at(K::Eof) {
             self.eat_trivia();
             let before = self.pos;
-            self.item();
+            self.scope_entry();
             if self.pos == before {
                 self.error_bump();
             }
@@ -1265,7 +1319,11 @@ mod tests {
     ];
 
     fn example(rel: &str) -> String {
-        let path = format!("{}/../../tests/fixtures/examples/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = format!(
+            "{}/../../tests/fixtures/examples/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            rel
+        );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 

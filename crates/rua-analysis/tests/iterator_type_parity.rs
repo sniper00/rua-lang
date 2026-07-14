@@ -2,8 +2,8 @@
 //! and consumer return types through native inference.
 
 use rua_analysis::{
-    AnalysisHost, Body, BodySourceMap, Change, DefKind, FileId, FileKind,
-    InferenceResult, SourceRootId, SourceRootKind, Ty,
+    AnalysisHost, Body, BodySourceMap, Change, DefKind, FileId, FileKind, InferenceResult,
+    SourceRootId, SourceRootKind, Ty,
 };
 use std::sync::Arc;
 
@@ -45,9 +45,7 @@ fn binding_ty(fixture: &Fixture, name: &str) -> Ty {
     fixture
         .body
         .bindings()
-        .find_map(|(id, binding)| {
-            (binding.name() == Some(name)).then_some(id)
-        })
+        .find_map(|(id, binding)| (binding.name() == Some(name)).then_some(id))
         .and_then(|id| fixture.inference.type_of_binding(id).cloned())
         .unwrap_or(Ty::Unknown)
 }
@@ -125,10 +123,7 @@ fn main() -> i64 {
 }
 "#;
     let fixture = single_file_fixture(SOURCE, "main");
-    assert_eq!(
-        binding_ty(&fixture, "filtered"),
-        Ty::Vec(Box::new(Ty::I64))
-    );
+    assert_eq!(binding_ty(&fixture, "filtered"), Ty::Vec(Box::new(Ty::I64)));
     assert!(fixture.inference.diagnostics().is_empty());
 }
 
@@ -205,9 +200,6 @@ fn main() -> i64 {
 }
 "#;
     let fixture = single_file_fixture(SOURCE, "main");
-    assert_eq!(
-        binding_ty(&fixture, "result"),
-        Ty::Vec(Box::new(Ty::I64))
-    );
+    assert_eq!(binding_ty(&fixture, "result"), Ty::Vec(Box::new(Ty::I64)));
     assert!(fixture.inference.diagnostics().is_empty());
 }

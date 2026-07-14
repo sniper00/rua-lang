@@ -59,7 +59,10 @@ mod tests {
     fn leading_comments_preserved() {
         let src = "// file header\nfn foo() {}\n";
         let out = format_str(src);
-        assert!(out.contains("// file header"), "leading comment preserved\n---\n{out}");
+        assert!(
+            out.contains("// file header"),
+            "leading comment preserved\n---\n{out}"
+        );
         assert!(out.contains("fn foo() {}"), "item present\n---\n{out}");
     }
 
@@ -67,14 +70,20 @@ mod tests {
     fn trailing_comment_on_statement() {
         let src = "fn foo() {\n    let x = 1; // trail\n}\n";
         let out = format_str(src);
-        assert!(out.contains("// trail"), "trailing comment preserved\n---\n{out}");
+        assert!(
+            out.contains("// trail"),
+            "trailing comment preserved\n---\n{out}"
+        );
     }
 
     #[test]
     fn comment_between_items() {
         let src = "fn a() {}\n// between\nfn b() {}\n";
         let out = format_str(src);
-        assert!(out.contains("// between"), "between comment preserved\n---\n{out}");
+        assert!(
+            out.contains("// between"),
+            "between comment preserved\n---\n{out}"
+        );
         assert!(out.contains("fn a() {}"), "first item\n---\n{out}");
         assert!(out.contains("fn b() {}"), "second item\n---\n{out}");
     }
@@ -83,7 +92,10 @@ mod tests {
     fn standalone_comment_in_block() {
         let src = "fn foo() {\n    // note\n    let x = 1;\n}\n";
         let out = format_str(src);
-        assert!(out.contains("// note"), "block comment preserved\n---\n{out}");
+        assert!(
+            out.contains("// note"),
+            "block comment preserved\n---\n{out}"
+        );
     }
 
     #[test]
@@ -98,7 +110,10 @@ mod tests {
     fn block_comment_preserved() {
         let src = "/* header */\nfn foo() {}\n";
         let out = format_str(src);
-        assert!(out.contains("/* header */"), "block comment preserved\n---\n{out}");
+        assert!(
+            out.contains("/* header */"),
+            "block comment preserved\n---\n{out}"
+        );
     }
 
     #[test]
@@ -106,7 +121,10 @@ mod tests {
         let src = "// top\nfn foo() {\n    let x = 1; // trail\n    // mid\n    let y = 2;\n}\n// bottom\n";
         let once = format_str(src);
         let twice = format_str(&once);
-        assert_eq!(once, twice, "idempotent with comments:\n--- once ---\n{once}--- twice ---\n{twice}");
+        assert_eq!(
+            once, twice,
+            "idempotent with comments:\n--- once ---\n{once}--- twice ---\n{twice}"
+        );
     }
 
     #[test]
@@ -115,7 +133,10 @@ mod tests {
         let src = "fn foo() {\n    let x = 1;\n}\n";
         let once = format_str(src);
         let twice = format_str(&once);
-        assert_eq!(once, twice, "idempotent without comments:\n---\n{once}---\n{twice}");
+        assert_eq!(
+            once, twice,
+            "idempotent without comments:\n---\n{once}---\n{twice}"
+        );
     }
 
     // --- B3 wrapping tests ---------------------------------------------------
@@ -138,14 +159,20 @@ mod tests {
             "long call wraps at width 30\n---\n{out}"
         );
         assert!(out.contains("aaaaa,"), "first arg\n---\n{out}");
-        assert!(out.contains("fffff,"), "last arg with trailing comma\n---\n{out}");
+        assert!(
+            out.contains("fffff,"),
+            "last arg with trailing comma\n---\n{out}"
+        );
     }
 
     #[test]
     fn short_struct_literal_fits_flat() {
         let src = "fn foo() { Point { x: 1, y: 2 }; }\n";
         let out = format_str(src);
-        assert!(out.contains("Point { x: 1, y: 2 }"), "short struct flat\n---\n{out}");
+        assert!(
+            out.contains("Point { x: 1, y: 2 }"),
+            "short struct flat\n---\n{out}"
+        );
     }
 
     #[test]
@@ -190,7 +217,10 @@ mod tests {
             after_x.contains("\n\n"),
             "blank line between statements preserved\n---\n{out}"
         );
-        assert!(out.contains("let y"), "second statement present\n---\n{out}");
+        assert!(
+            out.contains("let y"),
+            "second statement present\n---\n{out}"
+        );
     }
 
     #[test]
@@ -238,7 +268,10 @@ mod tests {
         let src = "struct S {\n    a: i64,\n\n    b: i64,\n}\n";
         let out = format_str(src);
         let after_a = out.split("a: i64,").nth(1).unwrap_or("");
-        assert!(after_a.contains("\n\n"), "blank between struct fields\n---\n{out}");
+        assert!(
+            after_a.contains("\n\n"),
+            "blank between struct fields\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -247,7 +280,10 @@ mod tests {
         let src = "enum E {\n    A,\n\n    B,\n}\n";
         let out = format_str(src);
         let after_a = out.split("A,").nth(1).unwrap_or("");
-        assert!(after_a.contains("\n\n"), "blank between enum variants\n---\n{out}");
+        assert!(
+            after_a.contains("\n\n"),
+            "blank between enum variants\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -255,7 +291,10 @@ mod tests {
     fn leading_comment_on_field_survives() {
         let src = "struct S {\n    a: i64,\n    // note on b\n    b: i64,\n}\n";
         let out = format_str(src);
-        assert!(out.contains("// note on b"), "field leading comment kept\n---\n{out}");
+        assert!(
+            out.contains("// note on b"),
+            "field leading comment kept\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -263,10 +302,16 @@ mod tests {
     fn trailing_comment_on_field_survives() {
         let src = "struct S {\n    a: i64, // trailing a\n    b: i64,\n}\n";
         let out = format_str(src);
-        assert!(out.contains("// trailing a"), "field trailing comment kept\n---\n{out}");
+        assert!(
+            out.contains("// trailing a"),
+            "field trailing comment kept\n---\n{out}"
+        );
         // The comment stays on field a's line.
         let a_line = out.lines().find(|l| l.contains("a: i64")).unwrap_or("");
-        assert!(a_line.contains("// trailing a"), "trailing on field a's line\n---\n{out}");
+        assert!(
+            a_line.contains("// trailing a"),
+            "trailing on field a's line\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -274,7 +319,10 @@ mod tests {
     fn leading_comment_on_enum_variant_survives() {
         let src = "enum E {\n    A,\n    // about B\n    B,\n}\n";
         let out = format_str(src);
-        assert!(out.contains("// about B"), "variant leading comment kept\n---\n{out}");
+        assert!(
+            out.contains("// about B"),
+            "variant leading comment kept\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -284,7 +332,10 @@ mod tests {
     fn header_comment_blank_before_first_item_preserved() {
         let src = "// file banner\n\nfn foo() {}\n";
         let out = format_str(src);
-        assert_eq!(out, "// file banner\n\nfn foo() {}\n", "banner keeps its blank\n---\n{out}");
+        assert_eq!(
+            out, "// file banner\n\nfn foo() {}\n",
+            "banner keeps its blank\n---\n{out}"
+        );
         assert_eq!(out, format_str(&out), "idempotent\n---\n{out}");
     }
 
@@ -340,21 +391,30 @@ mod tests {
     fn check_parse_error_returns_true() {
         // Unparseable source is returned unchanged → check passes (safe default).
         let src = "fn foo {";
-        assert!(check_format(src), "parse-error source is unchanged → passes check");
+        assert!(
+            check_format(src),
+            "parse-error source is unchanged → passes check"
+        );
     }
 
     #[test]
     fn check_with_comments() {
         let src = "// header\nfn foo() {} // trail\n";
         let formatted = format_str(src);
-        assert!(check_format(&formatted), "formatted with comments passes check");
+        assert!(
+            check_format(&formatted),
+            "formatted with comments passes check"
+        );
     }
 
     #[test]
     fn check_with_blank_lines() {
         let src = "fn foo() {\n    let x = 1;\n\n    let y = 2;\n}\n";
         let formatted = format_str(src);
-        assert!(check_format(&formatted), "formatted with blank lines passes check");
+        assert!(
+            check_format(&formatted),
+            "formatted with blank lines passes check"
+        );
     }
 
     #[test]

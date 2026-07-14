@@ -9,14 +9,11 @@ name = "rua_syntax"
 path = "src/lib.rs"
 doctest = false
 
-[features]
-default = ["legacy"]
-# The legacy feature gates analysis, workspace, nameres, completion, and
-# transition modules that use the compiler bridge. These only survive for
-# integration tests; production consumers should opt out with
-# `default-features = false`.
-legacy = ["dep:ruac"]
-
 [dependencies]
+rua-core.workspace = true
+rua-lex.workspace = true
 rowan.workspace = true
-ruac = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = "1"
+ruac.workspace = true

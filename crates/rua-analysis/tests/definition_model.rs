@@ -271,7 +271,9 @@ fn member_definition_map_covers_fields_variants_methods_impls_and_externs() {
         assert_eq!(source_map, definition.source());
         let name = &source[source_map.name_range().range.start() as usize
             ..source_map.name_range().range.end() as usize];
-        if definition.kind() != DefKind::Impl {
+        if definition.kind() == DefKind::Chunk {
+            assert!(name.is_empty());
+        } else if definition.kind() != DefKind::Impl {
             assert_eq!(name, definition.name());
         }
     }

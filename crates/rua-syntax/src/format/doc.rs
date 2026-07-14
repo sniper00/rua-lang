@@ -118,8 +118,7 @@ pub fn print(doc: &Doc, width: usize) -> String {
             }
             Doc::Indent(b) => cmds.push((ind + INDENT, mode, b)),
             Doc::Group(b) => {
-                let flat_ok = !b.has_hardline()
-                    && fits(width.saturating_sub(col), ind, b, &cmds);
+                let flat_ok = !b.has_hardline() && fits(width.saturating_sub(col), ind, b, &cmds);
                 let m = if flat_ok { Mode::Flat } else { Mode::Break };
                 cmds.push((ind, m, b));
             }
@@ -232,7 +231,10 @@ mod tests {
         let d = Doc::group(Doc::concat([
             Doc::text("f("),
             Doc::SoftLine,
-            Doc::join(Doc::concat([Doc::text(","), Doc::Line]), [Doc::text("a"), Doc::text("b")]),
+            Doc::join(
+                Doc::concat([Doc::text(","), Doc::Line]),
+                [Doc::text("a"), Doc::text("b")],
+            ),
             Doc::SoftLine,
             Doc::text(")"),
         ]));
@@ -307,6 +309,9 @@ mod tests {
             Doc::indent(Doc::concat([Doc::Line, Doc::text("b")])),
         ]));
         let out = print(&d, 1);
-        assert!(!out.lines().any(|l| l.ends_with(' ')), "no trailing spaces: {out:?}");
+        assert!(
+            !out.lines().any(|l| l.ends_with(' ')),
+            "no trailing spaces: {out:?}"
+        );
     }
 }

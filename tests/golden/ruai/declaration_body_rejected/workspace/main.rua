@@ -1,0 +1,3 @@
+mod moon;
+
+let value = moon::answer();

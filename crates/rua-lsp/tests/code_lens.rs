@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn code_lens_has_entries_for_functions() {
@@ -42,9 +42,18 @@ fn code_lens_has_entries_for_functions() {
         }
     }
 
-    assert!(fn_count >= 2, "should have at least 2 functions/methods, got {fn_count}");
-    assert!(struct_count >= 1, "should have at least 1 struct, got {struct_count}");
-    assert!(impl_count >= 1, "should have at least 1 impl, got {impl_count}");
+    assert!(
+        fn_count >= 2,
+        "should have at least 2 functions/methods, got {fn_count}"
+    );
+    assert!(
+        struct_count >= 1,
+        "should have at least 1 struct, got {struct_count}"
+    );
+    assert!(
+        impl_count >= 1,
+        "should have at least 1 impl, got {impl_count}"
+    );
 }
 
 #[test]
@@ -61,30 +70,32 @@ fn code_lens_counts_references() {
     let def_map = analysis.def_map(file_id);
 
     // Count how many bodies reference "used_fn"
-    let mut ref_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut ref_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for d in def_map.definitions() {
         if matches!(
             d.kind(),
             rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
-        )
-            && let Some(body) = analysis.body(d.id()) {
-                let mut seen = std::collections::HashSet::new();
-                for (_, nr) in body.name_refs() {
-                    if let Some(n) = nr.name() {
-                        seen.insert(n.to_string());
-                    }
-                }
-                for n in seen {
-                    *ref_counts.entry(n).or_default() += 1;
+        ) && let Some(body) = analysis.body(d.id())
+        {
+            let mut seen = std::collections::HashSet::new();
+            for (_, nr) in body.name_refs() {
+                if let Some(n) = nr.name() {
+                    seen.insert(n.to_string());
                 }
             }
+            for n in seen {
+                *ref_counts.entry(n).or_default() += 1;
+            }
+        }
     }
 
     let used_count = ref_counts.get("used_fn").copied().unwrap_or(0);
     let unused_count = ref_counts.get("unused_fn").copied().unwrap_or(0);
     // used_fn should be referenced at least once (by main)
-    assert!(used_count >= 1, "used_fn should have references, got {used_count}");
+    assert!(
+        used_count >= 1,
+        "used_fn should have references, got {used_count}"
+    );
     // unused_fn should have fewer references than used_fn
     assert!(
         unused_count < used_count || unused_count == 0,
@@ -109,5 +120,8 @@ fn code_lens_counts_impls_for_struct() {
         .definitions()
         .filter(|d| d.kind() == rua_analysis::DefKind::Impl)
         .count();
-    assert!(impl_count >= 2, "should have 2 impl blocks for Point, got {impl_count}");
+    assert!(
+        impl_count >= 2,
+        "should have 2 impl blocks for Point, got {impl_count}"
+    );
 }

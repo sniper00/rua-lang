@@ -7,15 +7,15 @@ mod completion;
 mod contract;
 mod symbol;
 
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use rua_syntax::{Parse, ast::SourceFile};
 
 use crate::{
     BaseDb,
     hir::{
-        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap,
-        Definition, InferenceResult, ItemTree, MemberIndex, Ty,
+        Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, Definition,
+        InferenceResult, ItemTree, MemberIndex, Ty,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
@@ -28,17 +28,17 @@ pub use crate::diagnostic::{
 pub use closure_iterator::ClosureParameterInfo;
 pub use contract::{
     CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance,
-    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget,
-    ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult,
-    RenameError, RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers,
-    SignatureHelpInfo, SourceChange, TextEdit, TextRange, TypeHierarchyItem,
+    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile,
+    ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError,
+    RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo,
+    SourceChange, TextEdit, TextRange, TypeHierarchyItem,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
 /// Mutable owner of the current analysis inputs.
 #[derive(Debug, Default)]
 pub struct AnalysisHost {
-    db: Rc<BaseDb>,
+    db: Arc<BaseDb>,
 }
 
 impl AnalysisHost {
@@ -47,12 +47,12 @@ impl AnalysisHost {
     }
 
     pub fn apply_change(&mut self, change: Change) {
-        Rc::make_mut(&mut self.db).apply_change(change);
+        Arc::make_mut(&mut self.db).apply_change(change);
     }
 
     pub fn analysis(&self) -> Analysis {
         Analysis {
-            db: Rc::clone(&self.db),
+            db: Arc::clone(&self.db),
         }
     }
 }
@@ -60,17 +60,60 @@ impl AnalysisHost {
 /// Immutable view of the inputs captured when the snapshot was created.
 #[derive(Clone, Debug)]
 pub struct Analysis {
-    db: Rc<BaseDb>,
+    db: Arc<BaseDb>,
+}
+
+struct ProjectQueryData {
+    def_map: Arc<DefMap>,
+    member_index: Arc<MemberIndex>,
 }
 
 impl Analysis {
+    fn project_query_data(&self, position: ProjectPosition) -> Option<ProjectQueryData> {
+        let def_map = self.db.project_def_map(position.project_id)?;
+        def_map.module_for_file(position.position.file_id)?;
+        let member_index = self.db.project_member_index(position.project_id)?;
+        Some(ProjectQueryData {
+            def_map,
+            member_index,
+        })
+    }
+
     /// Test and integration helper for syntax queries during Phase 2.
     pub fn parse(&self, file_id: FileId) -> Arc<Parse<SourceFile>> {
         self.db.parse(file_id)
     }
 
+    pub fn file_text(&self, file_id: FileId) -> Option<Arc<str>> {
+        self.db.file_text(file_id)
+    }
+
+    pub fn file_revision(&self, file_id: FileId) -> Option<u64> {
+        self.db.file_revision(file_id)
+    }
+
+    #[doc(hidden)]
+    pub fn query_stats(&self) -> crate::QueryStats {
+        self.db.query_stats()
+    }
+
+    #[doc(hidden)]
+    pub fn cache_sizes(&self) -> crate::CacheSizes {
+        self.db.cache_sizes()
+    }
+
     pub fn diagnostics(&self, file_id: FileId) -> Vec<Diagnostic> {
-        crate::diagnostic::fast_diagnostics(&self.db, file_id)
+        crate::diagnostic::fast_diagnostics(&self.db, self.db.def_map(file_id), file_id)
+    }
+
+    pub fn diagnostics_in_project(&self, file: ProjectFile) -> Vec<Diagnostic> {
+        let Some(def_map) = self.db.project_def_map(file.project_id) else {
+            return Vec::new();
+        };
+        if def_map.module_for_file(file.file_id).is_none() {
+            return Vec::new();
+        }
+        crate::diagnostic::fast_diagnostics(&self.db, def_map, file.file_id)
     }
 
     pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
@@ -118,6 +161,13 @@ impl Analysis {
         self.db.project_member_index(project_id)
     }
 
+    pub fn reference_index_for_project(
+        &self,
+        project_id: ProjectId,
+    ) -> Option<Arc<crate::semantic::ReferenceIndex>> {
+        self.db.project_reference_index(project_id)
+    }
+
     pub fn body(&self, def_id: DefId) -> Option<Arc<Body>> {
         self.db.body(def_id)
     }
@@ -139,12 +189,12 @@ impl Analysis {
     }
 
     pub fn semantics(&self, root_file: FileId) -> Semantics {
-        Semantics::new(Rc::clone(&self.db), self.db.def_map(root_file))
+        Semantics::new(Arc::clone(&self.db), self.db.def_map(root_file))
     }
 
     pub fn semantics_for_project(&self, project_id: ProjectId) -> Option<Semantics> {
         Some(Semantics::new(
-            Rc::clone(&self.db),
+            Arc::clone(&self.db),
             self.db.project_def_map(project_id)?,
         ))
     }
@@ -153,16 +203,51 @@ impl Analysis {
         symbol::document_symbols(&self.db.def_map(root_file), file_id)
     }
 
+    pub fn document_symbols_in_project(&self, file: ProjectFile) -> Vec<DocumentSymbol> {
+        self.db
+            .project_def_map(file.project_id)
+            .filter(|map| map.module_for_file(file.file_id).is_some())
+            .map_or_else(Vec::new, |map| symbol::document_symbols(&map, file.file_id))
+    }
+
     pub fn workspace_symbols(&self, root_file: FileId, query: &str) -> Vec<WorkspaceSymbol> {
         symbol::workspace_symbols(&self.db.def_map(root_file), query)
     }
 
+    pub fn workspace_symbols_in_project(
+        &self,
+        context: QueryContext,
+        query: &str,
+    ) -> Vec<WorkspaceSymbol> {
+        self.db
+            .project_def_map(context.project_id())
+            .map_or_else(Vec::new, |map| symbol::workspace_symbols(&map, query))
+    }
+
     pub fn closure_parameters(&self, file_id: FileId) -> Vec<ClosureParameterInfo> {
-        closure_iterator::closure_parameters(&self.db, file_id)
+        closure_iterator::closure_parameters(&self.db, &self.db.def_map(file_id), file_id)
+    }
+
+    pub fn closure_parameters_in_project(&self, file: ProjectFile) -> Vec<ClosureParameterInfo> {
+        self.db
+            .project_def_map(file.project_id)
+            .filter(|map| map.module_for_file(file.file_id).is_some())
+            .map_or_else(Vec::new, |map| {
+                closure_iterator::closure_parameters(&self.db, &map, file.file_id)
+            })
     }
 
     pub fn semantic_tokens(&self, file_id: FileId) -> Vec<SemanticToken> {
-        closure_iterator::semantic_tokens(&self.db, file_id)
+        closure_iterator::semantic_tokens(&self.db, self.db.def_map(file_id), file_id)
+    }
+
+    pub fn semantic_tokens_in_project(&self, file: ProjectFile) -> Vec<SemanticToken> {
+        self.db
+            .project_def_map(file.project_id)
+            .filter(|map| map.module_for_file(file.file_id).is_some())
+            .map_or_else(Vec::new, |map| {
+                closure_iterator::semantic_tokens(&self.db, map, file.file_id)
+            })
     }
 
     /// Resolve the callable type, parameter names, and arguments for a
@@ -200,16 +285,13 @@ impl Analysis {
             } => {
                 let receiver_ty = inference.type_of_expr(*receiver)?;
                 let method_name = body.name_ref(*method)?.name()?.to_string();
-                let resolution =
-                    member_index.resolve_method(receiver_ty, &method_name)?;
+                let resolution = member_index.resolve_method(receiver_ty, &method_name)?;
                 let callable = resolution.callable()?.clone();
                 let names = match resolution.target() {
                     crate::hir::MemberTarget::Definition(def_id) => def_map
                         .definition(def_id)
                         .and_then(|def| {
-                            if let crate::hir::ItemSignature::Callable(sig) =
-                                def.signature()
-                            {
+                            if let crate::hir::ItemSignature::Callable(sig) = def.signature() {
                                 Some(
                                     sig.params()
                                         .iter()
@@ -233,10 +315,12 @@ impl Analysis {
     pub fn signature_help(&self, position: ProjectPosition) -> Option<SignatureHelpInfo> {
         let text = self.db.file_text(position.position.file_id)?;
         let offset = position.position.offset.min(text.len() as u32);
-        let def_map = self.db.def_map(position.position.file_id);
-        let member_index = self.db.member_index(position.position.file_id);
+        let query = self.project_query_data(position)?;
         let ctx = completion::find_containing_body_data(
-            &self.db, &def_map, position.position, offset,
+            &self.db,
+            &query.def_map,
+            position.position,
+            offset,
         )?;
         let body = &ctx.body;
         let source_map = &ctx.source_map;
@@ -264,20 +348,17 @@ impl Analysis {
         let expr_id = best_expr_id?;
         let expr = body.expr(expr_id)?;
 
-        let (callable, param_names, args) = self.resolve_call_target(
-            body, inference, &def_map, &member_index, expr,
-        )?;
+        let (callable, param_names, args) =
+            self.resolve_call_target(body, inference, &query.def_map, &query.member_index, expr)?;
 
         // Build parameter display: use original names when available.
         let param_types: Vec<String> = callable
             .params()
             .iter()
             .enumerate()
-            .map(|(i, ty)| {
-                match param_names.get(i).and_then(|n| n.clone()) {
-                    Some(name) => format!("{name}: {ty}"),
-                    None => ty.to_string(),
-                }
+            .map(|(i, ty)| match param_names.get(i).and_then(|n| n.clone()) {
+                Some(name) => format!("{name}: {ty}"),
+                None => ty.to_string(),
             })
             .collect();
         let ret = callable.return_ty().to_string();
@@ -305,7 +386,7 @@ impl Analysis {
 
     /// Completion candidates at a cursor position.
     pub fn completions(&self, position: ProjectPosition) -> Vec<CompletionItem> {
-        completion::completions(&self.db, position.position)
+        completion::completions(&self.db, position)
     }
 
     // ------------------------------------------------------------------
@@ -314,11 +395,15 @@ impl Analysis {
 
     /// Type and signature information at a cursor position.
     pub fn hover(&self, position: ProjectPosition) -> Option<HoverResult> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        let query = self.project_query_data(position)?;
+        let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
+
+        if let Some(hover) = self.builtin_macro_hover(position) {
+            return Some(hover);
+        }
 
         // 1. Try member access hover first (field/method after `.`).
-        let member = self.member_hover(position);
+        let member = self.member_hover(position, &query);
         if let Some(hover) = member {
             return Some(hover);
         }
@@ -326,16 +411,21 @@ impl Analysis {
         // 2. Try item/definition hover.
         let def = semantics.find_def_at(position.position);
         if let Some(definition) = def {
-            let root_file = position.position.file_id;
-            let signature = item_hover_text(&definition, &self.db, root_file);
-            return Some(HoverResult::new(
+            let signature = item_hover_text(&definition, &query.member_index);
+            let mut hover = HoverResult::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
                 signature,
-            ));
+            );
+            if let Some(documentation) = definition.documentation() {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
         }
 
         // 3. Try local binding hover.
-        if let crate::hir::LocalResolveResult::Resolved(target) = semantics.resolve_local_at(position.position) {
+        if let crate::hir::LocalResolveResult::Resolved(target) =
+            semantics.resolve_local_at(position.position)
+        {
             let owner_def = target.owner().owner();
             if let Some(inference) = self.db.infer(owner_def) {
                 let ty = inference
@@ -348,12 +438,10 @@ impl Analysis {
                         .and_then(|b| b.name())
                         .unwrap_or("?");
                     if let Some(source_map) = self.db.body_source_map(owner_def)
-                        && let Some(file_range) = source_map.binding_range(target.binding()) {
-                            return Some(HoverResult::new(
-                                file_range,
-                                format!("let {name}: {ty}"),
-                            ));
-                        }
+                        && let Some(file_range) = source_map.binding_range(target.binding())
+                    {
+                        return Some(HoverResult::new(file_range, format!("let {name}: {ty}")));
+                    }
                 }
             }
         }
@@ -361,18 +449,53 @@ impl Analysis {
         None
     }
 
-    /// Hover for `receiver.field` or `receiver.method()`.
-    fn member_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
+    fn builtin_macro_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
         let file_id = position.position.file_id;
-        let (receiver_ty, field_name, token_range) = self.resolve_dot_access(position)?;
-        let member_index = self.db.member_index(file_id);
+        let text = self.db.file_text(file_id)?;
+        let bytes = text.as_bytes();
+        let offset = (position.position.offset as usize).min(bytes.len());
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        let mut end = offset;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if start == end || bytes.get(end) != Some(&b'!') {
+            return None;
+        }
+        let spec = rua_core::builtin_macro(&text[start..end])?;
+        Some(
+            HoverResult::new(
+                FileRange::new(file_id, TextRange::new(start as u32, end as u32)),
+                spec.signature,
+            )
+            .with_documentation(spec.documentation),
+        )
+    }
+
+    /// Hover for `receiver.field` or `receiver.method()`.
+    fn member_hover(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<HoverResult> {
+        let (receiver_ty, field_name, token_range) =
+            self.resolve_dot_access(position, &query.def_map)?;
+        let member_index = &query.member_index;
 
         // Try field resolution
         if let Some(resolution) = member_index.resolve_field(&receiver_ty, &field_name) {
-            return Some(HoverResult::new(
-                token_range,
-                format!("{}: {}", field_name, resolution.ty()),
-            ));
+            let mut hover =
+                HoverResult::new(token_range, format!("{}: {}", field_name, resolution.ty()));
+            if let crate::hir::MemberTarget::Definition(id) = resolution.target()
+                && let Some(definition) = query.def_map.definition(id)
+                && let Some(documentation) = definition.documentation()
+            {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
         }
 
         // Try method resolution
@@ -397,10 +520,15 @@ impl Analysis {
             } else {
                 format!("{}, {}", receiver_str, params.join(", "))
             };
-            return Some(HoverResult::new(
-                token_range,
-                format!("fn {}({pts}) -> {ret}", field_name),
-            ));
+            let mut hover =
+                HoverResult::new(token_range, format!("fn {}({pts}) -> {ret}", field_name));
+            if let crate::hir::MemberTarget::Definition(id) = resolution.target()
+                && let Some(definition) = query.def_map.definition(id)
+                && let Some(documentation) = definition.documentation()
+            {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
         }
 
         None
@@ -408,11 +536,11 @@ impl Analysis {
 
     /// Navigate to the definition of the symbol at a cursor position.
     pub fn goto_definition(&self, position: ProjectPosition) -> Option<NavigationTarget> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        let query = self.project_query_data(position)?;
+        let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
         // 1. Try member access — resolve field/method to its definition.
-        if let Some(target) = self.member_goto_definition(position) {
+        if let Some(target) = self.member_goto_definition(position, &query) {
             return Some(target);
         }
 
@@ -436,18 +564,18 @@ impl Analysis {
     fn member_goto_definition(
         &self,
         position: ProjectPosition,
+        query: &ProjectQueryData,
     ) -> Option<NavigationTarget> {
-        let (receiver_ty, field_name, _token_range) = self.resolve_dot_access(position)?;
-        let file_id = position.position.file_id;
-        let def_map = self.db.def_map(file_id);
-        let member_index = self.db.member_index(file_id);
+        let (receiver_ty, field_name, _token_range) =
+            self.resolve_dot_access(position, &query.def_map)?;
+        let def_map = &query.def_map;
+        let member_index = &query.member_index;
 
         // Resolve field or method to its definition. Short-circuit:
         // only resolve the method if the field lookup returned nothing.
         let field = member_index.resolve_field(&receiver_ty, &field_name);
-        let resolution = field.or_else(|| {
-            member_index.resolve_method(&receiver_ty, &field_name)
-        })?;
+        let resolution =
+            field.or_else(|| member_index.resolve_method(&receiver_ty, &field_name))?;
 
         let def_id = match resolution.target() {
             crate::hir::MemberTarget::Definition(id) => id,
@@ -466,6 +594,7 @@ impl Analysis {
     fn resolve_dot_access(
         &self,
         position: ProjectPosition,
+        def_map: &DefMap,
     ) -> Option<(Ty, String, FileRange)> {
         let file_id = position.position.file_id;
         let text = self.db.file_text(file_id)?;
@@ -492,47 +621,39 @@ impl Analysis {
             return None;
         };
 
-        // Primary path: inference-based receiver type.
-        let def_map = self.db.def_map(position.position.file_id);
-        let receiver_ty = completion::infer_dot_receiver(
-            &self.db, &def_map, position.position, offset,
-        )
-        .or_else(|| {
-            // Fallback: scan syntax tree for the receiver identifier,
-            // then look it up by name across all bodies that contain
-            // the cursor position.
-            let prev = completion::previous_significant(&token)?;
-            let before_dot = completion::previous_significant(&prev)?;
-            if before_dot.kind() != rua_syntax::SyntaxKind::Ident {
-                return None;
-            }
-            let receiver_name = before_dot.text().to_string();
-            // Only search the body that contains the cursor.
-            let ctx = completion::find_containing_body_data(
-                &self.db, &def_map, position.position, offset,
-            )?;
-            let inference = ctx.inference.as_ref()?;
-            for (bid, binding) in ctx.body.bindings() {
-                if binding.name() == Some(&receiver_name) {
-                    return inference.type_of_binding(bid).cloned();
-                }
-            }
-            None
-        })?;
+        let receiver_ty =
+            completion::infer_dot_receiver(&self.db, def_map, position.position, offset)?;
 
         Some((receiver_ty, field_name, token_range))
     }
 
-    /// Go to implementation(s) of a trait method.
-    pub fn goto_implementation(
+    fn definition_at(
         &self,
         position: ProjectPosition,
-    ) -> Vec<NavigationTarget> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map.clone());
-        let Some(definition) = semantics.find_def_at(position.position) else {
+        query: &ProjectQueryData,
+    ) -> Option<Definition> {
+        if let Some((receiver_ty, name, _)) = self.resolve_dot_access(position, &query.def_map) {
+            let resolution = query
+                .member_index
+                .resolve_field(&receiver_ty, &name)
+                .or_else(|| query.member_index.resolve_method(&receiver_ty, &name))?;
+            let crate::hir::MemberTarget::Definition(def_id) = resolution.target() else {
+                return None;
+            };
+            return query.def_map.definition(def_id).cloned();
+        }
+        Semantics::new(Arc::clone(&self.db), query.def_map.clone()).find_def_at(position.position)
+    }
+
+    /// Go to implementation(s) of a trait method.
+    pub fn goto_implementation(&self, position: ProjectPosition) -> Vec<NavigationTarget> {
+        let Some(query) = self.project_query_data(position) else {
             return Vec::new();
         };
+        let Some(definition) = self.definition_at(position, &query) else {
+            return Vec::new();
+        };
+        let def_map = query.def_map.clone();
         // Only for methods owned by a trait.
         if definition.kind() != DefKind::Method {
             return Vec::new();
@@ -547,28 +668,16 @@ impl Analysis {
             return Vec::new();
         }
         let method_name = definition.name();
-        let trait_name = owner_def.name();
 
         let mut targets = Vec::new();
-        for def in def_map.definitions() {
-            if def.kind() != DefKind::Impl {
+        for implementation in query.member_index.implementations() {
+            if implementation.trait_definition() != Some(owner_id) {
                 continue;
             }
-            // Check if this impl is for our trait (by matching trait_ref name).
-            let sig = def.signature();
-            let trait_match = match sig {
-                crate::hir::ItemSignature::Impl(s) => s
-                    .trait_ref()
-                    .as_ref()
-                    .is_some_and(|tr| tr.name_matches(trait_name)),
-                _ => false,
-            };
-            if !trait_match {
-                continue;
-            }
-            // Look for a method with the same name in this impl's children.
-            for method_def in def_map.members(def.id()) {
-                if method_def.name() == method_name {
+            for method in implementation.methods() {
+                if let Some(method_def) = def_map.definition(*method)
+                    && method_def.name() == method_name
+                {
                     targets.push(NavigationTarget::new(
                         FileRange::new(method_def.file_id(), method_def.name_range()),
                         None,
@@ -586,8 +695,26 @@ impl Analysis {
         position: ProjectPosition,
         include_declaration: bool,
     ) -> Vec<ReferenceResult> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        self.references_cancellable(position, include_declaration, || false)
+            .unwrap_or_default()
+    }
+
+    /// Cancellable form used by adapters that run large project queries on a
+    /// worker. `None` means cancellation; an empty `Some` is a completed query.
+    pub fn references_cancellable(
+        &self,
+        position: ProjectPosition,
+        include_declaration: bool,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Option<Vec<ReferenceResult>> {
+        if is_cancelled() {
+            return None;
+        }
+        let Some(query) = self.project_query_data(position) else {
+            return Some(Vec::new());
+        };
+        let def_map = query.def_map.clone();
+        let semantics = Semantics::new(Arc::clone(&self.db), def_map.clone());
 
         // 1. Try local references.
         let local_refs = semantics.local_references_at(position.position, include_declaration);
@@ -595,7 +722,8 @@ impl Analysis {
             let mut results: Vec<ReferenceResult> = local_refs
                 .into_iter()
                 .map(|range| {
-                    let kind = if let Some(def_range) = semantics.local_definition_at(position.position)
+                    let kind = if let Some(def_range) =
+                        semantics.local_definition_at(position.position)
                         && range == def_range
                     {
                         ReferenceKind::Declaration
@@ -606,65 +734,35 @@ impl Analysis {
                 })
                 .collect();
             ReferenceResult::normalize(&mut results);
-            return results;
+            return Some(results);
         }
 
         // 2. Try item-level references (cross-file).
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map.clone());
-        if let Some(definition) = semantics.find_def_at(position.position) {
-            let target_name = definition.name().to_string();
+        if let Some(definition) = self.definition_at(position, &query) {
             let target_id = definition.id();
             let target_file = definition.file_id();
-            let mut results: Vec<ReferenceResult> = Vec::new();
-
-            // Scan all function/method bodies across the project.
-            for def in def_map.definitions() {
-                if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
-                    continue;
-                }
-                let Some(body) = self.db.body(def.id()) else { continue };
-                let Some(source_map) = self.db.body_source_map(def.id()) else {
-                    continue;
+            let Some(index) = self
+                .db
+                .project_reference_index_cancellable(position.project_id, &mut is_cancelled)
+            else {
+                return if is_cancelled() {
+                    None
+                } else {
+                    Some(Vec::new())
                 };
-                let Some(resolution) = self.db.body_resolution(def.id()) else {
-                    continue;
-                };
-                // Check name refs for matching text.
-                for (nrid, nr) in body.name_refs() {
-                    if nr.name() != Some(&target_name) {
-                        continue;
-                    }
-                    // Try to resolve this name ref to an item.
-                    let is_item_ref = matches!(
-                        resolution.resolve(nrid),
-                        Some(crate::hir::LocalResolveResult::NonLocal)
-                    );
-                    if !is_item_ref {
-                        continue;
-                    }
-                    // Verify it points to our target by checking the definition
-                    // at the name ref's position in its file.
-                    let Some(fr) = source_map.name_ref_range(nrid) else {
-                        continue;
+            };
+            let mut results: Vec<ReferenceResult> = index
+                .occurrences(target_id)
+                .iter()
+                .map(|occurrence| {
+                    let kind = match occurrence.kind() {
+                        crate::semantic::ReferenceOccurrenceKind::Write => ReferenceKind::Write,
+                        crate::semantic::ReferenceOccurrenceKind::Read
+                        | crate::semantic::ReferenceOccurrenceKind::Call => ReferenceKind::Read,
                     };
-                    let ref_file = def.file_id();
-                    let ref_def_map = if ref_file == target_file {
-                        def_map.clone()
-                    } else {
-                        self.db.def_map(ref_file)
-                    };
-                    let ref_semantics =
-                        Semantics::new(Rc::clone(&self.db), ref_def_map);
-                    if let Some(ref_def) = ref_semantics.find_def_at(
-                        crate::FilePosition::new(ref_file, fr.range.start()),
-                    )
-                        && ref_def.id() == target_id
-                    {
-                        results.push(ReferenceResult::new(fr, ReferenceKind::Read));
-                    }
-                }
-            }
+                    ReferenceResult::new(occurrence.range(), kind)
+                })
+                .collect();
 
             // Include the declaration.
             if include_declaration {
@@ -676,11 +774,11 @@ impl Analysis {
 
             ReferenceResult::normalize(&mut results);
             if !results.is_empty() {
-                return results;
+                return Some(results);
             }
         }
 
-        Vec::new()
+        Some(Vec::new())
     }
 
     /// Check whether the symbol at the cursor can be renamed.
@@ -688,8 +786,8 @@ impl Analysis {
         if self.is_file_read_only(position.position.file_id) {
             return None;
         }
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+        let query = self.project_query_data(position)?;
+        let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
         // Local binding rename.
         if let crate::hir::LocalResolveResult::Resolved(target) =
@@ -698,17 +796,21 @@ impl Analysis {
             let owner_def = target.owner().owner();
             if let Some(body) = self.db.body(owner_def)
                 && let Some(source_map) = self.db.body_source_map(owner_def)
-                    && let Some(file_range) = source_map.binding_range(target.binding()) {
-                        let name = body
-                            .binding(target.binding())
-                            .and_then(|b| b.name())
-                            .unwrap_or("?");
-                        return Some(RenameTarget::new(file_range, name));
-                    }
+                && let Some(file_range) = source_map.binding_range(target.binding())
+            {
+                let name = body
+                    .binding(target.binding())
+                    .and_then(|b| b.name())
+                    .unwrap_or("?");
+                return Some(RenameTarget::new(file_range, name));
+            }
         }
 
         // Item rename.
-        if let Some(definition) = semantics.find_def_at(position.position) {
+        if let Some(definition) = self.definition_at(position, &query) {
+            if self.is_file_read_only(definition.file_id()) {
+                return None;
+            }
             return Some(RenameTarget::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
                 definition.name(),
@@ -736,7 +838,8 @@ impl Analysis {
         }
 
         SourceChange::from_edits(
-            refs.iter().map(|r| (r.range().file_id, TextEdit::new(r.range().range, new_name))),
+            refs.iter()
+                .map(|r| (r.range().file_id, TextEdit::new(r.range().range, new_name))),
             |file_id| self.is_file_read_only(file_id),
         )
     }
@@ -744,143 +847,111 @@ impl Analysis {
     // -- call hierarchy --------------------------------------------------
 
     /// Find the function/method definition at the cursor for call hierarchy.
-    pub fn call_hierarchy_prepare(
-        &self,
-        position: ProjectPosition,
-    ) -> Option<CallHierarchyItem> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
-        let definition = semantics.find_def_at(position.position)?;
-        if !matches!(
-            definition.kind(),
-            DefKind::Function | DefKind::Method
-        ) {
+    pub fn call_hierarchy_prepare(&self, position: ProjectPosition) -> Option<CallHierarchyItem> {
+        let query = self.project_query_data(position)?;
+        let definition = self.definition_at(position, &query)?;
+        if !matches!(definition.kind(), DefKind::Function | DefKind::Method) {
             return None;
         }
         Some(CallHierarchyItem {
+            project_id: position.project_id,
+            target: definition.id(),
             name: definition.name().to_string(),
             kind: definition.kind(),
             file_id: definition.file_id(),
             range: definition.name_range(),
+            call_sites: Vec::new(),
         })
     }
 
     /// Find all callers of a function/method.
-    pub fn call_hierarchy_incoming(
-        &self,
-        item: &CallHierarchyItem,
-    ) -> Vec<CallHierarchyItem> {
-        let def_map = self.db.def_map(item.file_id);
-        let mut callers = Vec::new();
-        for def in def_map.definitions() {
-            if !matches!(def.kind(), DefKind::Function | DefKind::Method) {
-                continue;
-            }
-            let Some(body) = self.db.body(def.id()) else { continue };
-            let Some(_source_map) = self.db.body_source_map(def.id()) else {
-                continue;
-            };
-            // Check if this body contains a call to the target.
-            let has_call = body.exprs().any(|(_eid, expr)| match expr {
-                crate::hir::Expr::Call { callee, .. } => {
-                    // Check if callee name matches
-                    if let crate::hir::Expr::Path(path) =
-                        body.expr(*callee).unwrap_or(&crate::hir::Expr::Missing)
-                    {
-                        path.last()
-                            .and_then(|nrid| body.name_ref(*nrid))
-                            .and_then(|nr| nr.name())
-                            == Some(&item.name)
-                    } else {
-                        false
-                    }
-                }
-                crate::hir::Expr::MethodCall { method, .. } => {
-                    body.name_ref(*method)
-                        .and_then(|nr| nr.name())
-                        == Some(&item.name)
-                }
-                _ => false,
-            });
-            if has_call {
-                callers.push(CallHierarchyItem {
-                    name: def.name().to_string(),
-                    kind: def.kind(),
-                    file_id: def.file_id(),
-                    range: def.name_range(),
-                });
-            }
+    pub fn call_hierarchy_incoming(&self, item: &CallHierarchyItem) -> Vec<CallHierarchyItem> {
+        let Some(def_map) = self.db.project_def_map(item.project_id) else {
+            return Vec::new();
+        };
+        let Some(target) = def_map.definition(item.target) else {
+            return Vec::new();
+        };
+        let Some(index) = self.db.project_reference_index(item.project_id) else {
+            return Vec::new();
+        };
+        let mut callers = std::collections::BTreeMap::<DefId, Vec<FileRange>>::new();
+        for occurrence in index.occurrences(target.id()).iter().filter(|occurrence| {
+            occurrence.kind() == crate::semantic::ReferenceOccurrenceKind::Call
+        }) {
+            callers
+                .entry(occurrence.owner())
+                .or_default()
+                .push(occurrence.range());
         }
         callers
+            .into_iter()
+            .filter_map(|(caller, mut call_sites)| {
+                let definition = def_map.definition(caller)?;
+                call_sites.sort();
+                call_sites.dedup();
+                Some(CallHierarchyItem {
+                    project_id: item.project_id,
+                    target: definition.id(),
+                    name: definition.name().to_string(),
+                    kind: definition.kind(),
+                    file_id: definition.file_id(),
+                    range: definition.name_range(),
+                    call_sites,
+                })
+            })
+            .collect()
     }
 
     /// Find all functions/methods called by this one.
-    pub fn call_hierarchy_outgoing(
-        &self,
-        item: &CallHierarchyItem,
-    ) -> Vec<CallHierarchyItem> {
-        let def_map = self.db.def_map(item.file_id);
-        let target_id = match def_map
-            .definitions()
-            .find(|d| {
-                d.name() == item.name
-                    && d.file_id() == item.file_id
-                    && matches!(d.kind(), DefKind::Function | DefKind::Method)
-            })
-            .map(|d| d.id())
-        {
-            Some(id) => id,
-            None => return Vec::new(),
-        };
-        let Some(body) = self.db.body(target_id) else {
+    pub fn call_hierarchy_outgoing(&self, item: &CallHierarchyItem) -> Vec<CallHierarchyItem> {
+        let Some(def_map) = self.db.project_def_map(item.project_id) else {
             return Vec::new();
         };
-        let mut callees = Vec::new();
-        for (_eid, expr) in body.exprs() {
-            let name = match expr {
-                crate::hir::Expr::Call { callee, .. } => {
-                    if let crate::hir::Expr::Path(path) = body.expr(*callee).unwrap_or(&crate::hir::Expr::Missing) {
-                        path.last()
-                            .and_then(|nrid| body.name_ref(*nrid))
-                            .and_then(|nr| nr.name())
-                            .map(|n| n.to_string())
-                    } else {
-                        None
-                    }
-                }
-                crate::hir::Expr::MethodCall { method, .. } => {
-                    body.name_ref(*method).and_then(|nr| nr.name().map(|n| n.to_string()))
-                }
-                _ => None,
-            };
-            if let Some(name) = name
-                && let Some(target_def) = def_map
-                    .definitions()
-                    .find(|d| {
-                        d.name() == name
-                            && matches!(d.kind(), DefKind::Function | DefKind::Method)
-                    })
-            {
-                callees.push(CallHierarchyItem {
-                    name: target_def.name().to_string(),
-                    kind: target_def.kind(),
-                    file_id: target_def.file_id(),
-                    range: target_def.name_range(),
-                });
-            }
+        let Some(owner) = def_map.definition(item.target) else {
+            return Vec::new();
+        };
+        let Some(index) = self.db.project_reference_index(item.project_id) else {
+            return Vec::new();
+        };
+        let mut callees = std::collections::BTreeMap::<DefId, Vec<FileRange>>::new();
+        for occurrence in index
+            .occurrences_in(owner.id())
+            .iter()
+            .filter(|occurrence| {
+                occurrence.kind() == crate::semantic::ReferenceOccurrenceKind::Call
+            })
+        {
+            callees
+                .entry(occurrence.target())
+                .or_default()
+                .push(occurrence.range());
         }
         callees
+            .into_iter()
+            .filter_map(|(callee, mut call_sites)| {
+                let definition = def_map.definition(callee)?;
+                call_sites.sort();
+                call_sites.dedup();
+                Some(CallHierarchyItem {
+                    project_id: item.project_id,
+                    target: definition.id(),
+                    name: definition.name().to_string(),
+                    kind: definition.kind(),
+                    file_id: definition.file_id(),
+                    range: definition.name_range(),
+                    call_sites,
+                })
+            })
+            .collect()
     }
 
     // -- type hierarchy ---------------------------------------------------
 
     /// Find the type definition at the cursor for type hierarchy.
-    pub fn type_hierarchy_prepare(
-        &self,
-        position: ProjectPosition,
-    ) -> Option<TypeHierarchyItem> {
-        let def_map = self.db.def_map(position.position.file_id);
-        let semantics = Semantics::new(Rc::clone(&self.db), def_map);
+    pub fn type_hierarchy_prepare(&self, position: ProjectPosition) -> Option<TypeHierarchyItem> {
+        let query = self.project_query_data(position)?;
+        let semantics = Semantics::new(Arc::clone(&self.db), query.def_map);
         let definition = semantics.find_def_at(position.position)?;
         if !matches!(
             definition.kind(),
@@ -889,6 +960,8 @@ impl Analysis {
             return None;
         }
         Some(TypeHierarchyItem {
+            project_id: position.project_id,
+            target: definition.id(),
             name: definition.name().to_string(),
             kind: definition.kind(),
             file_id: definition.file_id(),
@@ -897,75 +970,77 @@ impl Analysis {
     }
 
     /// Find supertypes (traits implemented) for a type.
-    pub fn type_hierarchy_supertypes(
-        &self,
-        item: &TypeHierarchyItem,
-    ) -> Vec<TypeHierarchyItem> {
-        let def_map = self.db.def_map(item.file_id);
+    pub fn type_hierarchy_supertypes(&self, item: &TypeHierarchyItem) -> Vec<TypeHierarchyItem> {
+        let Some(def_map) = self.db.project_def_map(item.project_id) else {
+            return Vec::new();
+        };
+        let Some(member_index) = self.db.project_member_index(item.project_id) else {
+            return Vec::new();
+        };
+        let target = if def_map
+            .definition(item.target)
+            .is_some_and(|definition| definition.kind() == DefKind::Impl)
+        {
+            member_index
+                .implementation(item.target)
+                .and_then(|implementation| match implementation.target_ty() {
+                    Ty::Named(named) => Some(named.definition()),
+                    _ => None,
+                })
+        } else {
+            Some(item.target)
+        };
+        let Some(target) = target else {
+            return Vec::new();
+        };
         let mut result = Vec::new();
-        // Find all impl blocks whose target type matches this item.
-        for def in def_map.definitions() {
-            if def.kind() != DefKind::Impl {
+        for implementation in member_index.implementations() {
+            if !matches!(implementation.target_ty(), Ty::Named(named) if named.definition() == target)
+            {
                 continue;
             }
-            let sig = def.signature();
-            if let crate::hir::ItemSignature::Impl(s) = sig {
-                // Check if the impl is for our type (by matching target type name)
-                if s.target_type().name_matches(&item.name)
-                {
-                    // Add the trait being implemented
-                    if let Some(trait_ref) = s.trait_ref()
-                        && let Some(trait_name) = trait_ref.syntax()
-                        && let Some(trait_def) = def_map.definitions().find(|d| {
-                            d.kind() == DefKind::Trait && d.name() == trait_name
-                        })
-                    {
-                        result.push(TypeHierarchyItem {
-                            name: trait_def.name().to_string(),
-                            kind: DefKind::Trait,
-                            file_id: trait_def.file_id(),
-                            range: trait_def.name_range(),
-                        });
-                    }
-                }
+            if let Some(trait_id) = implementation.trait_definition()
+                && let Some(trait_def) = def_map.definition(trait_id)
+            {
+                result.push(TypeHierarchyItem {
+                    project_id: item.project_id,
+                    target: trait_def.id(),
+                    name: trait_def.name().to_string(),
+                    kind: DefKind::Trait,
+                    file_id: trait_def.file_id(),
+                    range: trait_def.name_range(),
+                });
             }
         }
         result
     }
 
     /// Find subtypes (implementors) of a trait.
-    pub fn type_hierarchy_subtypes(
-        &self,
-        item: &TypeHierarchyItem,
-    ) -> Vec<TypeHierarchyItem> {
-        let def_map = self.db.def_map(item.file_id);
+    pub fn type_hierarchy_subtypes(&self, item: &TypeHierarchyItem) -> Vec<TypeHierarchyItem> {
+        let Some(def_map) = self.db.project_def_map(item.project_id) else {
+            return Vec::new();
+        };
+        let Some(member_index) = self.db.project_member_index(item.project_id) else {
+            return Vec::new();
+        };
         let mut result = Vec::new();
-        for def in def_map.definitions() {
-            if def.kind() != DefKind::Impl {
+        for implementation in member_index.implementations() {
+            if implementation.trait_definition() != Some(item.target) {
                 continue;
             }
-            let sig = def.signature();
-            if let crate::hir::ItemSignature::Impl(s) = sig
-                && let Some(trait_ref) = s.trait_ref()
-                    && let Some(trait_name) = trait_ref.syntax()
-                    && trait_name == item.name
-                {
-                    // Add the implementing type
-                    if let Some(type_name) = s.target_type().syntax()
-                        && let Some(type_def) = def_map.definitions().find(|d| {
-                            matches!(
-                                d.kind(),
-                                DefKind::Struct | DefKind::Enum
-                            ) && d.name() == type_name
-                        }) {
-                            result.push(TypeHierarchyItem {
-                                name: type_def.name().to_string(),
-                                kind: type_def.kind(),
-                                file_id: type_def.file_id(),
-                                range: type_def.name_range(),
-                            });
-                        }
-                }
+            let Ty::Named(named) = implementation.target_ty() else {
+                continue;
+            };
+            if let Some(type_def) = def_map.definition(named.definition()) {
+                result.push(TypeHierarchyItem {
+                    project_id: item.project_id,
+                    target: type_def.id(),
+                    name: type_def.name().to_string(),
+                    kind: type_def.kind(),
+                    file_id: type_def.file_id(),
+                    range: type_def.name_range(),
+                });
+            }
         }
         result
     }
@@ -987,15 +1062,14 @@ impl Analysis {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn item_hover_text(definition: &Definition, db: &BaseDb, root_file: FileId) -> String {
-    let def_map = db.def_map(root_file);
+fn item_hover_text(definition: &Definition, member_index: &MemberIndex) -> String {
     // Delegate to the shared signature formatter in the completion module.
     // For Impl blocks (which definition_signature returns None for), show a
     // simple label.
     if definition.kind() == DefKind::Impl {
         return format!("impl {}", definition.name());
     }
-    completion::definition_signature(db, &def_map, definition)
+    completion::definition_signature(member_index, definition)
         .unwrap_or_else(|| definition.name().to_string())
 }
 
@@ -1050,14 +1124,14 @@ fn resolve_callee_param_names(
 
 #[cfg(test)]
 mod tests {
-    use super::AnalysisHost;
+    use super::{Analysis, AnalysisHost};
     use crate::vfs::{Change, FileId, FileKind, SourceRootId, SourceRootKind};
 
     #[test]
     fn analysis_host_applies_changes_and_exposes_parse() {
         let file_id = FileId::new(0);
         let mut change = Change::new();
-        change.set_file_text(file_id, "fn main() {}");
+        change.set_file_text(file_id, "fn main() {}\nmain();");
 
         let mut host = AnalysisHost::new();
         host.apply_change(change);
@@ -1065,7 +1139,7 @@ mod tests {
 
         assert_eq!(
             analysis.parse(file_id).syntax_node().text().to_string(),
-            "fn main() {}"
+            "fn main() {}\nmain();"
         );
         assert!(analysis.diagnostics(file_id).is_empty());
     }
@@ -1093,6 +1167,25 @@ mod tests {
             after.parse(file_id).syntax_node().text().to_string(),
             "fn after() {}"
         );
+    }
+
+    #[test]
+    fn analysis_snapshot_is_send_sync_and_queries_on_a_worker() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Analysis>();
+
+        let file_id = FileId::new(0);
+        let mut change = Change::new();
+        change.set_file_text(file_id, "fn worker() -> i64 { 42 }");
+        let mut host = AnalysisHost::new();
+        host.apply_change(change);
+        let analysis = host.analysis();
+
+        let source =
+            std::thread::spawn(move || analysis.parse(file_id).syntax_node().text().to_string())
+                .join()
+                .expect("analysis worker must not panic");
+        assert_eq!(source, "fn worker() -> i64 { 42 }");
     }
 
     #[test]
@@ -1140,6 +1233,38 @@ mod tests {
             Some(SourceRootKind::Library)
         );
         assert!(analysis.is_file_read_only(file_id));
+    }
+
+    #[test]
+    fn declaration_files_reject_executable_bodies_and_top_level_statements() {
+        let root_id = SourceRootId::new(1);
+        let file_id = FileId::new(10);
+        let source = r#"
+            struct Value {}
+            fn implemented() { let value = 1; }
+            impl Value { fn method(&self) { let value = 1; } }
+            trait Contract { fn defaulted(&self) { let value = 1; } }
+            mod nested { let value = 1; }
+            let top_level = 1;
+        "#;
+        let mut change = Change::new();
+        change.set_source_root(root_id, SourceRootKind::Library);
+        change.set_file(file_id, root_id, FileKind::Declaration, source);
+
+        let mut host = AnalysisHost::new();
+        host.apply_change(change);
+        let diagnostics = host.analysis().diagnostics(file_id);
+        let invalid = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code() == Some(rua_core::DiagnosticCode::NameInvalidDeclaration)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(invalid.len(), 5, "{invalid:#?}");
+        for diagnostic in invalid {
+            assert!(!diagnostic.range().is_empty(), "{diagnostic:#?}");
+        }
     }
 
     #[test]
@@ -1196,4 +1321,3 @@ mod tests {
         assert_eq!(after_removal.source_root_kind(file_id), None);
     }
 }
-

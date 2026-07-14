@@ -8,28 +8,62 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  rust:
+    name: Rust and Lua 5.5
     runs-on: ubuntu-latest
+    env:
+      RUA_LUA: ${{ runner.temp }}/lua-5.5.0/src/lua
     steps:
       - uses: actions/checkout@v4
       - name: Select stable Rust
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup component add clippy
-      - name: Parser conformance
-        run: cargo test --locked -p rua-syntax parser_conformance
-      - name: Range conformance
-        run: cargo test --locked -p rua-syntax range_conformance
-      - name: Compiler oracle
-        run: cargo test --locked -p ruac
-      - name: Workspace tests
-        run: cargo test --locked --workspace --features rua-lsp/lsp
-      - name: Clippy (rua-syntax)
-        run: cargo clippy --locked -p rua-syntax --all-targets --no-deps -- -D warnings
-      - name: Clippy (rua-analysis)
-        run: cargo clippy --locked -p rua-analysis --all-targets --no-deps -- -D warnings
-      - name: Clippy (rua-lsp)
-        run: cargo clippy --locked -p rua-lsp --features lsp --all-targets --no-deps -- -D warnings
-      - name: Boundary checks
+          rustup component add rustfmt clippy
+      - name: Build pinned Lua 5.5.0
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://www.lua.org/ftp/lua-5.5.0.tar.gz \
+            --output lua-5.5.0.tar.gz
+          echo '57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d  lua-5.5.0.tar.gz' \
+            | sha256sum --check
+          tar --extract --gzip --file lua-5.5.0.tar.gz
+          make --directory lua-5.5.0
+          "$RUA_LUA" -v
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Check every target and feature
+        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Test workspace
+        run: cargo test --locked --workspace --all-features
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features --no-deps -- -D warnings
+      - name: Dependency boundaries
         run: bash scripts/check-boundaries.sh
+
+  vscode:
+    name: VS Code Extension Host
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Select stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+      - name: Install extension dependencies
+        run: npm ci
+      - name: Audit extension dependencies
+        run: npm audit --audit-level=moderate
+      - name: Type-check extension
+        run: npm run check-types
+      - name: Run real Extension Host lifecycle
+        run: xvfb-run --auto-servernum npm run test-extension

@@ -1,0 +1,18 @@
+phase4a/compile-fail/closure_param_cannot_infer.rua
+  E0200 file=phase4a/compile-fail/closure_param_cannot_infer.rua range=31..36 arguments=[line="2", message="cannot infer type of closure parameter `value`; add a type annotation or use it in a supported call context"]
+phase4a/compile-fail/closure_return_mismatch.rua
+  E0200 file=phase4a/compile-fail/closure_return_mismatch.rua range=32..65 arguments=[line="2", message="closure expects return type `bool`, found `String`"]
+phase4a/compile-fail/closure_mut_capture_invalid.rua
+  E0200 file=phase4a/compile-fail/closure_mut_capture_invalid.rua range=70..75 arguments=[line="4", message="mutable capture of `total` is only supported in a fused iterator consumer"]
+phase4a/compile-fail/closure_escape_unsupported.rua
+  E0200 file=phase4a/compile-fail/closure_escape_unsupported.rua range=30..52 arguments=[line="2", message="closure escape is not supported yet"]
+phase4a/compile-fail/iterator_non_iterable_source.rua
+  E0200 file=phase4a/compile-fail/iterator_non_iterable_source.rua range=29..31 arguments=[line="2", message="type `i64` is not iterable"]
+phase4a/compile-fail/iterator_map_arg_not_closure.rua
+  E0200 file=phase4a/compile-fail/iterator_map_arg_not_closure.rua range=34..36 arguments=[line="2", message="iterator map argument must be a closure"]
+phase4a/compile-fail/iterator_filter_not_bool.rua
+  E0200 file=phase4a/compile-fail/iterator_filter_not_bool.rua range=75..92 arguments=[line="4", message="iterator filter predicate must be `bool`, found `i64`"]
+phase4a/compile-fail/iterator_collect_mismatch.rua
+  E0200 file=phase4a/compile-fail/iterator_collect_mismatch.rua range=29..92 arguments=[line="2", message="collect target element type `String` is incompatible with iterator item `i64`"]
+phase4a/compile-fail/iterator_escape_unsupported.rua
+  E0200 file=phase4a/compile-fail/iterator_escape_unsupported.rua range=26..69 arguments=[line="2", message="iterator escape is not supported yet"]

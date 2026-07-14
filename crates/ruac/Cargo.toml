@@ -12,3 +12,8 @@ path = "src/main.rs"
 name = "ruac"
 path = "src/lib.rs"
 doctest = false
+
+[dependencies]
+rua-core.workspace = true
+rua-lex.workspace = true
+rua-project.workspace = true

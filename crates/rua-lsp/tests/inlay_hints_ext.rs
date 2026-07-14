@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn inlay_hint_type_hint_position_after_binding_name() {
@@ -16,12 +16,21 @@ fn inlay_hint_type_hint_position_after_binding_name() {
     let def_map = analysis.def_map(file_id);
 
     for d in def_map.definitions() {
-        if !matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
+        if !matches!(
+            d.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) {
             continue;
         }
-        let Some(body) = analysis.body(d.id()) else { continue };
-        let Some(source_map) = analysis.body_source_map(d.id()) else { continue };
-        let Some(inference) = analysis.infer(d.id()) else { continue };
+        let Some(body) = analysis.body(d.id()) else {
+            continue;
+        };
+        let Some(source_map) = analysis.body_source_map(d.id()) else {
+            continue;
+        };
+        let Some(inference) = analysis.infer(d.id()) else {
+            continue;
+        };
 
         for (bid, b) in body.bindings() {
             if b.name() == Some("my_var")
@@ -33,8 +42,10 @@ fn inlay_hint_type_hint_position_after_binding_name() {
                 // Hint should be placed right after the binding name
                 assert_eq!(fr.range.start(), 16); // byte offset of `my_var`
                 // The type of 42 should be i64
-                assert!(ty.to_string().contains("i64"),
-                    "my_var should be i64, got: {ty}");
+                assert!(
+                    ty.to_string().contains("i64"),
+                    "my_var should be i64, got: {ty}"
+                );
             }
         }
     }
@@ -52,12 +63,21 @@ fn inlay_hint_for_tuple_destructuring() {
 
     let mut found_types = Vec::new();
     for d in def_map.definitions() {
-        if !matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
+        if !matches!(
+            d.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) {
             continue;
         }
-        let Some(body) = analysis.body(d.id()) else { continue };
-        let Some(source_map) = analysis.body_source_map(d.id()) else { continue };
-        let Some(inference) = analysis.infer(d.id()) else { continue };
+        let Some(body) = analysis.body(d.id()) else {
+            continue;
+        };
+        let Some(source_map) = analysis.body_source_map(d.id()) else {
+            continue;
+        };
+        let Some(inference) = analysis.infer(d.id()) else {
+            continue;
+        };
 
         for (bid, b) in body.bindings() {
             if let Some(_name) = b.name()
@@ -72,8 +92,10 @@ fn inlay_hint_for_tuple_destructuring() {
 
     // a should be i64, b should be bool (tuple destructuring may not infer
     // individual element types yet; verify infrastructure works)
-    assert!(!found_types.is_empty() || found_types.is_empty(),
-        "inference ran without panic on tuple destructuring");
+    assert!(
+        !found_types.is_empty() || found_types.is_empty(),
+        "inference ran without panic on tuple destructuring"
+    );
     let _ = found_types;
 }
 
@@ -81,27 +103,38 @@ fn inlay_hint_for_tuple_destructuring() {
 fn inlay_hint_for_struct_literal_bindings() {
     let uri = uri("/test/inlay_struct_binding.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri,
-        "struct Point { x: i64, y: i64 }\nfn main() { let p = Point { x: 10, y: 20 }; }");
+    srv.open(
+        &uri,
+        "struct Point { x: i64, y: i64 }\nfn main() { let p = Point { x: 10, y: 20 }; }",
+    );
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
     let def_map = analysis.def_map(file_id);
 
     for d in def_map.definitions() {
-        if !matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
+        if !matches!(
+            d.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) {
             continue;
         }
-        let Some(body) = analysis.body(d.id()) else { continue };
-        let Some(inference) = analysis.infer(d.id()) else { continue };
+        let Some(body) = analysis.body(d.id()) else {
+            continue;
+        };
+        let Some(inference) = analysis.infer(d.id()) else {
+            continue;
+        };
 
         for (bid, b) in body.bindings() {
             if b.name() == Some("p")
                 && let Some(ty) = inference.type_of_binding(bid)
             {
                 // p should have type Point
-                assert!(ty.to_string().contains("Point"),
-                    "p should be Point, got: {ty}");
+                assert!(
+                    ty.to_string().contains("Point"),
+                    "p should be Point, got: {ty}"
+                );
             }
         }
     }
@@ -120,18 +153,27 @@ fn inlay_hint_for_if_else_branches() {
     let def_map = analysis.def_map(file_id);
 
     for d in def_map.definitions() {
-        if !matches!(d.kind(), rua_analysis::DefKind::Function | rua_analysis::DefKind::Method) {
+        if !matches!(
+            d.kind(),
+            rua_analysis::DefKind::Function | rua_analysis::DefKind::Method
+        ) {
             continue;
         }
-        let Some(body) = analysis.body(d.id()) else { continue };
-        let Some(inference) = analysis.infer(d.id()) else { continue };
+        let Some(body) = analysis.body(d.id()) else {
+            continue;
+        };
+        let Some(inference) = analysis.infer(d.id()) else {
+            continue;
+        };
 
         for (bid, b) in body.bindings() {
             if b.name() == Some("x")
                 && let Some(ty) = inference.type_of_binding(bid)
             {
-                assert!(ty.to_string().contains("i64"),
-                    "if-else branches should unify to i64, got: {ty}");
+                assert!(
+                    ty.to_string().contains("i64"),
+                    "if-else branches should unify to i64, got: {ty}"
+                );
             }
         }
     }

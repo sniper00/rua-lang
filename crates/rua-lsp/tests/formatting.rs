@@ -2,16 +2,13 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn formatting_produces_output() {
     let uri = uri("/test/fmt.rua");
     let mut srv = TestServer::new();
-    srv.open(
-        &uri,
-        "fn   main()   {   let   x   =   1;   }",
-    );
+    srv.open(&uri, "fn   main()   {   let   x   =   1;   }");
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
@@ -20,7 +17,10 @@ fn formatting_produces_output() {
     // Call the formatter directly (same as LSP handler does)
     let formatted = rua_syntax::format::format_str(&source);
     // Formatted output should exist and not be empty
-    assert!(!formatted.is_empty(), "formatted output should not be empty");
+    assert!(
+        !formatted.is_empty(),
+        "formatted output should not be empty"
+    );
     // Formatted output should still contain the variable
     assert!(
         formatted.contains("let"),

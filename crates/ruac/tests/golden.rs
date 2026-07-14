@@ -4,6 +4,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden \
@@ -12,7 +14,7 @@ const MIN_COMPILE_PASS_CASES: usize = 30;
 const MIN_COMPILE_FAIL_CASES: usize = 30;
 const MIN_COVERAGE_ROWS: usize = 25;
 const COVERAGE_HEADER: &str =
-    "| Feature | Compile pass | Compile fail | Parser/range | IDE snapshot | Notes |";
+    "| Feature | Compile pass | Compile fail | Parser/range | IDE oracle | Notes |";
 const REQUIRED_COVERAGE_MARKERS: &[&str] = &[
     "| Closures |",
     "| Iterator adapters and fusion |",
@@ -30,7 +32,7 @@ const RUAI_COMPILE_PASS_CASES: &[&str] = &[
     "library_mount_single_file",
     "workspace_shadows_library",
 ];
-const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_type_error"];
+const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_body_rejected", "declaration_type_error"];
 const PHASE4A_ACTIVE_PASS_CASES: &[&str] = &[
     "closure_expr_inferred",
     "closure_block_typed",
@@ -66,7 +68,9 @@ const REQUIRED_DIRS: &[&str] = &[
     "ruai",
     "ide",
     "phase4a",
+    "source-map",
 ];
+static NEXT_LUA_SCRIPT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 enum GoldenKind {
@@ -131,8 +135,8 @@ fn fixture_label(path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn stable_diagnostic(error: &str) -> String {
-    let normalized = error.replace('\\', "/");
+fn stable_diagnostic(error: &impl std::fmt::Display) -> String {
+    let normalized = error.to_string().replace('\\', "/");
     let root = golden_root().to_string_lossy().replace('\\', "/");
     normalized.replace(&root, "<golden>")
 }
@@ -199,6 +203,133 @@ fn assert_or_update(
     Ok(())
 }
 
+fn assert_named_golden(expected_path: &Path, actual: &str, update: bool) -> Result<(), String> {
+    if update {
+        fs::write(expected_path, actual)
+            .map_err(|error| format!("cannot write {}: {error}", expected_path.display()))?;
+        println!("updated {}", fixture_label(expected_path));
+        return Ok(());
+    }
+    let expected = fs::read_to_string(expected_path)
+        .map_err(|error| format!("cannot read {}: {error}", expected_path.display()))?;
+    if expected != actual {
+        return Err(mismatch_message(expected_path, &expected, actual));
+    }
+    Ok(())
+}
+
+fn execute_lua(source: &Path, lua: &str) -> Result<(), String> {
+    let unique = NEXT_LUA_SCRIPT.fetch_add(1, Ordering::Relaxed);
+    let script =
+        std::env::temp_dir().join(format!("ruac-golden-{}-{unique}.lua", std::process::id()));
+    fs::write(&script, lua)
+        .map_err(|error| format!("cannot write {}: {error}", script.display()))?;
+    let runtime = workspace_root().join("lualib/?.lua");
+    let output = Command::new(std::env::var("RUA_LUA").unwrap_or_else(|_| "lua".to_string()))
+        .arg("-e")
+        .arg("function host_format(...) return '' end")
+        .arg(&script)
+        .env("LUA_PATH", format!("{};;", runtime.display()))
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot execute Lua for {}: {error}; set RUA_LUA to a Lua 5.5 executable",
+                fixture_label(source)
+            )
+        })?;
+    let _ = fs::remove_file(&script);
+    if !output.status.success() {
+        return Err(format!(
+            "generated Lua for {} failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            fixture_label(source),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(())
+}
+
+fn structured_failure_entry(source: &Path, failure: &ruac::CompileFailure) -> String {
+    let mut output = format!("{}\n", fixture_label(source));
+    for diagnostic in &failure.diagnostics {
+        let file = diagnostic
+            .file
+            .and_then(|file| failure.files.get(file.index() as usize))
+            .filter(|path| !path.is_empty())
+            .map(Path::new)
+            .map(fixture_label)
+            .unwrap_or_else(|| "-".to_string());
+        let range = diagnostic
+            .range
+            .map(|range| format!("{}..{}", range.start(), range.end()))
+            .unwrap_or_else(|| "-".to_string());
+        let mut arguments = diagnostic.arguments.iter().collect::<Vec<_>>();
+        arguments.sort_by_key(|argument| (&argument.name, &argument.value));
+        let root = golden_root().to_string_lossy().replace('\\', "/");
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| {
+                let value = argument.value.replace('\\', "/");
+                format!("{}={:?}", argument.name, value.replace(&root, "<golden>"))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!(
+            "  {} file={} range={} arguments=[{}]\n",
+            diagnostic.code.as_str(),
+            file,
+            range,
+            arguments,
+        ));
+    }
+    output
+}
+
+fn source_map_snapshot() -> Result<String, String> {
+    let root = golden_root().join("source-map");
+    let main = root.join("main.rua");
+    let module = root.join("api.rua");
+    let sources = [
+        fs::read_to_string(&main).map_err(|error| format!("read {}: {error}", main.display()))?,
+        fs::read_to_string(&module)
+            .map_err(|error| format!("read {}: {error}", module.display()))?,
+    ];
+    let artifact = ruac::compile_path_artifact(&main)
+        .map_err(|error| format!("source-map fixture failed to compile:\n{error}"))?;
+    let mut snapshot = String::new();
+    for (index, mapping) in artifact.source_map.iter().enumerate() {
+        if mapping.generated_start > mapping.generated_end
+            || mapping.generated_end > artifact.source.len()
+            || !artifact.source.is_char_boundary(mapping.generated_start)
+            || !artifact.source.is_char_boundary(mapping.generated_end)
+        {
+            return Err(format!("invalid generated source mapping {mapping:?}"));
+        }
+        let source = sources
+            .get(mapping.source.file as usize)
+            .ok_or_else(|| format!("mapping references unknown file: {mapping:?}"))?;
+        let source_end = mapping.source.end();
+        if source_end > source.len()
+            || !source.is_char_boundary(mapping.source.start)
+            || !source.is_char_boundary(source_end)
+        {
+            return Err(format!("invalid Rua source mapping {mapping:?}"));
+        }
+        snapshot.push_str(&format!(
+            "{index}: generated={}..{} lua={:?} <- file={} source={}..{} rua={:?}\n",
+            mapping.generated_start,
+            mapping.generated_end,
+            &artifact.source[mapping.generated_start..mapping.generated_end],
+            mapping.source.file,
+            mapping.source.start,
+            source_end,
+            &source[mapping.source.start..source_end],
+        ));
+    }
+    Ok(snapshot)
+}
+
 fn run_compile_pass(update: bool) -> Result<(), String> {
     let root = golden_root().join("compile-pass");
     let sources = discover_rua(&root)?;
@@ -216,6 +347,7 @@ fn run_compile_pass(update: bool) -> Result<(), String> {
             )
         })?;
         assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
+        execute_lua(&source, &actual)?;
     }
     Ok(())
 }
@@ -229,6 +361,7 @@ fn run_compile_fail(update: bool) -> Result<(), String> {
             sources.len()
         ));
     }
+    let mut structured = String::new();
     for source in sources {
         let error = ruac::compile_path(&source).err();
         let Some(error) = error else {
@@ -239,7 +372,13 @@ fn run_compile_fail(update: bool) -> Result<(), String> {
         };
         let actual = stable_diagnostic(&error);
         assert_or_update(&source, &actual, GoldenKind::Diagnostic, update)?;
+        structured.push_str(&structured_failure_entry(&source, &error));
     }
+    assert_named_golden(
+        &root.join("structured-diagnostics.golden"),
+        &structured,
+        update,
+    )?;
     Ok(())
 }
 
@@ -255,6 +394,7 @@ fn run_ruai(update: bool) -> Result<(), String> {
         })?;
         assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
     }
+    let mut structured = String::new();
     for case in RUAI_COMPILE_FAIL_CASES {
         let source = root.join(case).join("workspace/main.rua");
         let error = ruac::compile_path(&source).err();
@@ -266,12 +406,19 @@ fn run_ruai(update: bool) -> Result<(), String> {
         };
         let actual = stable_diagnostic(&error);
         assert_or_update(&source, &actual, GoldenKind::Diagnostic, update)?;
+        structured.push_str(&structured_failure_entry(&source, &error));
     }
+    assert_named_golden(
+        &root.join("structured-diagnostics.golden"),
+        &structured,
+        update,
+    )?;
     Ok(())
 }
 
 fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
     let root = golden_root().join("phase4a/compile-fail");
+    let mut structured = String::new();
     for case in PHASE4A_ACTIVE_FAIL_CASES {
         let source = root.join(format!("{case}.rua"));
         let error = ruac::compile_path(&source).err();
@@ -283,7 +430,13 @@ fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
         };
         let actual = stable_diagnostic(&error);
         assert_or_update(&source, &actual, GoldenKind::Diagnostic, update)?;
+        structured.push_str(&structured_failure_entry(&source, &error));
     }
+    assert_named_golden(
+        &root.join("structured-diagnostics.golden"),
+        &structured,
+        update,
+    )?;
     Ok(())
 }
 
@@ -331,6 +484,7 @@ fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
             }
         }
         assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
+        execute_lua(&source, &actual)?;
     }
     Ok(())
 }
@@ -353,7 +507,11 @@ fn phase4a_goldens_are_registered() {
     let root = golden_root().join("phase4a");
     for case in PHASE4A_ACTIVE_PASS_CASES {
         let path = root.join("compile-pass").join(format!("{case}.rua"));
-        assert!(path.is_file(), "missing active Phase 4A case {}", path.display());
+        assert!(
+            path.is_file(),
+            "missing active Phase 4A case {}",
+            path.display()
+        );
     }
     for case in PHASE4A_ACTIVE_FAIL_CASES {
         let path = root.join("compile-fail").join(format!("{case}.rua"));
@@ -438,6 +596,12 @@ fn phase4a_golden_compile_fail() {
 }
 
 #[test]
+fn generated_lua_source_map_golden() {
+    let expected = golden_root().join("source-map/main.map.golden");
+    run(source_map_snapshot().and_then(|snapshot| assert_named_golden(&expected, &snapshot, false)));
+}
+
+#[test]
 fn golden_ruai() {
     run(run_ruai(false));
 }
@@ -455,4 +619,6 @@ fn update_goldens() {
     run(run_compile_fail(true));
     run(run_phase4a_compile_fail(true));
     run(run_ruai(true));
+    let expected = golden_root().join("source-map/main.map.golden");
+    run(source_map_snapshot().and_then(|snapshot| assert_named_golden(&expected, &snapshot, true)));
 }

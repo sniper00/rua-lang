@@ -40,7 +40,6 @@ pub(crate) enum Entry {
     Comment(Comment),
 }
 
-
 /// Trivia the parser absorbed as a node's own *leading* children, split by how
 /// it should be reattached. See [`peel_leading_trivia`].
 struct Peeled {
@@ -71,9 +70,13 @@ fn peel_leading_trivia(node: &SyntaxNode) -> Peeled {
             SyntaxElement::Token(t) if t.kind().is_trivia() => {
                 if t.kind().is_comment() {
                     if seen_nl {
-                        leading.push(Comment { text: t.text().to_string() });
+                        leading.push(Comment {
+                            text: t.text().to_string(),
+                        });
                     } else {
-                        same_line.push(Comment { text: t.text().to_string() });
+                        same_line.push(Comment {
+                            text: t.text().to_string(),
+                        });
                     }
                 } else if t.kind() == K::Whitespace {
                     let nls = t.text().matches('\n').count();
@@ -89,7 +92,11 @@ fn peel_leading_trivia(node: &SyntaxNode) -> Peeled {
             _ => break,
         }
     }
-    Peeled { same_line, leading, blank }
+    Peeled {
+        same_line,
+        leading,
+        blank,
+    }
 }
 
 /// Walk the direct children of a container node and return each child node
@@ -121,7 +128,9 @@ pub(crate) fn extract_children(parent: &SyntaxNode) -> Vec<Entry> {
             // Remember comment tokens; they become leading comments for the
             // next child node (or standalone entries at the end).
             SyntaxElement::Token(t) if t.kind().is_comment() => {
-                leading.push(Comment { text: t.text().to_string() });
+                leading.push(Comment {
+                    text: t.text().to_string(),
+                });
                 i += 1;
             }
             // Detect blank lines: ≥2 newlines in a single whitespace token.
@@ -163,7 +172,9 @@ pub(crate) fn extract_children(parent: &SyntaxNode) -> Vec<Entry> {
                 while i < len {
                     match &children[i] {
                         SyntaxElement::Token(t) if t.kind().is_comment() => {
-                            trailing.push(Comment { text: t.text().to_string() });
+                            trailing.push(Comment {
+                                text: t.text().to_string(),
+                            });
                             i += 1;
                         }
                         SyntaxElement::Token(t) if t.kind() == K::Whitespace => {
@@ -213,7 +224,9 @@ mod tests {
         let entries = test_extract("// doc\nfn foo() {}");
         assert_eq!(entries.len(), 1);
         match &entries[0] {
-            Entry::Node { leading, trailing, .. } => {
+            Entry::Node {
+                leading, trailing, ..
+            } => {
                 assert_eq!(leading.len(), 1, "one leading comment");
                 assert_eq!(leading[0].text, "// doc");
                 assert!(trailing.is_empty());
@@ -252,7 +265,9 @@ mod tests {
         // Should have one entry (LetStmt) with a trailing comment
         assert_eq!(entries.len(), 1, "one entry in block");
         match &entries[0] {
-            Entry::Node { leading, trailing, .. } => {
+            Entry::Node {
+                leading, trailing, ..
+            } => {
                 assert!(leading.is_empty());
                 assert_eq!(trailing.len(), 1, "one trailing comment");
                 assert_eq!(trailing[0].text, "// t");
@@ -304,7 +319,9 @@ mod tests {
         let entries = test_extract("fn foo() {}");
         assert_eq!(entries.len(), 1);
         match &entries[0] {
-            Entry::Node { leading, trailing, .. } => {
+            Entry::Node {
+                leading, trailing, ..
+            } => {
                 assert!(leading.is_empty());
                 assert!(trailing.is_empty());
             }
@@ -320,11 +337,15 @@ mod tests {
         let entries = test_extract("fn a() {}\n\nfn b() {}");
         assert_eq!(entries.len(), 2);
         match &entries[0] {
-            Entry::Node { blank_line_before, .. } => assert!(!blank_line_before, "first item"),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(!blank_line_before, "first item"),
             _ => panic!("expected Node"),
         }
         match &entries[1] {
-            Entry::Node { blank_line_before, .. } => assert!(blank_line_before, "second item has blank line before"),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(blank_line_before, "second item has blank line before"),
             _ => panic!("expected Node"),
         }
     }
@@ -334,7 +355,9 @@ mod tests {
         let entries = test_extract("fn a() {}\nfn b() {}");
         assert_eq!(entries.len(), 2);
         match &entries[1] {
-            Entry::Node { blank_line_before, .. } => assert!(!blank_line_before),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(!blank_line_before),
             _ => panic!("expected Node"),
         }
     }
@@ -345,7 +368,11 @@ mod tests {
         let entries = test_extract("fn a() {}\n\n// doc\nfn b() {}");
         assert_eq!(entries.len(), 2);
         match &entries[1] {
-            Entry::Node { leading, blank_line_before, .. } => {
+            Entry::Node {
+                leading,
+                blank_line_before,
+                ..
+            } => {
                 assert_eq!(leading.len(), 1);
                 assert_eq!(leading[0].text, "// doc");
                 assert!(blank_line_before);
@@ -360,7 +387,9 @@ mod tests {
         let entries = test_extract("fn a() {}\n// doc\nfn b() {}");
         assert_eq!(entries.len(), 2);
         match &entries[1] {
-            Entry::Node { blank_line_before, .. } => assert!(!blank_line_before),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(!blank_line_before),
             _ => panic!("expected Node"),
         }
     }
@@ -371,7 +400,9 @@ mod tests {
         let entries = test_extract("fn a() {}\n\n\nfn b() {}");
         assert_eq!(entries.len(), 2);
         match &entries[1] {
-            Entry::Node { blank_line_before, .. } => assert!(blank_line_before),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(blank_line_before),
             _ => panic!("expected Node"),
         }
     }
@@ -396,12 +427,19 @@ mod tests {
         let entries = extract_field_list("struct S {\n    a: i64,\n\n    b: i64,\n}");
         assert_eq!(entries.len(), 2, "two fields");
         match &entries[0] {
-            Entry::Node { blank_line_before, .. } => assert!(!blank_line_before, "first field"),
+            Entry::Node {
+                blank_line_before, ..
+            } => assert!(!blank_line_before, "first field"),
             _ => panic!("expected Node"),
         }
         match &entries[1] {
-            Entry::Node { blank_line_before, .. } => {
-                assert!(blank_line_before, "blank before second field peeled from node")
+            Entry::Node {
+                blank_line_before, ..
+            } => {
+                assert!(
+                    blank_line_before,
+                    "blank before second field peeled from node"
+                )
             }
             _ => panic!("expected Node"),
         }
@@ -409,10 +447,15 @@ mod tests {
 
     #[test]
     fn struct_field_leading_comment_peeled() {
-        let entries = extract_field_list("struct S {\n    a: i64,\n    // note on b\n    b: i64,\n}");
+        let entries =
+            extract_field_list("struct S {\n    a: i64,\n    // note on b\n    b: i64,\n}");
         assert_eq!(entries.len(), 2);
         match &entries[1] {
-            Entry::Node { leading, blank_line_before, .. } => {
+            Entry::Node {
+                leading,
+                blank_line_before,
+                ..
+            } => {
                 assert_eq!(leading.len(), 1, "leading comment recovered");
                 assert_eq!(leading[0].text, "// note on b");
                 assert!(!blank_line_before);
@@ -429,7 +472,11 @@ mod tests {
         // on field a's line, so it must attach to field a as trailing.
         match &entries[0] {
             Entry::Node { trailing, .. } => {
-                assert_eq!(trailing.len(), 1, "same-line comment attached to previous field");
+                assert_eq!(
+                    trailing.len(),
+                    1,
+                    "same-line comment attached to previous field"
+                );
                 assert_eq!(trailing[0].text, "// trailing a");
             }
             _ => panic!("expected Node"),

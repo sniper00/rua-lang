@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn stress_50_rapid_changes_no_panic() {
@@ -130,10 +130,10 @@ fn stress_error_recovery_chained() {
 
     // Start with broken code, then fix incrementally
     let steps = [
-        "fn main() {",              // incomplete
-        "fn main() { let x",        // still incomplete
-        "fn main() { let x = 1; }", // fixed
-        "fn main() { let x = true }", // type error
+        "fn main() {",                   // incomplete
+        "fn main() { let x",             // still incomplete
+        "fn main() { let x = 1; }",      // fixed
+        "fn main() { let x = true }",    // type error
         "fn main() { let x: i64 = 1; }", // fixed with annotation
     ];
 

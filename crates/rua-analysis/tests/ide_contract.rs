@@ -10,7 +10,7 @@ use rua_analysis::{
 };
 
 #[test]
-fn ide_contract_legacy_reexports_are_the_same_types() {
+fn ide_contract_canonical_reexports_are_the_same_types() {
     let range = TextRange::new(1, 4);
     let hir_range: rua_analysis::hir::TextRange = range;
     let ide_range: rua_analysis::ide::TextRange = hir_range;
@@ -152,7 +152,8 @@ fn ide_contract_list_sort_keys_are_deterministic() {
     let target = FileRange::new(FileId::new(0), TextRange::new(1, 2));
     let input = vec![
         CompletionItem::new("zeta", CompletionKind::Variable),
-        CompletionItem::new("alpha", CompletionKind::Variable).with_relevance(CompletionRelevance::from_score(1)),
+        CompletionItem::new("alpha", CompletionKind::Variable)
+            .with_relevance(CompletionRelevance::from_score(1)),
         CompletionItem::new("alpha", CompletionKind::Variable),
         CompletionItem::new("beta", CompletionKind::Variable),
         CompletionItem::new("beta", CompletionKind::Variable).with_documentation("documented"),

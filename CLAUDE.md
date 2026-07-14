@@ -127,9 +127,7 @@ The `mut` in `&mut self` is about **reference mutability** (mutation through the
 
 ## Design documents
 
-- `docs/rua-design.md` — Language spec: syntax, type system, compiler pipeline, trait system
-- `docs/rua-ide-architecture.md` — IDE subsystem architecture
-- `docs/rua-analysis-lsp-migration-plan.md` — Migration plan for LSP features
-- `docs/rua-construction-plan.md` — Construction phases
-- `docs/rua-lsp-features.md` — LSP feature checklist
-- `docs/rua-vs-rust-analyzer-gap-analysis.md` — Architecture gap analysis vs rust-analyzer: what to borrow, what to fix
+- `docs/README.md` - Current documentation index and maintenance rules
+- `docs/rua-design.md` - Current language, runtime ABI, module, FFI, and compatibility contracts
+- `docs/rua-architecture.md` - Current compiler, dual-parser, analysis, LSP, and validation architecture
+- `docs/rua-lsp-features.md` - Current editor and protocol capabilities

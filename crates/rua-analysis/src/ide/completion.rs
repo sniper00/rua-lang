@@ -1,8 +1,9 @@
 //! Native completion: scope, member, and path completions using the
 //! semantic HIR without any compiler bridge.
 
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
+use rua_core::{BUILTIN_MACROS, MacroDelimiter as BuiltinMacroDelimiter};
 use rua_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::{
@@ -10,14 +11,14 @@ use crate::{
     base::TextRange,
     hir::{
         Body, BodyScopes, BodySourceMap, DefKind, DefMap, Definition, Expr, ExprId,
-        InferenceResult, ModuleId, ScopeKind, Ty,
+        InferenceResult, MemberIndex, ModuleId, ScopeKind, Ty,
     },
     vfs::FileId,
 };
 
 use super::{
-    CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, FilePosition,
-    MacroDelimiter,
+    CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, FilePosition, FileRange,
+    MacroDelimiter, ProjectPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,7 +30,9 @@ use super::{
 /// the previous 4–5 ad-hoc parameters.
 #[allow(dead_code)]
 pub(crate) struct CompletionContext<'a> {
-    pub db: &'a Rc<BaseDb>,
+    pub db: &'a Arc<BaseDb>,
+    pub def_map: Arc<DefMap>,
+    pub member_index: Arc<MemberIndex>,
     pub position: FilePosition,
     pub offset: u32,
     pub partial_range: TextRange,
@@ -45,10 +48,11 @@ pub(crate) struct CompletionContext<'a> {
 }
 
 impl<'a> CompletionContext<'a> {
-    fn new(
-        db: &'a Rc<BaseDb>,
-        position: FilePosition,
-    ) -> Option<Self> {
+    fn new(db: &'a Arc<BaseDb>, project_position: ProjectPosition) -> Option<Self> {
+        let position = project_position.position;
+        let def_map = db.project_def_map(project_position.project_id)?;
+        def_map.module_for_file(position.file_id)?;
+        let member_index = db.project_member_index(project_position.project_id)?;
         let text = db.file_text(position.file_id)?;
         let parse = db.parse(position.file_id);
         let root = parse.syntax_node();
@@ -63,13 +67,12 @@ impl<'a> CompletionContext<'a> {
         let mut in_impl_block = false;
         let mut in_loop = false;
 
-        let mut node: Option<rua_syntax::SyntaxNode> =
-            token.as_ref().and_then(|t| t.parent());
+        let mut node: Option<rua_syntax::SyntaxNode> = token.as_ref().and_then(|t| t.parent());
         while let Some(current) = &node {
             match current.kind() {
-                SyntaxKind::Colon
-                | SyntaxKind::ParamList
-                | SyntaxKind::FieldDecl => in_type_position = true,
+                SyntaxKind::Colon | SyntaxKind::ParamList | SyntaxKind::FieldDecl => {
+                    in_type_position = true
+                }
                 SyntaxKind::Block => in_expression_position = true,
                 SyntaxKind::LetStmt => in_pattern_position = true,
                 SyntaxKind::MatchArm => in_pattern_position = true,
@@ -83,12 +86,13 @@ impl<'a> CompletionContext<'a> {
         }
 
         // Determine whether cursor is inside a method body.
-        let def_map = db.def_map(position.file_id);
         let in_method_body = innermost_body_owner(&def_map, position, offset)
             .is_some_and(|d| d.kind() == DefKind::Method);
 
         Some(Self {
             db,
+            def_map,
+            member_index,
             position,
             offset,
             partial_range,
@@ -107,17 +111,21 @@ impl<'a> CompletionContext<'a> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn completions(
-    db: &Rc<BaseDb>,
-    position: FilePosition,
-) -> Vec<CompletionItem> {
+pub(crate) fn completions(db: &Arc<BaseDb>, position: ProjectPosition) -> Vec<CompletionItem> {
     let Some(ctx) = CompletionContext::new(db, position) else {
         return Vec::new();
     };
 
     // Member access: cursor right after `.` (token IS the dot) or after `.x`
-    let after_dot = ctx.token.as_ref().is_some_and(|t| t.kind() == SyntaxKind::Dot)
-        || ctx.token.as_ref().and_then(previous_significant).is_some_and(|t| t.kind() == SyntaxKind::Dot);
+    let after_dot = ctx
+        .token
+        .as_ref()
+        .is_some_and(|t| t.kind() == SyntaxKind::Dot)
+        || ctx
+            .token
+            .as_ref()
+            .and_then(previous_significant)
+            .is_some_and(|t| t.kind() == SyntaxKind::Dot);
     let mut items = if after_dot {
         member_completions(&ctx)
     } else if let Some(ref tok) = ctx.token
@@ -135,16 +143,15 @@ pub(crate) fn completions(
         let end = ctx.partial_range.end() as usize;
         if start <= end && end <= text.len() {
             let prefix = &text[start..end];
-            let is_pure_numeric = !prefix.is_empty()
-                && prefix.bytes().all(|b| b.is_ascii_digit());
+            let is_pure_numeric = !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit());
             if !is_pure_numeric {
                 let prefix_lower = prefix.to_lowercase();
                 items.retain(|item| {
                     let label_lower = item.label().to_lowercase();
                     is_subsequence(&prefix_lower, &label_lower)
-                        || item.lookup().is_some_and(|l| {
-                            is_subsequence(&prefix_lower, &l.to_lowercase())
-                        })
+                        || item
+                            .lookup()
+                            .is_some_and(|l| is_subsequence(&prefix_lower, &l.to_lowercase()))
                 });
             }
         }
@@ -195,10 +202,9 @@ fn partial_ident_range(text: &str, offset: u32) -> TextRange {
 // ---------------------------------------------------------------------------
 
 const RUA_KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "if", "else", "while", "loop", "for", "in",
-    "return", "break", "continue", "match", "struct", "enum", "trait",
-    "impl", "mod", "pub", "use", "as", "extern", "where", "type",
-    "move", "self", "true", "false",
+    "fn", "let", "mut", "if", "else", "while", "loop", "for", "in", "return", "break", "continue",
+    "match", "struct", "enum", "trait", "impl", "mod", "pub", "use", "as", "extern", "where",
+    "type", "move", "self", "true", "false",
 ];
 
 /// Keyword → snippet template for statement-level keywords that generate
@@ -224,7 +230,10 @@ fn keyword_snippet(kw: &str) -> Option<&'static str> {
 /// Additional snippet-only completions for patterns not in RUA_KEYWORDS.
 const SNIPPET_PATTERNS: &[(&str, &str)] = &[
     ("if let", "if let ${1:pattern} = ${2:expr} {\n    $0\n}"),
-    ("while let", "while let ${1:pattern} = ${2:expr} {\n    $0\n}"),
+    (
+        "while let",
+        "while let ${1:pattern} = ${2:expr} {\n    $0\n}",
+    ),
 ];
 
 /// Keywords that only make sense at the start of a statement/item, not in
@@ -244,23 +253,6 @@ const BUILTIN_VALUES: &[(&str, &str)] = &[
     ("Err", "Err(error) -> Result<T, E>"),
 ];
 
-const BUILTIN_MACROS: &[(&str, MacroDelimiter)] = &[
-    ("println", MacroDelimiter::Parentheses),
-    ("print", MacroDelimiter::Parentheses),
-    ("format", MacroDelimiter::Parentheses),
-    ("vec", MacroDelimiter::Brackets),
-    ("panic", MacroDelimiter::Parentheses),
-    ("assert", MacroDelimiter::Parentheses),
-    ("assert_eq", MacroDelimiter::Parentheses),
-    ("assert_ne", MacroDelimiter::Parentheses),
-    ("unreachable", MacroDelimiter::Parentheses),
-    ("unimplemented", MacroDelimiter::Parentheses),
-    ("todo", MacroDelimiter::Parentheses),
-    ("dbg", MacroDelimiter::Parentheses),
-    ("include_str", MacroDelimiter::Parentheses),
-    ("include_bytes", MacroDelimiter::Parentheses),
-];
-
 fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let db = ctx.db;
     let position = ctx.position;
@@ -271,30 +263,82 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
-    let def_map = db.def_map(position.file_id);
+    let def_map = &ctx.def_map;
+    let member_index = &ctx.member_index;
     let in_method = ctx.in_method_body;
     let in_type_pos = ctx.in_type_position || token.is_some_and(is_type_position);
     let in_expr_context = token.is_some_and(is_expression_context);
 
     // Context-sensitive completions (only fire inside specific AST nodes).
-    complete_match_variants(db, &def_map, position, offset, &mut items, &mut seen);
-    complete_struct_fields(db, &def_map, position, offset, &mut items, &mut seen);
-    complete_iflet_variants(db, &def_map, position, offset, &mut items, &mut seen);
+    complete_match_variants(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+    complete_struct_fields(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+    complete_iflet_variants(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
 
     // General completions (always available, subject to context filtering).
     complete_keywords(
-        &mut items, &mut seen, in_method, in_type_pos, in_expr_context,
+        &mut items,
+        &mut seen,
+        in_method,
+        in_type_pos,
+        in_expr_context,
     );
     complete_snippets(&mut items, &mut seen);
-    complete_locals(db, &def_map, position, offset, &mut items, &mut seen, in_type_pos);
-    complete_module_defs(db, &def_map, position, offset, &mut items, &mut seen, in_type_pos);
-    complete_cross_module_defs(db, &def_map, position, offset, &mut items, &mut seen);
+    complete_locals(
+        db,
+        def_map,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+        in_type_pos,
+    );
+    complete_module_defs(
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+        in_type_pos,
+    );
+    complete_cross_module_defs(
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
     complete_builtin_types(token, &mut items, &mut seen, in_type_pos);
     complete_builtin_constructors(&mut items, &mut seen, in_type_pos);
     complete_builtin_macros(&mut items, &mut seen, in_type_pos);
 
     // Post-processing.
-    apply_type_compat_boost(db, &def_map, position, offset, &mut items);
+    apply_type_compat_boost(db, def_map, position, offset, &mut items);
     apply_replacement_ranges(&mut items, partial_range);
     CompletionItem::normalize(&mut items);
     items
@@ -309,25 +353,24 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
 // ---------------------------------------------------------------------------
 
 fn complete_match_variants(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {
     if let Some((_enum_ty, enum_template)) =
-        match_scrutinee_enum(db, def_map, position, offset)
+        match_scrutinee_enum(db, def_map, member_index, position, offset)
     {
-        for candidate in db
-            .member_index(position.file_id)
-            .associated_candidates(&enum_template)
-        {
+        for candidate in member_index.associated_candidates(&enum_template) {
             if seen.insert(candidate.name().to_string()) {
                 let name = candidate.name().to_string();
                 items.push(
                     CompletionItem::new(name.clone(), CompletionKind::Variant)
                         .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
                         .with_insert(CompletionInsert::Call {
                             callee: name,
                             params: vec![],
@@ -340,22 +383,21 @@ fn complete_match_variants(
 }
 
 fn complete_struct_fields(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {
     if let Some(struct_ty) = struct_literal_type(db, def_map, position, offset) {
-        for candidate in db
-            .member_index(position.file_id)
-            .field_candidates(&struct_ty)
-        {
+        for candidate in member_index.field_candidates(&struct_ty) {
             if seen.insert(candidate.name().to_string()) {
                 items.push(
                     CompletionItem::new(candidate.name().to_string(), CompletionKind::Field)
                         .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
                         .with_relevance(CompletionRelevance::struct_field()),
                 );
             }
@@ -364,22 +406,23 @@ fn complete_struct_fields(
 }
 
 fn complete_iflet_variants(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    if let Some((_ty, template)) = pattern_scrutinee_enum(db, def_map, position, offset) {
-        for candidate in db
-            .member_index(position.file_id)
-            .associated_candidates(&template)
-        {
+    if let Some((_ty, template)) =
+        pattern_scrutinee_enum(db, def_map, member_index, position, offset)
+    {
+        for candidate in member_index.associated_candidates(&template) {
             if seen.insert(candidate.name().to_string()) {
                 items.push(
                     CompletionItem::new(candidate.name().to_string(), CompletionKind::Variant)
                         .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
                         .with_relevance(CompletionRelevance::iflet_variant()),
                 );
             }
@@ -436,7 +479,7 @@ fn complete_snippets(
 }
 
 fn complete_locals(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
@@ -450,19 +493,24 @@ fn complete_locals(
     let usage_counts = local_usage_counts(db, def_map, position, offset);
     for local in visible_locals(db, def_map, position, offset) {
         if seen.insert(local.name.clone()) {
-            let extra = usage_counts.get(&local.name).map(|c| (*c).min(5)).unwrap_or(0);
-            items.push(
-                CompletionItem::new(local.name.clone(), CompletionKind::Variable)
-                    .with_detail(local.ty)
-                    .with_relevance(CompletionRelevance::local(extra as u8)),
-            );
+            let extra = usage_counts
+                .get(&local.name)
+                .map(|c| (*c).min(5))
+                .unwrap_or(0);
+            let mut item = CompletionItem::new(local.name.clone(), CompletionKind::Variable)
+                .with_detail(local.detail)
+                .with_relevance(CompletionRelevance::local(extra as u8));
+            if let Some(ty) = local.ty {
+                item = item.with_candidate_ty(ty);
+            }
+            items.push(item);
         }
     }
 }
 
 fn complete_module_defs(
-    db: &Rc<BaseDb>,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
     items: &mut Vec<CompletionItem>,
@@ -476,7 +524,10 @@ fn complete_module_defs(
         if definition.module_id() != module_id {
             continue;
         }
-        if matches!(definition.kind(), DefKind::Field | DefKind::Variant) {
+        if matches!(
+            definition.kind(),
+            DefKind::Chunk | DefKind::Field | DefKind::Variant
+        ) {
             continue;
         }
         if in_type_pos
@@ -490,11 +541,18 @@ fn complete_module_defs(
         if seen.insert(definition.name().to_string()) {
             let kind = def_kind_to_completion_kind(definition.kind());
             let mut item = CompletionItem::new(definition.name(), kind)
+                .with_target(FileRange::new(
+                    definition.file_id(),
+                    definition.name_range(),
+                ))
                 .with_relevance(CompletionRelevance::same_module());
-            if let Some(sig) = definition_signature(db, def_map, definition) {
+            if let Some(sig) = definition_signature(member_index, definition) {
                 item = item.with_detail(sig);
             }
-            if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
+            if let Some(ty) = definition_completion_ty(member_index, definition) {
+                item = item.with_candidate_ty(ty);
+            }
+            if let Some(doc) = definition.documentation() {
                 item = item.with_documentation(doc);
             }
             items.push(item);
@@ -503,8 +561,8 @@ fn complete_module_defs(
 }
 
 fn complete_cross_module_defs(
-    db: &Rc<BaseDb>,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
     items: &mut Vec<CompletionItem>,
@@ -537,12 +595,22 @@ fn complete_cross_module_defs(
                 .and_then(|m| m.name())
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".to_string());
-            let mut item = CompletionItem::new(definition.name(), def_kind_to_completion_kind(definition.kind()))
-                .with_detail(format!("{} (from {module_path})", definition.name()))
-                .with_import_path(format!("use {module_path}::{};", definition.name()))
-                .with_relevance(CompletionRelevance::cross_module());
-            if let Some(sig) = definition_signature(db, def_map, definition) {
+            let mut item = CompletionItem::new(
+                definition.name(),
+                def_kind_to_completion_kind(definition.kind()),
+            )
+            .with_target(FileRange::new(
+                definition.file_id(),
+                definition.name_range(),
+            ))
+            .with_detail(format!("{} (from {module_path})", definition.name()))
+            .with_import_path(format!("use {module_path}::{};", definition.name()))
+            .with_relevance(CompletionRelevance::cross_module());
+            if let Some(sig) = definition_signature(member_index, definition) {
                 item = item.with_detail(sig);
+            }
+            if let Some(ty) = definition_completion_ty(member_index, definition) {
+                item = item.with_candidate_ty(ty);
             }
             items.push(item);
         }
@@ -609,15 +677,16 @@ fn complete_builtin_macros(
     if in_type_pos {
         return;
     }
-    for (name, delimiter) in BUILTIN_MACROS {
-        if seen.insert(name.to_string()) {
+    for spec in BUILTIN_MACROS {
+        if seen.insert(spec.name.to_string()) {
             items.push(
-                CompletionItem::new(format!("{name}!"), CompletionKind::Macro)
-                    .with_detail(format!("{name}!(...)  (built-in macro)"))
-                    .with_lookup(name.to_string())
+                CompletionItem::new(format!("{}!", spec.name), CompletionKind::Macro)
+                    .with_detail(format!("{} -> {}", spec.signature, spec.return_type))
+                    .with_documentation(spec.documentation)
+                    .with_lookup(spec.name.to_string())
                     .with_insert(CompletionInsert::MacroCall {
-                        name: name.to_string(),
-                        delimiter: *delimiter,
+                        name: spec.name.to_string(),
+                        delimiter: macro_delimiter(spec.delimiter),
                     })
                     .with_relevance(CompletionRelevance::builtin_macro()),
             );
@@ -625,8 +694,16 @@ fn complete_builtin_macros(
     }
 }
 
+const fn macro_delimiter(delimiter: BuiltinMacroDelimiter) -> MacroDelimiter {
+    match delimiter {
+        BuiltinMacroDelimiter::Parentheses => MacroDelimiter::Parentheses,
+        BuiltinMacroDelimiter::Brackets => MacroDelimiter::Brackets,
+        BuiltinMacroDelimiter::Braces => MacroDelimiter::Braces,
+    }
+}
+
 fn apply_type_compat_boost(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
@@ -635,14 +712,18 @@ fn apply_type_compat_boost(
     let Some(expected) = expected_type_at_cursor(db, def_map, position, offset) else {
         return;
     };
-    let expected_str = expected.to_string();
     for item in items.iter_mut() {
-        if let Some(detail) = item.detail() {
-            let boost = type_compatibility_score(detail, &expected_str, &expected);
-            if boost > 0 {
-                let boosted = item.relevance_raw().with_boost(boost);
-                *item = item.clone().with_relevance(boosted);
-            }
+        let Some(candidate) = item.candidate_ty() else {
+            continue;
+        };
+        let relevance = item
+            .relevance_raw()
+            .with_exact_type_match(candidate == &expected)
+            .with_type_name_match(
+                candidate != &expected && candidate.is_compatible_with(&expected),
+            );
+        if relevance != item.relevance_raw() {
+            *item = item.clone().with_relevance(relevance);
         }
     }
 }
@@ -662,18 +743,18 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let db = ctx.db;
     let position = ctx.position;
     let offset = ctx.offset;
-    let def_map = db.def_map(position.file_id);
-    let receiver_ty = infer_dot_receiver(db, &def_map, position, offset);
+    let def_map = &ctx.def_map;
+    let receiver_ty = infer_dot_receiver(db, def_map, position, offset);
 
     let Some(receiver_ty) = receiver_ty else {
         return Vec::new();
     };
 
     // Get the receiver expression text for postfix template generation.
-    let receiver_text = receiver_expr_text(db, &def_map, position, offset)
-        .unwrap_or_else(|| "_".to_string());
+    let receiver_text =
+        receiver_expr_text(db, def_map, position, offset).unwrap_or_else(|| "_".to_string());
 
-    let member_index = db.member_index(position.file_id);
+    let member_index = &ctx.member_index;
     let candidates = member_index.instance_candidates(&receiver_ty);
 
     let mut seen = std::collections::HashSet::new();
@@ -693,6 +774,7 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
         let name = candidate.name().to_string();
         let mut item = CompletionItem::new(name.clone(), kind)
             .with_detail(detail)
+            .with_optional_target(member_target_range(def_map, candidate.target()))
             .with_relevance(CompletionRelevance::member());
 
         if candidate.kind() == crate::hir::MemberKind::Method {
@@ -793,26 +875,14 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
 /// Each tuple: (completion_label, detail_text, snippet_insert_text).
 fn postfix_templates(receiver: &str) -> Vec<(&'static str, &'static str, String)> {
     vec![
-        (
-            ".if",
-            "if expr { … }",
-            format!("if {receiver} {{ $0 }}"),
-        ),
+        (".if", "if expr { … }", format!("if {receiver} {{ $0 }}")),
         (
             ".match",
             "match expr { … }",
             format!("match {receiver} {{ $0 }}"),
         ),
-        (
-            ".not",
-            "!expr",
-            format!("!{receiver}"),
-        ),
-        (
-            ".ref",
-            "&expr",
-            format!("&{receiver}"),
-        ),
+        (".not", "!expr", format!("!{receiver}")),
+        (".ref", "&expr", format!("&{receiver}")),
         (
             ".while",
             "while expr { … }",
@@ -862,7 +932,7 @@ fn receiver_expr_text(
 /// Walks UP the syntax tree from the cursor token to find a
 /// MethodCallExpr or FieldExpr, then resolves the receiver via HIR.
 pub(crate) fn infer_dot_receiver(
-    db: &Rc<BaseDb>,
+    db: &Arc<BaseDb>,
     def_map: &DefMap,
     position: FilePosition,
     offset: u32,
@@ -889,31 +959,29 @@ pub(crate) fn infer_dot_receiver(
     let receiver_range: TextRange;
     loop {
         let kind = node.kind();
-            if kind == rua_syntax::SyntaxKind::FieldExpr
+        if kind == rua_syntax::SyntaxKind::FieldExpr
             || kind == rua_syntax::SyntaxKind::MethodCallExpr
         {
             // Found the member access node. Get the receiver expression.
-            let receiver = node
-                .children()
-                .find(|c| {
-                    matches!(
-                        c.kind(),
-                        rua_syntax::SyntaxKind::PathExpr
-                            | rua_syntax::SyntaxKind::Ident
-                            | rua_syntax::SyntaxKind::CallExpr
-                            | rua_syntax::SyntaxKind::MethodCallExpr
-                            | rua_syntax::SyntaxKind::FieldExpr
-                            | rua_syntax::SyntaxKind::IndexExpr
-                            | rua_syntax::SyntaxKind::ParenExpr
-                            | rua_syntax::SyntaxKind::Block
-                            | rua_syntax::SyntaxKind::ArrayExpr
-                            | rua_syntax::SyntaxKind::UnaryExpr
-                            | rua_syntax::SyntaxKind::BinExpr
-                            | rua_syntax::SyntaxKind::StructLitExpr
-                            | rua_syntax::SyntaxKind::ClosureExpr
-                            | rua_syntax::SyntaxKind::LiteralExpr
-                    )
-                })?;
+            let receiver = node.children().find(|c| {
+                matches!(
+                    c.kind(),
+                    rua_syntax::SyntaxKind::PathExpr
+                        | rua_syntax::SyntaxKind::Ident
+                        | rua_syntax::SyntaxKind::CallExpr
+                        | rua_syntax::SyntaxKind::MethodCallExpr
+                        | rua_syntax::SyntaxKind::FieldExpr
+                        | rua_syntax::SyntaxKind::IndexExpr
+                        | rua_syntax::SyntaxKind::ParenExpr
+                        | rua_syntax::SyntaxKind::Block
+                        | rua_syntax::SyntaxKind::ArrayExpr
+                        | rua_syntax::SyntaxKind::UnaryExpr
+                        | rua_syntax::SyntaxKind::BinExpr
+                        | rua_syntax::SyntaxKind::StructLitExpr
+                        | rua_syntax::SyntaxKind::ClosureExpr
+                        | rua_syntax::SyntaxKind::LiteralExpr
+                )
+            })?;
             receiver_range = {
                 let start: u32 = receiver.text_range().start().into();
                 let end: u32 = receiver.text_range().end().into();
@@ -933,18 +1001,6 @@ pub(crate) fn infer_dot_receiver(
             return inference.type_of_expr(expr_id).cloned();
         }
     }
-    // Fallback: try to find by containing the receiver range.
-    for (expr_id, _expr) in ctx.body.exprs() {
-        let fr = ctx.source_map.expr_range(expr_id)?;
-        if fr.range.contains(receiver_range.start())
-            || fr.range.start() == receiver_range.start()
-        {
-            let ty = inference.type_of_expr(expr_id).cloned()?;
-            if !matches!(&ty, Ty::Primitive(crate::hir::PrimitiveTy::Unit)) {
-                return Some(ty);
-            }
-        }
-    }
     None
 }
 
@@ -953,11 +1009,12 @@ pub(crate) fn infer_dot_receiver(
 // ---------------------------------------------------------------------------
 
 fn path_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
-    let db = ctx.db;
     let position = ctx.position;
     let partial_range = ctx.partial_range;
-    let Some(ref token) = ctx.token else { return Vec::new(); };
-    let def_map = db.def_map(position.file_id);
+    let Some(ref token) = ctx.token else {
+        return Vec::new();
+    };
+    let def_map = &ctx.def_map;
     let segments = path_segments_before(token);
     if segments.is_empty() {
         return Vec::new();
@@ -968,43 +1025,48 @@ fn path_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
 
     // Resolve path prefix to a module and list its members
     if let Some(module_id) =
-        resolve_path_prefix_module(&def_map, position.file_id, position.offset, &segments)
+        resolve_path_prefix_module(def_map, position.file_id, position.offset, &segments)
     {
-        let member_index = db.member_index(position.file_id);
+        let member_index = &ctx.member_index;
         for definition in def_map.definitions() {
-            if definition.module_id() == module_id
-                && seen.insert(definition.name().to_string()) {
-                    let kind = def_kind_to_completion_kind(definition.kind());
-                    let mut item =
-                        CompletionItem::new(definition.name(), kind).with_relevance(CompletionRelevance::path_member());
-                    if let Some(sig) = definition_signature(db, &def_map, definition) {
-                        item = item.with_detail(sig);
-                    }
-                    if let Some(doc) = extract_doc_comment(db, position.file_id, definition) {
-                        item = item.with_documentation(doc);
-                    }
-                    items.push(item);
+            if definition.module_id() == module_id && seen.insert(definition.name().to_string()) {
+                let kind = def_kind_to_completion_kind(definition.kind());
+                let mut item = CompletionItem::new(definition.name(), kind)
+                    .with_target(FileRange::new(
+                        definition.file_id(),
+                        definition.name_range(),
+                    ))
+                    .with_relevance(CompletionRelevance::path_member());
+                if let Some(sig) = definition_signature(member_index, definition) {
+                    item = item.with_detail(sig);
                 }
+                if let Some(doc) = definition.documentation() {
+                    item = item.with_documentation(doc);
+                }
+                items.push(item);
+            }
         }
 
         // Also try enum variants if the resolved module contains enums
         for definition in def_map.definitions() {
             if definition.module_id() == module_id
                 && definition.kind() == DefKind::Enum
-                && let Some(template_ty) = member_index.type_template(definition.id()) {
-                    for candidate in member_index.associated_candidates(template_ty) {
-                        if seen.insert(candidate.name().to_string()) {
-                            items.push(
-                                CompletionItem::new(
-                                    candidate.name(),
-                                    CompletionKind::Variant,
-                                )
+                && let Some(template_ty) = member_index.type_template(definition.id())
+            {
+                for candidate in member_index.associated_candidates(template_ty) {
+                    if seen.insert(candidate.name().to_string()) {
+                        items.push(
+                            CompletionItem::new(candidate.name(), CompletionKind::Variant)
                                 .with_detail(candidate.ty().to_string())
+                                .with_optional_target(member_target_range(
+                                    def_map,
+                                    candidate.target(),
+                                ))
                                 .with_relevance(CompletionRelevance::path_variant()),
-                            );
-                        }
+                        );
                     }
                 }
+            }
         }
     }
 
@@ -1090,28 +1152,8 @@ fn resolve_path_prefix_module(
 
 struct LocalInfo {
     name: String,
-    ty: String,
-}
-
-/// Score how well a candidate type string matches an expected type.
-/// Returns 0-10, where 10 = exact match, 5 = coercible, 0 = no match.
-fn type_compatibility_score(detail: &str, expected_str: &str, _expected: &Ty) -> u16 {
-    if detail.contains(expected_str) {
-        return 10; // exact match
-    }
-    // Coercible numeric types
-    if (expected_str == "i64" || expected_str == "f64")
-        && (detail.contains("i64") || detail.contains("f64"))
-    {
-        return 5;
-    }
-    // Option/Result compatibility (simplified)
-    if (expected_str.starts_with("Option") && detail.contains("Some"))
-        || (expected_str.starts_with("Result") && (detail.contains("Ok") || detail.contains("Err")))
-    {
-        return 5;
-    }
-    0
+    detail: String,
+    ty: Option<Ty>,
 }
 
 /// Try to infer the expected type at the cursor position from surrounding
@@ -1229,14 +1271,17 @@ fn visible_locals(
                 continue;
             };
             if seen.insert(name.to_string()) {
-                let ty_str = inference
+                let ty = inference
                     .as_ref()
                     .and_then(|inf| inf.type_of_binding(*binding_id))
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| "?".to_string());
+                    .cloned();
+                let ty_str = ty
+                    .as_ref()
+                    .map_or_else(|| "?".to_string(), ToString::to_string);
                 result.push(LocalInfo {
                     name: name.to_string(),
-                    ty: format!("{name}: {ty_str}"),
+                    detail: format!("{name}: {ty_str}"),
+                    ty,
                 });
             }
         }
@@ -1271,28 +1316,28 @@ fn find_innermost_scope(
     for (scope_id, scope_data) in scopes.scopes() {
         let candidate: Option<ScopeRange> = match scope_data.kind() {
             ScopeKind::Root => continue,
-            ScopeKind::Block { expr } => {
-                source_map.expr_range(expr).map(|fr| ScopeRange::Within(fr.range))
-            }
+            ScopeKind::Block { expr } => source_map
+                .expr_range(expr)
+                .map(|fr| ScopeRange::Within(fr.range)),
             // AfterLet: scope covers code after the semicolon, i.e. after the
             // binding identifier (which sits inside the `let` statement).
             ScopeKind::AfterLet { binding } => source_map
                 .binding_range(binding)
                 .map(|fr| ScopeRange::After(fr.range.end())),
-            ScopeKind::Closure { expr } => {
-                source_map.expr_range(expr).map(|fr| ScopeRange::Within(fr.range))
-            }
+            ScopeKind::Closure { expr } => source_map
+                .expr_range(expr)
+                .map(|fr| ScopeRange::Within(fr.range)),
             // ForBody: scope covers the loop body, which starts after the
             // binding identifier in the `for` header.
             ScopeKind::ForBody { binding } => source_map
                 .binding_range(binding)
                 .map(|fr| ScopeRange::After(fr.range.end())),
-            ScopeKind::IfLetBody { pattern } => {
-                source_map.pat_range(pattern).map(|fr| ScopeRange::Within(fr.range))
-            }
-            ScopeKind::WhileLetBody { pattern } => {
-                source_map.pat_range(pattern).map(|fr| ScopeRange::Within(fr.range))
-            }
+            ScopeKind::IfLetBody { pattern } => source_map
+                .pat_range(pattern)
+                .map(|fr| ScopeRange::Within(fr.range)),
+            ScopeKind::WhileLetBody { pattern } => source_map
+                .pat_range(pattern)
+                .map(|fr| ScopeRange::Within(fr.range)),
             ScopeKind::MatchArm => continue,
         };
 
@@ -1354,9 +1399,14 @@ fn innermost_body_owner(
         .filter(|definition| {
             definition.file_id() == position.file_id
                 && definition.range().contains(offset)
-                && matches!(definition.kind(), DefKind::Function | DefKind::Method)
+                && definition.kind().is_body_owner()
         })
-        .min_by_key(|definition| definition.range().len())
+        .min_by_key(|definition| {
+            (
+                definition.range().len(),
+                definition.kind() == DefKind::Chunk,
+            )
+        })
         .cloned()
 }
 
@@ -1369,9 +1419,8 @@ fn module_at_position(map: &DefMap, file_id: FileId, offset: u32) -> Option<Modu
             .filter_map(|definition| {
                 let target = definition.target_module()?;
                 let target_data = map.module(target)?;
-                (target_data.file_id() == Some(file_id)
-                    && definition.range().contains(offset))
-                .then_some((definition.range().len(), target))
+                (target_data.file_id() == Some(file_id) && definition.range().contains(offset))
+                    .then_some((definition.range().len(), target))
             })
             .min_by_key(|(length, _)| *length);
         let Some((_, nested)) = nested else {
@@ -1396,6 +1445,7 @@ fn resolve_lexical_name<'map>(
 
 fn def_kind_to_completion_kind(kind: DefKind) -> CompletionKind {
     match kind {
+        DefKind::Chunk => CompletionKind::Variable,
         DefKind::Function | DefKind::ExternFunction | DefKind::Method => CompletionKind::Function,
         DefKind::Struct => CompletionKind::Struct,
         DefKind::Enum => CompletionKind::Enum,
@@ -1411,13 +1461,12 @@ fn def_kind_to_completion_kind(kind: DefKind) -> CompletionKind {
 /// Format a definition's signature for display in completions and hover.
 /// Returns `None` for impl blocks (which don't have a useful display form).
 pub(crate) fn definition_signature(
-    db: &BaseDb,
-    def_map: &DefMap,
+    member_index: &MemberIndex,
     definition: &Definition,
 ) -> Option<String> {
     match definition.kind() {
+        DefKind::Chunk => None,
         DefKind::Function | DefKind::ExternFunction | DefKind::Method => {
-            let member_index = db.member_index(def_map.root_file());
             member_index.callable(definition.id()).map(|callable| {
                 let params: Vec<String> =
                     callable.params().iter().map(|ty| ty.to_string()).collect();
@@ -1434,25 +1483,64 @@ pub(crate) fn definition_signature(
         DefKind::Trait => Some(format!("trait {}", definition.name())),
         DefKind::Module => Some(format!("mod {}", definition.name())),
         DefKind::Field | DefKind::Variant => {
-            let member_index = db.member_index(def_map.root_file());
             if let Some(parent_id) = definition.owner()
-                && let Some(template_ty) = member_index.type_template(parent_id) {
-                    let candidates = match definition.kind() {
-                        DefKind::Field => member_index.field_candidates(template_ty),
-                        DefKind::Variant => member_index.associated_candidates(template_ty),
-                        _ => unreachable!(),
-                    };
-                    if let Some(c) =
-                        candidates.iter().find(|c| c.name() == definition.name())
-                    {
-                        return Some(format!("{}: {}", definition.name(), c.ty()));
-                    }
+                && let Some(template_ty) = member_index.type_template(parent_id)
+            {
+                let candidates = match definition.kind() {
+                    DefKind::Field => member_index.field_candidates(template_ty),
+                    DefKind::Variant => member_index.associated_candidates(template_ty),
+                    _ => unreachable!(),
+                };
+                if let Some(c) = candidates.iter().find(|candidate| {
+                    candidate.target() == crate::hir::MemberTarget::Definition(definition.id())
+                }) {
+                    return Some(format!("{}: {}", definition.name(), c.ty()));
                 }
+            }
             Some(definition.name().to_string())
         }
         DefKind::TypeAlias => Some(definition.name().to_string()),
         DefKind::Impl => None,
     }
+}
+
+fn definition_completion_ty(member_index: &MemberIndex, definition: &Definition) -> Option<Ty> {
+    match definition.kind() {
+        DefKind::Function | DefKind::ExternFunction | DefKind::Method => member_index
+            .callable(definition.id())
+            .map(|callable| callable.return_ty().clone()),
+        DefKind::Struct | DefKind::Enum | DefKind::TypeAlias => {
+            member_index.type_template(definition.id()).cloned()
+        }
+        DefKind::Field | DefKind::Variant => {
+            let owner = definition.owner()?;
+            let owner_ty = member_index.type_template(owner)?;
+            let candidates = if definition.kind() == DefKind::Field {
+                member_index.field_candidates(owner_ty)
+            } else {
+                member_index.associated_candidates(owner_ty)
+            };
+            let candidate = candidates.iter().find(|candidate| {
+                candidate.target() == crate::hir::MemberTarget::Definition(definition.id())
+            })?;
+            Some(match candidate.ty() {
+                Ty::Function(callable) | Ty::Closure(callable) => callable.return_ty().clone(),
+                ty => ty.clone(),
+            })
+        }
+        DefKind::Chunk | DefKind::Trait | DefKind::Impl | DefKind::Module => None,
+    }
+}
+
+fn member_target_range(def_map: &DefMap, target: crate::hir::MemberTarget) -> Option<FileRange> {
+    let crate::hir::MemberTarget::Definition(def_id) = target else {
+        return None;
+    };
+    let definition = def_map.definition(def_id)?;
+    Some(FileRange::new(
+        definition.file_id(),
+        definition.name_range(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,7 +1598,9 @@ fn struct_literal_type(
     let source_map = &ctx.source_map;
     let inference = ctx.inference.as_ref()?;
     for (expr_id, expr) in body.exprs() {
-        let Expr::StructLiteral { path: _, .. } = expr else { continue };
+        let Expr::StructLiteral { path: _, .. } = expr else {
+            continue;
+        };
         let range = source_map.expr_range(expr_id)?;
         if !range.range.contains(offset) {
             continue;
@@ -1532,9 +1622,8 @@ fn struct_literal_type(
 /// if the scrutinee is a named enum type. Used by if-let, while-let, and match
 /// pattern-scrutinee completions to enumerate variants.
 fn enum_type_template(
-    db: &BaseDb,
     def_map: &DefMap,
-    file_id: FileId,
+    member_index: &MemberIndex,
     inference: &std::sync::Arc<crate::hir::InferenceResult>,
     scrutinee: crate::hir::ExprId,
 ) -> Option<(Ty, Ty)> {
@@ -1542,7 +1631,6 @@ fn enum_type_template(
     if let Ty::Named(named) = &scrutinee_ty {
         let def = def_map.definition(named.definition())?;
         if def.kind() == DefKind::Enum {
-            let member_index = db.member_index(file_id);
             let template = member_index.type_template(def.id())?.clone();
             return Some((scrutinee_ty, template));
         }
@@ -1555,6 +1643,7 @@ fn enum_type_template(
 fn pattern_scrutinee_enum(
     db: &BaseDb,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
 ) -> Option<(Ty, Ty)> {
@@ -1577,9 +1666,7 @@ fn pattern_scrutinee_enum(
         if !range.range.contains(offset) {
             continue;
         }
-        if let Some(result) = enum_type_template(
-            db, def_map, position.file_id, inference, *scrutinee,
-        ) {
+        if let Some(result) = enum_type_template(def_map, member_index, inference, *scrutinee) {
             return Some(result);
         }
     }
@@ -1609,12 +1696,13 @@ fn pattern_scrutinee_enum(
             // Accept any offset from a generous left margin up to the
             // body start so we cover `while let |` and `while let Some(|`.
             let left = body_range.range.start().saturating_sub(100);
-            if offset >= left && offset <= body_range.range.start()
-                && let Some(result) = enum_type_template(
-                    db, def_map, position.file_id, inference, *scrutinee,
-                ) {
-                    return Some(result);
-                }
+            if offset >= left
+                && offset <= body_range.range.start()
+                && let Some(result) =
+                    enum_type_template(def_map, member_index, inference, *scrutinee)
+            {
+                return Some(result);
+            }
         }
     }
 
@@ -1626,6 +1714,7 @@ fn pattern_scrutinee_enum(
 fn match_scrutinee_enum(
     db: &BaseDb,
     def_map: &DefMap,
+    member_index: &MemberIndex,
     position: FilePosition,
     offset: u32,
 ) -> Option<(Ty, Ty)> {
@@ -1641,54 +1730,11 @@ fn match_scrutinee_enum(
         if !range.range.contains(offset) {
             continue;
         }
-        if let Some(result) =
-            enum_type_template(db, def_map, position.file_id, inference, *scrutinee)
-        {
+        if let Some(result) = enum_type_template(def_map, member_index, inference, *scrutinee) {
             return Some(result);
         }
     }
     None
-}
-
-/// Extract `///` doc comments immediately preceding a definition in the CST.
-fn extract_doc_comment(
-    db: &BaseDb,
-    file_id: FileId,
-    definition: &Definition,
-) -> Option<String> {
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
-    // Start from the definition keyword (e.g. `fn`, `struct`).
-    let range_start: u32 = definition.range().start();
-    let token = token_at_offset(root, range_start)?;
-
-    let mut doc_lines: Vec<String> = Vec::new();
-    let mut current = Some(token);
-
-    // Walk backwards through trivia to collect consecutive /// comments.
-    loop {
-        let prev = current.as_ref().and_then(|t| t.prev_token());
-        match prev {
-            None => break,
-            Some(ref pt) if pt.kind() == SyntaxKind::LineComment && pt.text().starts_with("///") =>
-            {
-                let text = pt.text();
-                let doc = text.strip_prefix("///").unwrap_or(text).trim();
-                doc_lines.push(doc.to_string());
-                current = prev;
-            }
-            Some(ref pt) if pt.kind().is_trivia() => {
-                current = prev; // skip whitespace between doc comment and keyword
-            }
-            Some(_) => break, // hit a non-trivia token — stop
-        }
-    }
-
-    if doc_lines.is_empty() {
-        return None;
-    }
-    doc_lines.reverse();
-    Some(doc_lines.join("\n"))
 }
 
 /// Token kinds that indicate the cursor is in expression context.

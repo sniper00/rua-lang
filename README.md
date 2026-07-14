@@ -1,475 +1,153 @@
 # Rua
 
-**Rua** is a Rust-inspired language that compiles to readable, idiomatic Lua 5.4+.
-Write in familiar Rust syntax — structs, enums, traits, generics, pattern matching,
-iterators, closures — and get clean Lua that reads as if hand-written.
-
-```bash
-$ ruac build app.rua              # app.rua → app.lua
-```
-
-## Why Rua?
-
-| | Rust | Lua | Rua |
-|---|------|-----|-----|
-| Type safety | ✅ borrow checker | ❌ dynamic | ✅ static, erased at runtime |
-| Syntax | ✅ expressive | ❌ verbose | ✅ Rust-like, compiles to Lua |
-| Ecosystem | ✅ cargo | ✅ luasocket/lpeg | ✅ Lua interop + Rua LSP |
-| Learning curve | steep | gentle | **gentle → productive** |
-
-- **No borrow checker**. Rua has Rust's syntax and type system *without* lifetimes, ownership, or borrow checking. Types are checked at compile time and erased in the output.
-- **Idiomatic Lua output**. `Result<T, E>` compiles to Lua's native `nil, err` multi-return. `Option<T>` is bare `T | nil`. Iterators fuse into efficient `for` loops.
-- **IDE support included**. LSP server with hover, goto-def, completions, references, rename, inlay hints, diagnostics, and semantic tokens.
-- **Zero allocation**. `Some(x)` and `Ok(x)` are bare values, not wrapped in tables. Only structs and user enums use metatables.
-
-## Quick Start
+Rua 是一门采用 Rust 风格语法、编译到可读 Lua 源码的静态类型脚本语言。它保留 `struct`、`enum`、`trait`、泛型、模式匹配、闭包和 iterator，但不实现所有权、借用检查或生命周期。
 
 ```bash
 cargo build --release -p ruac -p rua-lsp --features lsp
+target/release/ruac build app.rua
 ```
 
-### Hello World
+生成物面向 Lua 5.4/5.5，并在使用运行时能力时依赖 [rua_rt.lua](lualib/rua_rt.lua)。
+
+## 语言语义
+
+Rua 文件本身就是可执行 chunk，没有特殊入口函数。顶层语句按源码顺序执行；名为 `main` 的函数只是普通函数，不会被编译器自动调用。
 
 ```rua
-fn main() {
-    println!("Hello, {}!", "world");
-}
+fn answer() -> i64 { 42 }
+
+let value = answer();
+println!("answer = {}", value);
 ```
 
-⇩
+`Result<T, E>` 是一等 tagged value，而不是 Lua multi-return。`Ok(value)` 和 `Err(error)` 在赋值、参数传递、字段、容器和闭包捕获后仍保留状态；`Ok(nil)` 与 `Err(nil)` 也可区分。`?`、模式匹配和普通返回使用同一表示。
 
-```lua
-local rt = require("rua_rt")
-
-local function main()
-    rt.println("Hello, {}!", "world")
-end
-
-main()
+```text
+Ok(v)  -> { __rua_result = true, tag = "ok",  value = v }
+Err(e) -> { __rua_result = true, tag = "err", value = e }
 ```
 
-### Structs + Methods
+只有显式 extern/FFI adapter 可以把 tagged Result 转换成宿主约定。`Option<T>` 当前使用 `T | nil`，因此 `Some(nil)` 不属于可表达状态。
 
 ```rua
-struct Point { x: i64, y: i64 }
-
-impl Point {
-    fn new(x: i64, y: i64) -> Point { Point { x, y } }
-    fn distance(&self) -> i64 { self.x * self.x + self.y * self.y }
+fn load(path: String) -> Result<String, String> {
+    if path == "" { Err("empty path") } else { Ok("config") }
 }
 
-fn main() {
-    let p = Point::new(3, 4);
-    println!("{}", p.distance());
-}
+let config = load("app.rua")?;
 ```
 
-⇩
+其他核心映射：
 
-```lua
-local rt = require("rua_rt")
----@class Point
----@field x integer
----@field y integer
-local Point = {}
-Point.__index = Point
+| Rua | Lua 运行时表示 |
+|---|---|
+| `i64` / `f64` | Lua integer / number |
+| `bool` | boolean |
+| `String` | string |
+| `Option<T>` | `T` / `nil` |
+| `Result<T, E>` | 带 `tag` 与 `value` 的 runtime value |
+| `Vec<T>` | 0-based table，加 `n` 长度 |
+| `HashMap<K, V>` | runtime map table |
+| `struct` | table + class metatable |
+| `enum` | tagged table |
 
-local function main()
-    local p = Point.new(3, 4)
-    rt.println("{}", p:distance())
-end
+## 模块
 
----@return Point
-function Point.new(x, y)
-    return setmetatable({ x = x, y = y }, Point)
-end
-
----@return integer
-function Point:distance()
-    return self.x * self.x + self.y * self.y
-end
-
-main()
-```
-
-### Enums + Pattern Matching
+Rua 支持 inline module、文件 module、`.ruai` declaration 和可见性检查。
 
 ```rua
-enum Message {
-    Quit,
-    Move { x: i64, y: i64 },
-    Write(String),
-}
-
-fn handle(msg: Message) -> String {
-    match msg {
-        Message::Quit => "bye",
-        Message::Move { x, y } => format!("move to ({}, {})", x, y),
-        Message::Write(text) => text,
-    }
-}
-```
-
-⇩
-
-```lua
-local rt = require("rua_rt")
----@class Message
-local Message = {}
-Message.__index = Message
-
----@return string
-local function handle(msg)
-    local __t1 = msg
-    if __t1.tag == "Quit" then
-        return "bye"
-    elseif __t1.tag == "Move" then
-        local x = __t1.x
-        local y = __t1.y
-        return rt.format("move to ({}, {})", x, y)
-    elseif __t1.tag == "Write" then
-        local text = __t1[1]
-        return text
-    else
-        error("non-exhaustive match")
-    end
-end
-```
-
-### Error Handling — Lua‑idiomatic
-
-`Result<T, E>` compiles to Lua's native `nil, err` multi‑return:
-
-```rua
-fn load_config(path: String) -> Result<String, String> {
-    if path == "" {
-        Err("empty path")
-    } else {
-        Ok("config")
-    }
-}
-
-fn use_config() -> Result<String, String> {
-    let config = load_config("app.rua")?;
-    Ok(config)
-}
-```
-
-⇩
-
-```lua
----@return string|nil, string|nil
-local function load_config(path)
-    if path == "" then
-        return nil, "empty path"
-    else
-        return "config"
-    end
-end
-
----@return string|nil, string|nil
-local function use_config()
-    local config, __t1 = load_config("app.rua")
-    if __t1 ~= nil then return nil, __t1 end
-    if config == nil then return nil end
-    return config
-end
-```
-
-`Option<T>` compiles to bare `T | nil` — zero allocation:
-
-```rua
-fn maybe_double(x: Option<i64>) -> Option<i64> {
-    let v = x?;
-    Some(v * 2)
-}
-```
-
-⇩
-
-```lua
----@return integer|nil
-local function maybe_double(x)
-    local v = x
-    if v == nil then return nil end
-    return v * 2
-end
-```
-
-### Modules
-
-```rua
-mod math {
-    pub fn add(a: i64, b: i64) -> i64 { a + b }
-    fn helper() -> i64 { 0 }
-}
+mod math;
 use math::add;
 
-fn main() {
-    let sum = add(3, 4);
-}
+let total = add(3, 4);
 ```
 
-⇩
+文件 module 按确定顺序查找：`name.rua`、`name/mod.rua`、`name.ruai`、`name/mod.ruai`。同时存在多个候选会报歧义，不会静默选取。`.ruai` 允许空 `{}` 作为 function/method declaration body，但任何非空实现或顶层 executable statement 都以 `E0108` 拒绝。解析阶段为 module、定义、local、type、trait、variant 和 use site 分配稳定 identity；Lua codegen 只消费这些解析结果。
 
-```lua
----@class math
-local math = {}
+## Compiler
 
----@return integer
-function math.add(a, b)
-    return a + b
-end
-
----@return integer
-function math.helper()
-    return 0
-end
-
-local function main()
-    local sum = math.add(3, 4)
-end
-
-main()
-```
-
-### Generics + Traits
-
-```rua
-trait Greet {
-    fn hello(&self) -> String;
-}
-
-struct Person { name: String }
-
-impl Greet for Person {
-    fn hello(&self) -> String { format!("Hi, {}!", self.name) }
-}
-
-fn greet<T: Greet>(value: &T) -> String {
-    value.hello()
-}
-```
-
-⇩
-
-```lua
-local rt = require("rua_rt")
----@class Person
----@field name string
-local Person = {}
-Person.__index = Person
-
----@generic T
----@return string
-local function greet(value)
-    return value:hello()
-end
-
----@return string
-function Person:hello()
-    return rt.format("Hi, {}!", self.name)
-end
-```
-
-### Iterators
-
-```rua
-fn main() {
-    let doubled: Vec<i64> = vec![1, 2, 3, 4, 5].iter()
-        .map(|x| x * 2)
-        .filter(|x| x > 5)
-        .collect();
-
-    let total = vec![1, 2, 3].iter().fold(0, |acc, x| acc + x);
-}
-```
-
-⇩
-
-```lua
-local rt = require("rua_rt")
-
-local function main()
-    local doubled
-    local __t1 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, [3] = 4, [4] = 5, n = 5 })
-    local __t2 = rt.vec({ n = 0 })
-    for __t4 = 0, __t1.n - 1 do
-        local __t3 = __t1[__t4]
-        local __t5 = true
-        if __t5 then
-            local __t6
-            do
-                local x = __t3
-                __t6 = x * 2          -- map body inlined directly
-            end
-            __t3 = __t6
-        end
-        if __t5 then
-            local __t7
-            do
-                local x = __t3
-                __t7 = x > 5           -- filter body inlined directly
-            end
-            if not __t7 then __t5 = false end
-        end
-        if __t5 then
-            __t2[__t2.n] = __t3
-            __t2.n = __t2.n + 1
-        end
-    end
-    doubled = __t2
-
-    local total
-    local __t8 = rt.vec({ [0] = 1, [1] = 2, [2] = 3, n = 3 })
-    local __t9 = 0
-    for __t11 = 0, __t8.n - 1 do
-        local __t10 = __t8[__t11]
-        local __t12 = true
-        if __t12 then
-            local __t13
-            do
-                local acc = __t9
-                local x = __t10
-                __t13 = acc + x       -- fold body inlined directly
-            end
-            __t9 = __t13
-        end
-    end
-    total = __t9
-end
-
-main()
-```
-
-> Iterator chains (`map`, `filter`, `fold`, `any`, `all`, `find`, `count`, `collect`,
-> `enumerate`, `take`, `skip`) fuse into a single `for` loop — no intermediate
-> allocations, closures inlined directly into the loop body.
-
-### ? Operator — Error Propagation
-
-```rua
-fn chain(a: Option<i64>, b: Option<i64>) -> Option<i64> {
-    let va = a?;
-    let vb = b?;
-    Some(va + vb)
-}
-```
-
-⇩
-
-```lua
----@return integer|nil
-local function chain(a, b)
-    local va = a
-    if va == nil then return nil end
-    local vb = b
-    if vb == nil then return nil end
-    return va + vb
-end
-```
-
-### Closures
-
-```rua
-let inc = |x: i64| x + 1;
-let add = |a: i64, b: i64| -> i64 { a + b };
-let base = 10;
-let offset = |x| x + base;            // fused: captures by value
-```
-
-### Extern Functions
-
-```rua
-extern "lua" {
-    pub fn log(message: String);
-    pub fn format(template: String, ...) -> String;
-}
-```
-
-⇩
-
-```lua
-local log = log or function(...) end
-local format = format or function(...) end
-```
-
-## Language Reference
-
-### Types
-
-| Rua | Lua Runtime |
-|-----|-------------|
-| `i64`, `i32`, `u64`, … | Lua `integer` |
-| `f64`, `f32` | Lua `number` |
-| `bool` | Lua `boolean` |
-| `String`, `str` | Lua `string` |
-| `Vec<T>` | Lua array table `{ T, … }` |
-| `HashMap<K, V>` | `rt.map()` table |
-| `Option<T>` | `T` (Some) 或 `nil` (None) |
-| `Result<T, E>` | `T` (Ok) 或 `nil, E` (Err) |
-| `struct` / `enum` | table + metatable |
-| `&T` / `&mut T` | 等同于 `T` (类型已擦除) |
-
-### Control Flow
-
-```rua
-if n > 0 { "pos" } else if n < 0 { "neg" } else { "zero" }  // 表达式
-while count < 10 { count = count + 1; }
-for i in 0..10 { sum = sum + i; }                              // 左闭右开
-for j in 1..=5 { sum = sum + j; }                              // 闭区间
-loop { if done { break; } }
-match val { Some(v) => v, None => 0 }
-if let Some(p) = maybe { return p.x; }
-while let Some(v) = opt { opt = Some(v + 1); }
-```
-
-## Tooling
-
-### Compiler (`ruac`)
+CLI：
 
 ```bash
-ruac build src/main.rua              # 编译 → src/main.lua
-ruac check src/main.rua              # 仅类型检查
-ruac build --builtins-dir ./std      # 自定义内置库路径
+ruac build src/main.rua                         # 写入 src/main.lua
+ruac build src/main.rua -o dist/app.lua
+ruac check src/main.rua
+ruac build src/main.rua --builtins-dir ./sysroot
 ```
 
-### Language Server (`rua-lsp`)
+库 API：
 
-| Feature | |
-|---------|-|
-| Hover (类型信息 + 文档) | ✅ |
-| Goto Definition | ✅ |
-| Find References | ✅ |
-| Rename | ✅ |
-| Completions (关键词 / 局部变量 / 路径 / 成员) | ✅ |
-| Inlay Hints (仅 let 绑定) | ✅ |
-| Diagnostics (parse + type + lint) | ✅ |
-| Semantic Tokens | ✅ |
-| Code Actions | ✅ |
-| Folding Ranges | ✅ |
-| Document Symbols | ✅ |
-| Call Hierarchy | ✅ |
-| Type Hierarchy | ✅ |
-| Signature Help | ✅ |
-| Formatting | ✅ |
-
-## Project Structure
-
+```rust
+let lua = ruac::compile_str("let value = 42;")?;
+let lua = ruac::compile_path(path)?;
+let lua = ruac::compile_project(&project_spec, &source_provider)?;
+let artifact = ruac::compile_project_with_diagnostics(
+    &project_spec,
+    &source_provider,
+)?;
 ```
-rua/
-├── crates/
-│   ├── ruac/          # 编译器: parse → typeck → codegen
-│   ├── rua-syntax/    # 无损 CST, parser, lexer, formatter
-│   ├── rua-analysis/  # 增量语义分析, IDE 查询引擎
-│   └── rua-lsp/       # LSP 服务器 (stdio JSON-RPC)
-├── lualib/
-│   └── rua_rt.lua     # 运行时库 (String 方法, 迭代器)
-├── tests/
-│   ├── demo.rua       # 综合语法演示 (620+ 行)
-│   └── golden/        # compile-pass (44) + compile-fail (45) 快照
-└── docs/              # 设计文档
+
+`compile_project_with_diagnostics` 是完整 host 集成入口，成功值包含 Lua 与 generated-to-Rua source map，失败值 `CompileFailure` 包含 diagnostic code、文件和 byte range。`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 同样返回结构化失败；只有 CLI 负责渲染展示文字。`compile_path_artifact` 为文件系统 host 保留 generated-to-Rua source map。`ProjectSpec` 提供稳定 `FileId`、逻辑路径、source root 和 library mount；`SourceProvider` 提供源码。project API 使用内嵌 sysroot，不读取磁盘、不依赖 CWD；`compile_path` 才是文件系统 adapter。
+
+编译器主链：
+
+```text
+rua-lex tokens
+  -> strict parser / owned AST
+  -> module collection + resolved HIR identities
+  -> structural check + ID-keyed type facts
+  -> backend layout
+  -> structured Lua IR
+  -> Lua printer
 ```
+
+## IDE
+
+Rua 长期保留两套 parser：
+
+- `ruac` 使用 fail-fast strict parser，适合编译器和嵌入 host。
+- `rua-syntax` 使用 error-tolerant Rowan parser，保留 trivia 和错误节点，适合编辑中的源码。
+
+两者共享 `rua-lex`、`rua-core`、`rua-project`、grammar corpus 和 range conformance 测试，但不共享 AST、错误恢复或语义实现。`rua-analysis` 是独立的增量语义引擎，不调用 compiler AST/typeck 作为 production fallback。
+
+`rua-lsp` 支持 hover、goto definition/implementation、completion、references、atomic rename、call/type hierarchy、inlay hints、diagnostics、semantic tokens、code actions、symbols、folding 和 formatting。函数、方法、trait method、extern、`.ruai` declaration 与 builtin inline macro 的文档来自统一 semantic record。enum variant 在构造、限定路径、alias 和 pattern 中使用同一 identity。
+
+VS Code 设置：
+
+- `rua.library`: `.ruai` 文件或目录列表。
+- `rua.libraryMounts`: logical module name 到 `.ruai` 文件/目录的映射。
+- `rua.sysroot`: 可选 sysroot 路径。
+- `rua.server.path`, `rua.server.args`, `rua.trace.server`。
+
+workspace/library 扫描支持 `.gitignore`、`.ignore` 和 `.ruaignore`，默认排除 `.git`、`target`、`node_modules`。
+
+## Workspace
+
+```text
+crates/rua-core      stable IDs, diagnostic and builtin contracts
+crates/rua-lex       shared lossless token stream
+crates/rua-project   IO-free project/source-provider model
+crates/ruac          strict compiler and Lua backend
+crates/rua-syntax    Rowan CST parser and formatter
+crates/rua-analysis  incremental semantic database and IDE queries
+crates/rua-lsp       stdio LSP adapter and formatter CLI
+lualib/rua_rt.lua    versioned runtime ABI
+```
+
+## 验证
+
+```bash
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features --no-deps -- -D warnings
+bash scripts/check-boundaries.sh
+(cd editors/vscode && npm run check-types && npm run test-extension)
+```
+
+CI 固定构建并校验 Lua 5.5.0；compiler compile-pass golden 在比较 Lua snapshot 后还会真实执行生成物，compile-fail golden 另行锁定结构化 code/file/range/arguments。两个 parser 通过 arbitrary-Unicode property test 验证无 panic、lossless CST 和合法错误 range。
+
+文档入口见 [docs/README.md](docs/README.md)，其中包括[语言与运行时设计](docs/rua-design.md)、[工具链架构](docs/rua-architecture.md)和[当前 LSP 功能](docs/rua-lsp-features.md)。
 
 ## License
 

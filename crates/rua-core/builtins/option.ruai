@@ -1,0 +1,26 @@
+//! Builtin `Option<T>` — represents an optional value.
+//!
+//! `Some(T)` wraps a present value; `None` is absence.
+//! At runtime, `Some(v)` compiles to `v` and `None` compiles to `nil`.
+
+pub enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    /// Map an `Option<T>` to `Option<U>` by applying a function.
+    pub fn map<U>(self, f: fn(T) -> U) -> Option<U> {}
+
+    /// Extract the value, panicking if `None`.
+    pub fn unwrap(self) -> T {}
+
+    /// Extract the value, returning `default` if `None`.
+    pub fn unwrap_or(self, default: T) -> T {}
+
+    /// Returns true if the option is `Some`.
+    pub fn is_some(self) -> bool {}
+
+    /// Returns true if the option is `None`.
+    pub fn is_none(self) -> bool {}
+}

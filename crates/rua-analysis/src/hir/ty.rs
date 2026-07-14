@@ -460,44 +460,43 @@ impl<'a> TypeLoweringContext<'a> {
             return Ty::GenericParam(GenericParamTy::new(*id, path));
         }
 
-        // Built-in types with fixed semantics (Option, Result) are recognised
-        // directly, even when a user-defined enum with the same name exists.
-        // This ensures `?` operator and pattern matching work uniformly.
-        let builtin = match path.as_str() {
-            "Option" if args.len() == 1 => Some(Ty::Option(Box::new(args[0].clone()))),
-            "Result" if args.len() == 2 => {
-                Some(Ty::Result(Box::new(args[0].clone()), Box::new(args[1].clone())))
-            }
-            _ => None,
-        };
-        if let Some(builtin) = builtin {
-            return builtin;
-        }
-
-        // A project definition is stronger evidence than a builtin spelling.
-        // This keeps workspace/library precedence intact for legal names such
-        // as a user-defined `Vec`, while unresolved spellings still fall back
-        // to the analysis-owned builtin model below.
+        // Resolve the spelling before consulting the builtin catalog. A user
+        // definition is a distinct semantic identity even when it is named
+        // `Option`, `Result`, or another builtin type.
         if let Some(definition) = self.named_resolver.and_then(|resolve| resolve(&path)) {
             return Ty::Named(NamedTy::new(definition, path, args));
         }
 
-        let builtin = match path.as_str() {
-            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
-                if args.is_empty() =>
-            {
-                Some(Ty::I64)
+        let builtin = match rua_core::builtin_type(&path) {
+            Some(rua_core::BuiltinId::TypeString) if args.is_empty() => Some(Ty::STRING),
+            Some(rua_core::BuiltinId::TypeOption) if args.len() == 1 => {
+                Some(Ty::Option(Box::new(args[0].clone())))
             }
-            "f32" | "f64" if args.is_empty() => Some(Ty::F64),
-            "bool" if args.is_empty() => Some(Ty::BOOL),
-            "String" | "str" if args.is_empty() => Some(Ty::STRING),
-            "Vec" if args.len() == 1 => Some(Ty::Vec(Box::new(args[0].clone()))),
-            "HashMap" if args.len() == 2 => Some(Ty::HashMap(
+            Some(rua_core::BuiltinId::TypeResult) if args.len() == 2 => Some(Ty::Result(
                 Box::new(args[0].clone()),
                 Box::new(args[1].clone()),
             )),
-            "Iterator" if args.len() == 1 => Some(Ty::Iterator(Box::new(args[0].clone()))),
-            _ => None,
+            Some(rua_core::BuiltinId::TypeVec) if args.len() == 1 => {
+                Some(Ty::Vec(Box::new(args[0].clone())))
+            }
+            Some(rua_core::BuiltinId::TypeHashMap) if args.len() == 2 => Some(Ty::HashMap(
+                Box::new(args[0].clone()),
+                Box::new(args[1].clone()),
+            )),
+            Some(rua_core::BuiltinId::TypeIter) if args.len() == 1 => {
+                Some(Ty::Iterator(Box::new(args[0].clone())))
+            }
+            _ => match path.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+                    if args.is_empty() =>
+                {
+                    Some(Ty::I64)
+                }
+                "f32" | "f64" if args.is_empty() => Some(Ty::F64),
+                "bool" if args.is_empty() => Some(Ty::BOOL),
+                "str" if args.is_empty() => Some(Ty::STRING),
+                _ => None,
+            },
         };
         if let Some(builtin) = builtin {
             return builtin;
@@ -1023,7 +1022,24 @@ mod tests {
         assert_eq!(named.definition(), user_box);
         assert_eq!(named.args(), &[Ty::I64]);
 
-        let string_param = GenericParamId::new(DefId::new(5), 0);
+        let user_option = DefId::new(5);
+        let user_result = DefId::new(6);
+        let resolve = |path: &str| match path {
+            "Option" => Some(user_option),
+            "Result" => Some(user_result),
+            _ => None,
+        };
+        let known = TypeLoweringContext::new().with_named_resolver(&resolve);
+        let Ty::Named(named) = known.lower_syntax("Option<i64>") else {
+            panic!("a user Option must retain its definition identity");
+        };
+        assert_eq!(named.definition(), user_option);
+        let Ty::Named(named) = known.lower_syntax("Result<i64, String>") else {
+            panic!("a user Result must retain its definition identity");
+        };
+        assert_eq!(named.definition(), user_result);
+
+        let string_param = GenericParamId::new(DefId::new(7), 0);
         let generic_context = TypeLoweringContext::new().with_generic_param("String", string_param);
         assert_eq!(
             generic_context.lower_syntax("String"),

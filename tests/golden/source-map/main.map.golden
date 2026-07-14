@@ -1,0 +1,5 @@
+0: generated=175..194 lua="---@return integer\n" <- file=1 source=7..13 rua="answer"
+1: generated=194..234 lua="function api.answer()\n    return 42\nend\n" <- file=1 source=7..13 rua="answer"
+2: generated=216..230 lua="    return 42\n" <- file=1 source=25..27 rua="42"
+3: generated=234..261 lua="local value = api.answer()\n" <- file=0 source=14..19 rua="value"
+4: generated=261..285 lua="rt.println(\"{}\", value)\n" <- file=0 source=37..58 rua="println!(\"{}\", value)"

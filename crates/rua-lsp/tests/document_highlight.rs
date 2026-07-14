@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn document_highlight_local_variable_reads() {
@@ -52,10 +52,7 @@ fn document_highlight_parameter_in_body() {
     // cursor on the parameter `n` at byte offset 10
     let pp = srv.pp(&uri, 0, 10).unwrap();
     let refs = srv.snapshot().references(pp, true);
-    assert!(
-        !refs.is_empty(),
-        "should find references to parameter n"
-    );
+    assert!(!refs.is_empty(), "should find references to parameter n");
 }
 
 #[test]

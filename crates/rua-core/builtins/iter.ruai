@@ -1,0 +1,46 @@
+//! Builtin `Iter<T>` — an iterator over elements of type `T`.
+//!
+//! At runtime, iterator chains compile to inline Lua loops.
+
+pub struct Iter<T> {}
+
+impl<T> Iter<T> {
+    /// Transform each element.
+    pub fn map<U>(self, f: fn(T) -> U) -> Iter<U> {}
+
+    /// Keep elements that satisfy the predicate.
+    pub fn filter(self, f: fn(&T) -> bool) -> Iter<T> {}
+
+    /// Filter and map simultaneously.
+    pub fn filter_map<U>(self, f: fn(T) -> Option<U>) -> Iter<U> {}
+
+    /// Enumerate elements with their index.
+    pub fn enumerate(self) -> Iter<(i64, T)> {}
+
+    /// Take the first `n` elements.
+    pub fn take(self, n: i64) -> Iter<T> {}
+
+    /// Skip the first `n` elements.
+    pub fn skip(self, n: i64) -> Iter<T> {}
+
+    /// Collect into a collection type.
+    pub fn collect<C>(self) -> C {}
+
+    /// Fold (reduce) the iterator into a single value.
+    pub fn fold<U>(self, init: U, f: fn(U, T) -> U) -> U {}
+
+    /// Count the number of elements.
+    pub fn count(self) -> i64 {}
+
+    /// Returns true if any element satisfies the predicate.
+    pub fn any(self, f: fn(T) -> bool) -> bool {}
+
+    /// Returns true if all elements satisfy the predicate.
+    pub fn all(self, f: fn(T) -> bool) -> bool {}
+
+    /// Find the first element satisfying the predicate.
+    pub fn find(self, f: fn(&T) -> bool) -> Option<T> {}
+
+    /// Advance the iterator, returning the next element.
+    pub fn next(&mut self) -> Option<T> {}
+}

@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn type_hierarchy_prepare_on_struct() {
@@ -48,13 +48,13 @@ fn type_hierarchy_subtypes_finds_impls() {
         "prepared item should be the trait"
     );
 
-    // subtypes() may return empty if impl resolution isn't fully wired,
-    // but the API call must not panic
     let subtypes = srv.snapshot().type_hierarchy_subtypes(&item);
-    assert!(
-        subtypes.len() <= 5,
-        "should not have more than a few subtypes"
-    );
+    let mut names = subtypes
+        .iter()
+        .map(|subtype| subtype.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["Circle", "Square"]);
 }
 
 #[test]
@@ -78,19 +78,22 @@ fn type_hierarchy_supertypes_finds_traits() {
         item.name
     );
 
-    // supertypes() may return empty but must not panic
     let supertypes = srv.snapshot().type_hierarchy_supertypes(&item);
-    assert!(
-        supertypes.len() <= 5,
-        "should not have more than a few supertypes"
-    );
+    let names = supertypes
+        .iter()
+        .map(|supertype| supertype.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Drawable"]);
 }
 
 #[test]
 fn type_hierarchy_on_function_returns_none() {
     let uri = uri("/test/typehier_none.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, "fn my_function() -> i64 { 42 }\nfn main() { my_function(); }");
+    srv.open(
+        &uri,
+        "fn my_function() -> i64 { 42 }\nfn main() { my_function(); }",
+    );
 
     // cursor on `my_function` name
     let pp = srv.pp(&uri, 0, 3).unwrap();
@@ -99,5 +102,34 @@ fn type_hierarchy_on_function_returns_none() {
     assert!(
         item.is_none(),
         "type hierarchy should return None for a function"
+    );
+}
+
+#[test]
+fn type_hierarchy_isolates_same_named_traits_by_definition_identity() {
+    let uri = uri("/test/typehier_same_traits.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "mod first {\n    pub trait Marker {}\n    pub struct One {}\n    impl Marker for One {}\n}\nmod second {\n    pub trait Marker {}\n    pub struct Two {}\n    impl Marker for Two {}\n}\n",
+    );
+
+    let first = srv
+        .snapshot()
+        .type_hierarchy_prepare(srv.pp(&uri, 1, 14).unwrap())
+        .unwrap();
+    let second = srv
+        .snapshot()
+        .type_hierarchy_prepare(srv.pp(&uri, 6, 14).unwrap())
+        .unwrap();
+    assert_ne!(first.target, second.target);
+
+    let subtypes = srv.snapshot().type_hierarchy_subtypes(&first);
+    assert_eq!(
+        subtypes
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        ["One"]
     );
 }

@@ -49,7 +49,8 @@ fn build(args: &[String]) -> Result<(), String> {
         ruac::compile_path_with_builtins(&input, d)
     } else {
         ruac::compile_path(&input)
-    }?;
+    }
+    .map_err(|error| error.to_string())?;
     let out = out.unwrap_or_else(|| input.with_extension("lua"));
     std::fs::write(&out, lua).map_err(|e| format!("writing {}: {}", out.display(), e))?;
     println!("compiled {} -> {}", input.display(), out.display());
@@ -58,15 +59,19 @@ fn build(args: &[String]) -> Result<(), String> {
 
 fn check(args: &[String]) -> Result<(), String> {
     let (input, builtins_dir) = parse_check_args(args)?;
-    let (mut program, files) = ruac::parse_and_resolve(&input)?;
-    ruac::load_builtins(&mut program, builtins_dir.as_deref());
-    ruac::check::check(&program, &files)?;
-    ruac::typeck::check(&program, &files)?;
+    if let Some(ref directory) = builtins_dir {
+        ruac::compile_path_with_builtins(&input, directory)
+    } else {
+        ruac::compile_path(&input)
+    }
+    .map_err(|error| error.to_string())?;
     println!("ok: {}", input.display());
     Ok(())
 }
 
-fn parse_build_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
+fn parse_build_args(
+    args: &[String],
+) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
     let mut input: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut builtins_dir: Option<PathBuf> = None;

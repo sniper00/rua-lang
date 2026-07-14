@@ -5,32 +5,14 @@
 //! with trivia) plus a typed **AstNode view layer**, consumed only by tooling
 //! (formatter / LSP / `rua-analysis`).
 //!
-//! ## Features
-//!
-//! - `legacy` (default): enables the deprecated `analysis`, `workspace`,
-//!   `nameres`, `completion`, and `transition` modules that bridge to `ruac`.
-//!   These only survive for integration tests; production consumers should opt
-//!   out with `default-features = false`.
-
 pub mod ast;
 pub mod format;
-pub mod symbols;
-pub mod text;
 mod kind;
 mod lexer;
 mod line_index;
 mod parser;
-
-#[cfg(feature = "legacy")]
-pub mod analysis;
-#[cfg(feature = "legacy")]
-pub mod completion;
-#[cfg(feature = "legacy")]
-pub mod nameres;
-#[cfg(feature = "legacy")]
-pub mod workspace;
-#[cfg(feature = "legacy")]
-mod transition;
+pub mod symbols;
+pub mod text;
 
 pub use ast::{AstNode, Named};
 pub use kind::{RuaLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -126,8 +108,14 @@ mod tests {
     fn trivia_is_captured() {
         let src = "let x = 1; // trailing\n/* block */ let y = 2;";
         let ks = kinds(src);
-        assert!(ks.contains(&SyntaxKind::LineComment), "line comment retained");
-        assert!(ks.contains(&SyntaxKind::BlockComment), "block comment retained");
+        assert!(
+            ks.contains(&SyntaxKind::LineComment),
+            "line comment retained"
+        );
+        assert!(
+            ks.contains(&SyntaxKind::BlockComment),
+            "block comment retained"
+        );
         assert!(ks.contains(&SyntaxKind::Whitespace), "whitespace retained");
         // Real tokens still classified via the shared lexer.
         assert!(ks.contains(&SyntaxKind::KwLet));

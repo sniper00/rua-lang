@@ -1,0 +1,10 @@
+[package]
+name = "rua-core"
+version = "0.1.0"
+edition = "2024"
+description = "Protocol-neutral source identities, ranges, and diagnostic codes for Rua."
+
+[lib]
+name = "rua_core"
+path = "src/lib.rs"
+doctest = false

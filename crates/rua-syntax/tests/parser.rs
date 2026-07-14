@@ -3,39 +3,17 @@
 //! Pattern: parse → verify syntax kind tree → verify no unexpected errors.
 //! Mirrors rust-analyzer's test_data/parser/inline/{ok,err}/ test suite.
 
-use rua_syntax::{parse_source_file, SyntaxKind};
-
-// ---------------------------------------------------------------------------
-// Helper — walk tree and collect kinds
-// ---------------------------------------------------------------------------
-
-fn kind_names(node: &rua_syntax::SyntaxNode) -> Vec<String> {
-    let mut kinds = Vec::new();
-    collect_kinds(node, &mut kinds);
-    kinds
-}
-
-fn collect_kinds(node: &rua_syntax::SyntaxNode, out: &mut Vec<String>) {
-    out.push(format!("{:?}", node.kind()));
-    for child in node.children_with_tokens() {
-        match child {
-            rua_syntax::SyntaxElement::Node(n) => collect_kinds(&n, out),
-            rua_syntax::SyntaxElement::Token(t) => {
-                out.push(format!("{:?}", t.kind()));
-            }
-        }
-    }
-}
+use rua_syntax::{SyntaxKind, parse_source_file};
 
 fn has_kind(node: &rua_syntax::SyntaxNode, kind: SyntaxKind) -> bool {
     if node.kind() == kind {
         return true;
     }
     for child in node.children_with_tokens() {
-        if let rua_syntax::SyntaxElement::Node(n) = child {
-            if has_kind(&n, kind) {
-                return true;
-            }
+        if let rua_syntax::SyntaxElement::Node(n) = child
+            && has_kind(&n, kind)
+        {
+            return true;
         }
     }
     false
@@ -55,16 +33,17 @@ fn parse_and_check(source: &str) -> rua_syntax::SyntaxNode {
     let parse = parse_source_file(source);
     let node = parse.syntax_node().clone();
     // Lossless round-trip
-    assert_eq!(node.text().to_string(), source,
-        "parser must be lossless");
+    assert_eq!(node.text().to_string(), source, "parser must be lossless");
     node
 }
 
 fn parse_no_errors(source: &str) -> rua_syntax::SyntaxNode {
     let parse = parse_source_file(source);
     let error_count = parse.errors().len();
-    assert!(error_count == 0,
-        "expected no parse errors, got {error_count} errors\nsource: {source}");
+    assert!(
+        error_count == 0,
+        "expected no parse errors, got {error_count} errors\nsource: {source}"
+    );
     parse.syntax_node().clone()
 }
 
@@ -197,7 +176,9 @@ fn parse_impl_block() {
 
 #[test]
 fn parse_trait_impl() {
-    let node = parse_no_errors("trait Greet { fn hello(self); }\nstruct Person {}\nimpl Greet for Person { fn hello(self) {} }");
+    let node = parse_no_errors(
+        "trait Greet { fn hello(self); }\nstruct Person {}\nimpl Greet for Person { fn hello(self) {} }",
+    );
     assert!(has_kind(&node, SyntaxKind::TraitDecl));
     assert!(has_kind(&node, SyntaxKind::ImplDecl));
 }
@@ -284,7 +265,8 @@ fn parse_if_without_else() {
 #[test]
 fn parse_if_let_expression() {
     let node = parse_no_errors(
-        "enum Option { Some(i64), None }\nfn main() { let o = Option::Some(1); if let Option::Some(v) = o { v; } }");
+        "enum Option { Some(i64), None }\nfn main() { let o = Option::Some(1); if let Option::Some(v) = o { v; } }",
+    );
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
@@ -297,7 +279,8 @@ fn parse_while_loop() {
 #[test]
 fn parse_while_let_loop() {
     let node = parse_no_errors(
-        "enum Option { Some(i64), None }\nfn main() { let o = Option::Some(1); while let Option::Some(v) = o { v; } }");
+        "enum Option { Some(i64), None }\nfn main() { let o = Option::Some(1); while let Option::Some(v) = o { v; } }",
+    );
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
@@ -322,7 +305,8 @@ fn parse_match_expression() {
 #[test]
 fn parse_match_with_multiple_arms() {
     let node = parse_no_errors(
-        "enum Color { Red, Green, Blue }\nfn main() { let c = Color::Red; match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }; }");
+        "enum Color { Red, Green, Blue }\nfn main() { let c = Color::Red; match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }; }",
+    );
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
@@ -381,19 +365,23 @@ fn parse_function_call() {
 #[test]
 fn parse_method_call() {
     let node = parse_no_errors(
-        "struct Point { x: i64 }\nimpl Point { fn x(self) -> i64 { self.x } }\nfn main() { let p = Point { x: 0 }; p.x(); }");
+        "struct Point { x: i64 }\nimpl Point { fn x(self) -> i64 { self.x } }\nfn main() { let p = Point { x: 0 }; p.x(); }",
+    );
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
 #[test]
 fn parse_field_access() {
-    let node = parse_no_errors("struct Point { x: i64 }\nfn main() { let p = Point { x: 0 }; p.x; }");
+    let node =
+        parse_no_errors("struct Point { x: i64 }\nfn main() { let p = Point { x: 0 }; p.x; }");
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
 #[test]
 fn parse_struct_literal() {
-    let node = parse_no_errors("struct Point { x: i64, y: i64 }\nfn main() { let p = Point { x: 0, y: 0 }; }");
+    let node = parse_no_errors(
+        "struct Point { x: i64, y: i64 }\nfn main() { let p = Point { x: 0, y: 0 }; }",
+    );
     assert!(has_kind(&node, SyntaxKind::FnDecl));
 }
 
@@ -585,14 +573,14 @@ fn parse_deeply_nested_blocks() {
 #[test]
 fn parse_unicode_identifiers() {
     let source = "fn main() { let 中文变量 = 42; let результат = 中文变量 + 1; }";
-    let node = parse_and_check(&source);
+    let node = parse_and_check(source);
     assert_eq!(node.text().to_string(), source);
 }
 
 #[test]
 fn parse_unicode_string_literals() {
     let source = "fn main() { let s = \"你好世界\"; }";
-    let node = parse_and_check(&source);
+    let node = parse_and_check(source);
     assert_eq!(node.text().to_string(), source);
 }
 
@@ -600,7 +588,10 @@ fn parse_unicode_string_literals() {
 fn parse_many_functions() {
     let mut source = String::new();
     for i in 0..50 {
-        source.push_str(&format!("fn func_{}(a: i64, b: i64) -> i64 {{ a + b + {} }}\n", i, i));
+        source.push_str(&format!(
+            "fn func_{}(a: i64, b: i64) -> i64 {{ a + b + {} }}\n",
+            i, i
+        ));
     }
     let node = parse_and_check(&source);
     assert_eq!(node.text().to_string(), source);
@@ -612,6 +603,34 @@ fn parse_multiple_top_level_items() {
     let node = parse_no_errors(source);
     assert_eq!(count_kind(&node, SyntaxKind::StructDecl), 3);
     assert_eq!(count_kind(&node, SyntaxKind::FnDecl), 1);
+}
+
+#[test]
+fn parse_top_level_chunk_statements_between_items() {
+    let source =
+        "let before = 1;\nfn value() -> i64 { 2 }\nprintln!(\"{}\", before);\nlet after = value();";
+    let parsed = rua_syntax::parse_source_file(source);
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.tree().items().count(), 1);
+    assert_eq!(parsed.tree().stmts().count(), 3);
+    assert_eq!(parsed.syntax_node().text().to_string(), source);
+}
+
+#[test]
+fn parse_inline_module_chunk_statements() {
+    let source = "mod startup { let ready = true; fn status() -> bool { ready } status(); }";
+    let parsed = rua_syntax::parse_source_file(source);
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    let module = parsed
+        .tree()
+        .items()
+        .find_map(|item| match item {
+            rua_syntax::ast::Item::Mod(module) => Some(module),
+            _ => None,
+        })
+        .expect("inline module");
+    assert_eq!(module.items().count(), 1);
+    assert_eq!(module.stmts().count(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,12 +649,8 @@ fn parse_complex_struct_with_everything() {
 #[test]
 fn parse_demo_rua_lossless() {
     // The demo.rua file should parse losslessly with zero errors.
-    let path = format!(
-        "{}/../../tests/demo.rua",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let path = format!("{}/../../tests/demo.rua", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let node = parse_and_check(&source);
     let parse = parse_source_file(&source);
     let error_count = parse.errors().len();
@@ -647,8 +662,11 @@ fn parse_demo_rua_lossless() {
         }
     }
     // Must be lossless regardless
-    assert_eq!(node.text().to_string(), source,
-        "demo.rua must round-trip losslessly");
+    assert_eq!(
+        node.text().to_string(),
+        source,
+        "demo.rua must round-trip losslessly"
+    );
 }
 
 #[test]

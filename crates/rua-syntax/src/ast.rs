@@ -6,7 +6,7 @@
 //! **best-effort and total**: they return `Option`/iterators and never panic,
 //! matching the parser's error-resilient trees.
 
-use crate::kind::{SyntaxKind as K, SyntaxElement, SyntaxNode, SyntaxToken};
+use crate::kind::{SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken};
 
 /// A typed view of a [`SyntaxNode`] of a specific kind.
 pub trait AstNode: Sized {
@@ -99,6 +99,9 @@ impl SourceFile {
     }
     pub fn items(&self) -> impl Iterator<Item = Item> + '_ {
         children::<Item>(&self.syntax)
+    }
+    pub fn stmts(&self) -> impl Iterator<Item = Stmt> + '_ {
+        children::<Stmt>(&self.syntax)
     }
 }
 
@@ -221,20 +224,23 @@ fn receiver_kind(node: &SyntaxNode) -> Option<ReceiverKind> {
         .filter(|token| !token.kind().is_trivia())
         .collect();
     let receiver_token = self_receiver_token(node)?;
-    let receiver = tokens
-        .iter()
-        .position(|token| token == &receiver_token)?;
-    Some(match tokens.get(receiver.wrapping_sub(1)).map(|token| token.kind()) {
-        Some(K::KwMut)
-            if tokens
-                .get(receiver.wrapping_sub(2))
-                .is_some_and(|token| token.kind() == K::Amp) =>
+    let receiver = tokens.iter().position(|token| token == &receiver_token)?;
+    Some(
+        match tokens
+            .get(receiver.wrapping_sub(1))
+            .map(|token| token.kind())
         {
-            ReceiverKind::MutRef
-        }
-        Some(K::Amp) => ReceiverKind::SharedRef,
-        _ => ReceiverKind::Value,
-    })
+            Some(K::KwMut)
+                if tokens
+                    .get(receiver.wrapping_sub(2))
+                    .is_some_and(|token| token.kind() == K::Amp) =>
+            {
+                ReceiverKind::MutRef
+            }
+            Some(K::Amp) => ReceiverKind::SharedRef,
+            _ => ReceiverKind::Value,
+        },
+    )
 }
 
 fn self_receiver_token(node: &SyntaxNode) -> Option<SyntaxToken> {
@@ -280,10 +286,8 @@ impl GenericParam {
             Some(c) => {
                 let after = c.text_range().start();
                 Box::new(
-                    tokens(&self.syntax, K::Ident)
-                        .filter(move |t| t.text_range().start() > after),
-                )
-                    as Box<dyn Iterator<Item = SyntaxToken>>
+                    tokens(&self.syntax, K::Ident).filter(move |t| t.text_range().start() > after),
+                ) as Box<dyn Iterator<Item = SyntaxToken>>
             }
             None => empty,
         }
@@ -720,6 +724,9 @@ impl ModDecl {
     }
     pub fn items(&self) -> impl Iterator<Item = Item> + '_ {
         children::<Item>(&self.syntax)
+    }
+    pub fn stmts(&self) -> impl Iterator<Item = Stmt> + '_ {
+        children::<Stmt>(&self.syntax)
     }
 }
 
@@ -1243,9 +1250,10 @@ impl IfExpr {
     }
     pub fn else_if(&self) -> Option<IfExpr> {
         let else_end = token(&self.syntax, K::KwElse)?.text_range().end();
-        self.syntax.children().filter_map(IfExpr::cast).find(|branch| {
-            branch.syntax().text_range().start() >= else_end
-        })
+        self.syntax
+            .children()
+            .filter_map(IfExpr::cast)
+            .find(|branch| branch.syntax().text_range().start() >= else_end)
     }
 }
 
@@ -1463,10 +1471,7 @@ impl Pattern {
     /// this preserves whether a colon was written when its sub-pattern is missing.
     pub fn pattern_fields(&self) -> impl Iterator<Item = PatternField> + '_ {
         PatternFieldIter {
-            elements: self
-                .syntax()
-                .children_with_tokens()
-                .collect::<Vec<_>>(),
+            elements: self.syntax().children_with_tokens().collect::<Vec<_>>(),
             pos: 0,
         }
     }
@@ -1474,9 +1479,7 @@ impl Pattern {
     /// For `StructVariant` patterns: iterate `(field_name, optional sub-pattern)`.
     /// Returns field identifier tokens paired with their sub-pattern (`None` for
     /// shorthand `Point { x }` where the binding reuses the field name).
-    pub fn struct_fields(
-        &self,
-    ) -> impl Iterator<Item = (SyntaxToken, Option<Pattern>)> + '_ {
+    pub fn struct_fields(&self) -> impl Iterator<Item = (SyntaxToken, Option<Pattern>)> + '_ {
         self.pattern_fields()
             .map(|field| (field.name, field.pattern))
     }
@@ -1715,9 +1718,10 @@ impl Iterator for PatternFieldIter {
                     self.pos += 1;
                     break;
                 }
-                if self.elements[self.pos].as_token().is_some_and(|token| {
-                    matches!(token.kind(), K::Comma | K::RBrace | K::DotDot)
-                }) {
+                if self.elements[self.pos]
+                    .as_token()
+                    .is_some_and(|token| matches!(token.kind(), K::Comma | K::RBrace | K::DotDot))
+                {
                     break;
                 }
                 self.pos += 1;
@@ -1806,11 +1810,22 @@ mod tests {
             .collect();
 
         assert_eq!(closures[0].params().count(), 2);
-        assert!(closures[0].params().all(|parameter| parameter.ty().is_none()));
+        assert!(
+            closures[0]
+                .params()
+                .all(|parameter| parameter.ty().is_none())
+        );
         assert!(closures[0].ret_type().is_none());
         assert!(matches!(closures[0].body(), Some(Expr::Bin(_))));
         assert_eq!(closures[1].params().count(), 1);
-        assert!(closures[1].params().next().expect("typed parameter").ty().is_some());
+        assert!(
+            closures[1]
+                .params()
+                .next()
+                .expect("typed parameter")
+                .ty()
+                .is_some()
+        );
         assert!(closures[1].ret_type().is_some());
         assert!(matches!(closures[1].body(), Some(Expr::Block(_))));
         assert_eq!(closures[2].params().count(), 0);
@@ -1836,7 +1851,10 @@ mod tests {
         let Item::Impl(i) = sf.items().next().unwrap() else {
             panic!()
         };
-        assert_eq!(i.type_name().map(|t| t.text().to_string()).as_deref(), Some("P"));
+        assert_eq!(
+            i.type_name().map(|t| t.text().to_string()).as_deref(),
+            Some("P")
+        );
         assert!(i.trait_name().is_none());
         let m = i.methods().next().unwrap();
         assert_eq!(m.name_text().as_deref(), Some("get"));
@@ -1849,8 +1867,14 @@ mod tests {
         let Item::Impl(i) = sf.items().next().unwrap() else {
             panic!()
         };
-        assert_eq!(i.trait_name().map(|t| t.text().to_string()).as_deref(), Some("Draw"));
-        assert_eq!(i.type_name().map(|t| t.text().to_string()).as_deref(), Some("Circle"));
+        assert_eq!(
+            i.trait_name().map(|t| t.text().to_string()).as_deref(),
+            Some("Draw")
+        );
+        assert_eq!(
+            i.type_name().map(|t| t.text().to_string()).as_deref(),
+            Some("Circle")
+        );
     }
 
     #[test]
@@ -1860,7 +1884,9 @@ mod tests {
             panic!()
         };
         let tail = f.body().unwrap().stmts().next().unwrap();
-        let Stmt::Expr(es) = tail else { panic!("expected expr stmt") };
+        let Stmt::Expr(es) = tail else {
+            panic!("expected expr stmt")
+        };
         let Expr::Bin(add) = es.expr().unwrap() else {
             panic!("expected bin")
         };
@@ -1899,10 +1925,26 @@ mod tests {
         // largest variant and allocate a Box per node).
         let word = size_of::<usize>();
         assert!(size_of::<SyntaxNode>() <= 2 * word);
-        assert!(size_of::<Expr>() <= 3 * word, "Expr = {}", size_of::<Expr>());
-        assert!(size_of::<Item>() <= 3 * word, "Item = {}", size_of::<Item>());
-        assert!(size_of::<Stmt>() <= 3 * word, "Stmt = {}", size_of::<Stmt>());
-        assert!(size_of::<Type>() <= 3 * word, "Type = {}", size_of::<Type>());
+        assert!(
+            size_of::<Expr>() <= 3 * word,
+            "Expr = {}",
+            size_of::<Expr>()
+        );
+        assert!(
+            size_of::<Item>() <= 3 * word,
+            "Item = {}",
+            size_of::<Item>()
+        );
+        assert!(
+            size_of::<Stmt>() <= 3 * word,
+            "Stmt = {}",
+            size_of::<Stmt>()
+        );
+        assert!(
+            size_of::<Type>() <= 3 * word,
+            "Type = {}",
+            size_of::<Type>()
+        );
     }
 
     #[test]
@@ -1924,7 +1966,9 @@ mod tests {
     #[test]
     fn generic_param_bounds() {
         let sf = source_file("fn f<T: Clone + Eq>(x: T) {}");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let gp = f.generic_params().unwrap();
         let mut params = gp.params();
         let p0 = params.next().unwrap();
@@ -1936,13 +1980,19 @@ mod tests {
     #[test]
     fn where_clause_predicates() {
         let sf = source_file("fn f<T>(x: T) where T: Clone + Eq {}");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let wc = f.where_clause().unwrap();
         let preds: Vec<_> = wc.predicates().collect();
         assert_eq!(preds.len(), 1);
         let lhs: Vec<_> = preds[0].lhs.iter().map(|t| t.text().to_string()).collect();
         assert_eq!(lhs, vec!["T"]);
-        let bounds: Vec<_> = preds[0].bounds.iter().map(|t| t.text().to_string()).collect();
+        let bounds: Vec<_> = preds[0]
+            .bounds
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect();
         assert_eq!(bounds, vec!["Clone", "Eq"]);
     }
 
@@ -1966,7 +2016,9 @@ mod tests {
         let sf = source_file(
             "trait Store {\n  fn put<U: Clone>(&self, v: U);\n  fn count() -> i64 { 0 }\n}\n",
         );
-        let Item::Trait(t) = sf.items().next().unwrap() else { panic!() };
+        let Item::Trait(t) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let methods: Vec<_> = t.methods().collect();
         assert_eq!(methods.len(), 2);
 
@@ -1987,7 +2039,9 @@ mod tests {
     #[test]
     fn extern_fn_variadic() {
         let sf = source_file("extern \"lua\" {\n  fn printf(fmt: &str, ...);\n}\n");
-        let Item::Extern(b) = sf.items().next().unwrap() else { panic!() };
+        let Item::Extern(b) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let fns: Vec<_> = b.fns().collect();
         assert_eq!(fns.len(), 1);
         assert!(fns[0].variadic());
@@ -1996,10 +2050,16 @@ mod tests {
     #[test]
     fn use_imports_simple() {
         let sf = source_file("use a::b::c;\n");
-        let Item::Use(u) = sf.items().next().unwrap() else { panic!() };
+        let Item::Use(u) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let imports: Vec<_> = u.imports().collect();
         assert_eq!(imports.len(), 1);
-        let path: Vec<_> = imports[0].path.iter().map(|t| t.text().to_string()).collect();
+        let path: Vec<_> = imports[0]
+            .path
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect();
         assert_eq!(path, vec!["a", "b", "c"]);
         assert!(imports[0].alias.is_none());
     }
@@ -2007,11 +2067,17 @@ mod tests {
     #[test]
     fn use_imports_with_alias() {
         let sf = source_file("use a::b as c;\n");
-        let Item::Use(u) = sf.items().next().unwrap() else { panic!() };
+        let Item::Use(u) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let imports: Vec<_> = u.imports().collect();
         assert_eq!(imports.len(), 1);
         assert_eq!(
-            imports[0].alias.as_ref().map(|t| t.text().to_string()).as_deref(),
+            imports[0]
+                .alias
+                .as_ref()
+                .map(|t| t.text().to_string())
+                .as_deref(),
             Some("c")
         );
     }
@@ -2019,7 +2085,9 @@ mod tests {
     #[test]
     fn use_imports_grouped_retain_common_prefix() {
         let sf = source_file("use math::{one, two as second};\n");
-        let Item::Use(u) = sf.items().next().unwrap() else { panic!() };
+        let Item::Use(u) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let imports: Vec<_> = u.imports().collect();
 
         assert_eq!(imports.len(), 2);
@@ -2048,29 +2116,38 @@ mod tests {
     #[test]
     fn block_tail_expression() {
         let sf = source_file("fn f() -> i64 { 1 + 2 }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let body = f.body().unwrap();
         let tail = body.tail().unwrap();
-        let Expr::Bin(bin) = tail else { panic!("expected bin") };
+        let Expr::Bin(bin) = tail else {
+            panic!("expected bin")
+        };
         assert_eq!(bin.op().unwrap().text(), "+");
     }
 
     #[test]
     fn block_no_tail_when_semicolon() {
         let sf = source_file("fn f() { let x = 1; }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let body = f.body().unwrap();
         assert!(body.tail().is_none());
     }
 
     #[test]
     fn if_let_accessors() {
-        let sf =
-            source_file("fn f() -> i64 { if let Some(x) = g() { x } else { 0 } }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let sf = source_file("fn f() -> i64 { if let Some(x) = g() { x } else { 0 } }");
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let body = f.body().unwrap();
         let tail = body.tail().unwrap();
-        let Expr::If(ife) = tail else { panic!("expected if") };
+        let Expr::If(ife) = tail else {
+            panic!("expected if")
+        };
         assert!(ife.is_if_let());
         assert!(ife.let_pattern().is_some());
         assert!(ife.condition().is_some());
@@ -2081,10 +2158,14 @@ mod tests {
     #[test]
     fn plain_if_no_let() {
         let sf = source_file("fn f() -> i64 { if x > 0 { 1 } else { 0 } }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let body = f.body().unwrap();
         let tail = body.tail().unwrap();
-        let Expr::If(ife) = tail else { panic!("expected if") };
+        let Expr::If(ife) = tail else {
+            panic!("expected if")
+        };
         assert!(!ife.is_if_let());
         assert!(ife.let_pattern().is_none());
     }
@@ -2092,7 +2173,9 @@ mod tests {
     #[test]
     fn while_let_accessors() {
         let sf = source_file("fn f() { while let Some(x) = pop() { use_it(x); } }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let Stmt::While(w) = f.body().unwrap().stmts().next().unwrap() else {
             panic!("expected while")
         };
@@ -2104,10 +2187,16 @@ mod tests {
 
     #[test]
     fn match_arm_guard() {
-        let sf = source_file("fn f(x: i64) -> i64 {\n  match x {\n    n if n > 0 => n,\n    _ => 0,\n  }\n}\n");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let sf = source_file(
+            "fn f(x: i64) -> i64 {\n  match x {\n    n if n > 0 => n,\n    _ => 0,\n  }\n}\n",
+        );
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let tail = f.body().unwrap().tail().unwrap();
-        let Expr::Match(m) = tail else { panic!("expected match") };
+        let Expr::Match(m) = tail else {
+            panic!("expected match")
+        };
         let arms: Vec<_> = m.arms().collect();
         assert_eq!(arms.len(), 2);
         assert!(arms[0].guard().is_some());
@@ -2123,7 +2212,9 @@ mod tests {
         );
         let arms = match_arms(&sf);
         // Guarded arm: guard is `n > 0`, body is `n + 1`.
-        let Expr::Bin(g) = arms[0].guard().unwrap() else { panic!("guard should be bin") };
+        let Expr::Bin(g) = arms[0].guard().unwrap() else {
+            panic!("guard should be bin")
+        };
         assert_eq!(g.op().unwrap().text(), ">");
         let Expr::Bin(b) = arms[0].body().unwrap() else {
             panic!("body should be `n + 1`, not the guard")
@@ -2143,30 +2234,44 @@ mod tests {
 
     #[test]
     fn block_conditions_are_not_mistaken_for_control_flow_bodies() {
-        let sf = source_file(
-            "fn f() { if {} {} else {} while {} {} for value in {} {} }",
-        );
-        let Item::Fn(function) = sf.items().next().unwrap() else { panic!() };
+        let sf = source_file("fn f() { if {} {} else {} while {} {} for value in {} {} }");
+        let Item::Fn(function) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let statements: Vec<_> = function.body().unwrap().stmts().collect();
 
-        let Stmt::Expr(if_statement) = &statements[0] else { panic!() };
-        let Expr::If(if_expression) = if_statement.expr().unwrap() else { panic!() };
-        let Expr::Block(condition) = if_expression.condition().unwrap() else { panic!() };
+        let Stmt::Expr(if_statement) = &statements[0] else {
+            panic!()
+        };
+        let Expr::If(if_expression) = if_statement.expr().unwrap() else {
+            panic!()
+        };
+        let Expr::Block(condition) = if_expression.condition().unwrap() else {
+            panic!()
+        };
         assert_ne!(
             condition.syntax().text_range(),
             if_expression.then_block().unwrap().syntax().text_range()
         );
         assert!(if_expression.else_block().is_some());
 
-        let Stmt::While(while_statement) = &statements[1] else { panic!() };
-        let Expr::Block(condition) = while_statement.condition().unwrap() else { panic!() };
+        let Stmt::While(while_statement) = &statements[1] else {
+            panic!()
+        };
+        let Expr::Block(condition) = while_statement.condition().unwrap() else {
+            panic!()
+        };
         assert_ne!(
             condition.syntax().text_range(),
             while_statement.body().unwrap().syntax().text_range()
         );
 
-        let Stmt::For(for_statement) = &statements[2] else { panic!() };
-        let Expr::Block(iterable) = for_statement.iter().unwrap() else { panic!() };
+        let Stmt::For(for_statement) = &statements[2] else {
+            panic!()
+        };
+        let Expr::Block(iterable) = for_statement.iter().unwrap() else {
+            panic!()
+        };
         assert_ne!(
             iterable.syntax().text_range(),
             for_statement.body().unwrap().syntax().text_range()
@@ -2195,9 +2300,8 @@ mod tests {
 
     #[test]
     fn pattern_classifies_missing_and_single_segment_names() {
-        let sf = source_file(
-            "fn f(x: i64) { match x { _value => 0, self => 1, Ready => 2, => 3 } }",
-        );
+        let sf =
+            source_file("fn f(x: i64) { match x { _value => 0, self => 1, Ready => 2, => 3 } }");
         let arms = match_arms(&sf);
         let patterns: Vec<_> = arms
             .iter()
@@ -2223,8 +2327,7 @@ mod tests {
 
     #[test]
     fn pattern_range() {
-        let sf =
-            source_file("fn f(x: i64) -> i64 {\n  match x {\n    1..=9 => 1,\n  }\n}\n");
+        let sf = source_file("fn f(x: i64) -> i64 {\n  match x {\n    1..=9 => 1,\n  }\n}\n");
         let arms = match_arms(&sf);
         let pat = arms[0].patterns().next().unwrap();
         assert_eq!(pat.kind(), PatternKind::Range);
@@ -2236,9 +2339,7 @@ mod tests {
 
     #[test]
     fn pattern_range_preserves_signed_and_string_bounds() {
-        let sf = source_file(
-            "fn f(x: i64) { match x { -10..=-1 => 0, \"a\"..=\"z\" => 1 } }",
-        );
+        let sf = source_file("fn f(x: i64) { match x { -10..=-1 => 0, \"a\"..=\"z\" => 1 } }");
         let arms = match_arms(&sf);
 
         let signed = arms[0].patterns().next().unwrap().range().unwrap();
@@ -2254,12 +2355,7 @@ mod tests {
         assert_eq!(strings.start().unwrap().text(), "\"a\"");
         assert_eq!(strings.end().unwrap().text(), "\"z\"");
         assert!(strings.is_inclusive());
-        let (start, end, inclusive) = arms[1]
-            .patterns()
-            .next()
-            .unwrap()
-            .range_bounds()
-            .unwrap();
+        let (start, end, inclusive) = arms[1].patterns().next().unwrap().range_bounds().unwrap();
         assert_eq!(start.text(), "\"a\"");
         assert_eq!(end.text(), "\"z\"");
         assert!(inclusive);
@@ -2348,9 +2444,7 @@ mod tests {
         assert_eq!(pattern.rest_token().unwrap().text(), "..");
         assert_eq!(pattern.struct_fields().count(), 2);
 
-        let missing = source_file(
-            "fn f(value: Rec) { match value { Rec { missing: } => 0 } }",
-        );
+        let missing = source_file("fn f(value: Rec) { match value { Rec { missing: } => 0 } }");
         let pattern = match_arms(&missing)[0].patterns().next().unwrap();
         let field = pattern.pattern_fields().next().unwrap();
         assert!(!field.is_shorthand());
@@ -2373,11 +2467,15 @@ mod tests {
     #[test]
     fn struct_lit_path_segments() {
         let sf = source_file("fn f() { g(geo::Point { x: 1, y: 2 }); }");
-        let Item::Fn(f) = sf.items().next().unwrap() else { panic!() };
+        let Item::Fn(f) = sf.items().next().unwrap() else {
+            panic!()
+        };
         let Stmt::Expr(es) = f.body().unwrap().stmts().next().unwrap() else {
             panic!()
         };
-        let Expr::Call(call) = es.expr().unwrap() else { panic!() };
+        let Expr::Call(call) = es.expr().unwrap() else {
+            panic!()
+        };
         let Expr::StructLit(sl) = call.arg_list().unwrap().args().next().unwrap() else {
             panic!()
         };

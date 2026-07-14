@@ -1,6 +1,9 @@
 //! Stable definition and module indices for one explicit project context.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, Mutex, Weak},
+};
 
 use crate::{
     BaseDb,
@@ -26,12 +29,16 @@ impl ModuleId {
     }
 }
 
-/// Session-stable definition identity. Values are append-only and never reused.
+/// Definition identity stable for the lifetime of every DefMap that owns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DefId(u32);
 
 impl DefId {
     pub(crate) const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub const fn from_index(raw: u32) -> Self {
         Self(raw)
     }
 
@@ -77,11 +84,16 @@ enum ModuleLoc {
 }
 
 /// Shared by all COW snapshots belonging to one AnalysisHost session.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct IdentityInterner {
     definitions: HashMap<DefLoc, DefId>,
-    definition_locations: Vec<DefLoc>,
+    definition_locations: Vec<Option<DefLoc>>,
+    definition_leases: Vec<u32>,
+    free_definitions: Vec<u32>,
     modules: HashMap<ModuleLoc, ModuleId>,
+    module_locations: Vec<Option<ModuleLoc>>,
+    module_leases: Vec<u32>,
+    free_modules: Vec<u32>,
 }
 
 impl IdentityInterner {
@@ -97,19 +109,29 @@ impl IdentityInterner {
             structural_path: structural_path.to_string(),
         };
         if let Some(id) = self.definitions.get(&location) {
+            self.definition_leases[id.index() as usize] += 1;
             return *id;
         }
-        let raw =
-            u32::try_from(self.definitions.len()).expect("definition identity space exhausted");
+        let raw = self.free_definitions.pop().unwrap_or_else(|| {
+            u32::try_from(self.definition_locations.len())
+                .expect("definition identity space exhausted")
+        });
         let id = DefId::new(raw);
         self.definitions.insert(location.clone(), id);
-        self.definition_locations.push(location);
+        if raw as usize == self.definition_locations.len() {
+            self.definition_locations.push(Some(location));
+            self.definition_leases.push(1);
+        } else {
+            self.definition_locations[raw as usize] = Some(location);
+            self.definition_leases[raw as usize] = 1;
+        }
         id
     }
 
     pub(crate) fn definition_location(&self, id: DefId) -> Option<(IdentityContext, FileId)> {
         self.definition_locations
             .get(id.index() as usize)
+            .and_then(Option::as_ref)
             .map(|location| (location.context, location.file_id))
     }
 
@@ -138,17 +160,102 @@ impl IdentityInterner {
 
     fn intern_module(&mut self, location: ModuleLoc) -> ModuleId {
         if let Some(id) = self.modules.get(&location) {
+            self.module_leases[id.index() as usize] += 1;
             return *id;
         }
-        let raw = u32::try_from(self.modules.len()).expect("module identity space exhausted");
+        let raw = self.free_modules.pop().unwrap_or_else(|| {
+            u32::try_from(self.module_locations.len()).expect("module identity space exhausted")
+        });
         let id = ModuleId::new(raw);
-        self.modules.insert(location, id);
+        self.modules.insert(location.clone(), id);
+        if raw as usize == self.module_locations.len() {
+            self.module_locations.push(Some(location));
+            self.module_leases.push(1);
+        } else {
+            self.module_locations[raw as usize] = Some(location);
+            self.module_leases[raw as usize] = 1;
+        }
         id
+    }
+
+    fn release(&mut self, definitions: &[DefId], modules: &[ModuleId]) {
+        for definition in definitions {
+            let slot = definition.index() as usize;
+            let Some(leases) = self.definition_leases.get_mut(slot) else {
+                continue;
+            };
+            *leases = leases.saturating_sub(1);
+            if *leases == 0
+                && let Some(location) = self.definition_locations[slot].take()
+            {
+                self.definitions.remove(&location);
+                self.free_definitions.push(definition.index());
+            }
+        }
+        for module in modules {
+            let slot = module.index() as usize;
+            let Some(leases) = self.module_leases.get_mut(slot) else {
+                continue;
+            };
+            *leases = leases.saturating_sub(1);
+            if *leases == 0
+                && let Some(location) = self.module_locations[slot].take()
+            {
+                self.modules.remove(&location);
+                self.free_modules.push(module.index());
+            }
+        }
+    }
+
+    pub(crate) fn active_sizes(&self) -> (usize, usize) {
+        (self.definitions.len(), self.modules.len())
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct IdentityLease {
+    interner: Weak<Mutex<IdentityInterner>>,
+    definitions: Vec<DefId>,
+    modules: Vec<ModuleId>,
+}
+
+impl IdentityLease {
+    pub(crate) fn new(
+        interner: &Arc<Mutex<IdentityInterner>>,
+        definitions: Vec<DefId>,
+        modules: Vec<ModuleId>,
+    ) -> Self {
+        Self {
+            interner: Arc::downgrade(interner),
+            definitions,
+            modules,
+        }
+    }
+}
+
+impl Drop for IdentityLease {
+    fn drop(&mut self) {
+        let Some(interner) = self.interner.upgrade() else {
+            return;
+        };
+        interner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release(&self.definitions, &self.modules);
+    }
+}
+
+impl PartialEq for IdentityLease {
+    fn eq(&self, other: &Self) -> bool {
+        self.definitions == other.definitions && self.modules == other.modules
+    }
+}
+
+impl Eq for IdentityLease {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefKind {
+    Chunk,
     Function,
     Struct,
     Field,
@@ -163,6 +270,10 @@ pub enum DefKind {
 }
 
 impl DefKind {
+    pub const fn is_body_owner(self) -> bool {
+        matches!(self, Self::Chunk | Self::Function | Self::Method)
+    }
+
     pub const fn is_member(self) -> bool {
         matches!(self, Self::Field | Self::Variant | Self::Method)
     }
@@ -170,12 +281,13 @@ impl DefKind {
     const fn binds_in_module(self) -> bool {
         !matches!(
             self,
-            Self::Field | Self::Variant | Self::Impl | Self::Method
+            Self::Chunk | Self::Field | Self::Variant | Self::Impl | Self::Method
         )
     }
 
     const fn path_tag(self) -> &'static str {
         match self {
+            Self::Chunk => "chunk",
             Self::Function => "fn",
             Self::Struct => "struct",
             Self::Field => "field",
@@ -252,6 +364,7 @@ pub struct Definition {
     source_kind: DefinitionSourceKind,
     visibility: Visibility,
     signature: ItemSignature,
+    documentation: Option<String>,
     signature_fingerprint: SignatureFingerprint,
     target_module: Option<ModuleId>,
 }
@@ -311,6 +424,10 @@ impl Definition {
 
     pub fn signature(&self) -> &ItemSignature {
         &self.signature
+    }
+
+    pub fn documentation(&self) -> Option<&str> {
+        self.documentation.as_deref()
     }
 
     pub const fn signature_fingerprint(&self) -> SignatureFingerprint {
@@ -393,6 +510,7 @@ pub struct DefMap {
     definition_slots: HashMap<DefId, usize>,
     members: BTreeMap<DefId, Vec<DefId>>,
     source_map: BTreeMap<DefId, DefinitionSource>,
+    identity_lease: Option<Arc<IdentityLease>>,
 }
 
 impl DefMap {
@@ -448,6 +566,7 @@ impl DefMap {
             definition_slots: HashMap::new(),
             members: BTreeMap::new(),
             source_map: BTreeMap::new(),
+            identity_lease: None,
         };
         let mut builder = DefMapBuilder {
             db,
@@ -472,6 +591,10 @@ impl DefMap {
                 map.file_to_module.entry(file_id).or_insert(module.id());
             }
         }
+        map.identity_lease = Some(db.lease_identities(
+            map.definitions.iter().map(Definition::id).collect(),
+            map.modules.iter().map(ModuleData::id).collect(),
+        ));
         map
     }
 
@@ -576,10 +699,14 @@ impl DefMap {
         segments: &[&str],
         strategy: ResolveStrategy,
     ) -> Option<&Definition> {
-        let require_unique =
-            matches!(strategy, ResolveStrategy::Unique | ResolveStrategy::LexicalUnique);
-        let is_lexical =
-            matches!(strategy, ResolveStrategy::Lexical | ResolveStrategy::LexicalUnique);
+        let require_unique = matches!(
+            strategy,
+            ResolveStrategy::Unique | ResolveStrategy::LexicalUnique
+        );
+        let is_lexical = matches!(
+            strategy,
+            ResolveStrategy::Lexical | ResolveStrategy::LexicalUnique
+        );
 
         // Helper: resolve a single segment with the chosen uniqueness policy.
         macro_rules! resolve {
@@ -633,6 +760,17 @@ impl DefMapBuilder<'_> {
         if !self.active_files.insert(file_id) || !self.lowered_files.insert(file_id) {
             return;
         }
+        if self.db.file_kind(file_id).unwrap_or(FileKind::Source) == FileKind::Source {
+            let parse = self.db.parse(file_id);
+            let range = syntax_range(parse.syntax_node());
+            self.add_chunk_definition(
+                module_id,
+                file_id,
+                range,
+                ItemSourceKind::SyntheticFileChunk,
+                "chunk",
+            );
+        }
         let item_tree = self.db.item_tree(file_id);
         self.lower_items(module_id, file_id, item_tree.items(), "");
         self.pending_imports.extend(
@@ -683,6 +821,15 @@ impl DefMapBuilder<'_> {
 
             match item.module_kind() {
                 Some(ModuleKind::Inline) => {
+                    if self.db.file_kind(file_id).unwrap_or(FileKind::Source) == FileKind::Source {
+                        self.add_chunk_definition(
+                            child_module,
+                            file_id,
+                            item.range(),
+                            ItemSourceKind::SyntheticInlineModuleChunk,
+                            &format!("{path}/chunk"),
+                        );
+                    }
                     self.lower_items(child_module, file_id, item.children(), &path);
                     self.pending_imports.extend(
                         item.imports()
@@ -805,6 +952,7 @@ impl DefMapBuilder<'_> {
             },
             visibility: item.visibility(),
             signature: item.signature().clone(),
+            documentation: item.documentation().map(str::to_string),
             signature_fingerprint: item.signature_fingerprint().with_file_kind(file_kind),
             target_module,
         };
@@ -830,13 +978,56 @@ impl DefMapBuilder<'_> {
         (def_id, structural_path)
     }
 
+    fn add_chunk_definition(
+        &mut self,
+        module_id: ModuleId,
+        file_id: FileId,
+        range: TextRange,
+        item_kind: ItemSourceKind,
+        structural_path: &str,
+    ) -> DefId {
+        let def_id = self
+            .db
+            .intern_definition(self.context, file_id, structural_path);
+        let file_kind = self.db.file_kind(file_id).unwrap_or(FileKind::Source);
+        let source = DefinitionSource {
+            full_range: FileRange::new(file_id, range),
+            name_range: FileRange::new(file_id, TextRange::new(range.start(), range.start())),
+        };
+        let definition = Definition {
+            id: def_id,
+            module_id,
+            owner: None,
+            name: "<chunk>".to_string(),
+            kind: DefKind::Chunk,
+            source,
+            source_kind: DefinitionSourceKind {
+                file_kind,
+                item_kind,
+            },
+            visibility: Visibility::Private,
+            signature: ItemSignature::None,
+            documentation: None,
+            signature_fingerprint: SignatureFingerprint::default().with_file_kind(file_kind),
+            target_module: None,
+        };
+        let slot = self.map.definitions.len();
+        let previous = self.map.definition_slots.insert(def_id, slot);
+        assert!(previous.is_none(), "duplicate chunk identity in one DefMap");
+        self.map.definitions.push(definition);
+        self.map.source_map.insert(def_id, source);
+        def_id
+    }
+
     fn resolve_imports(&mut self) {
         let bindings: Vec<_> = self
             .pending_imports
             .iter()
             .filter_map(|(module_id, import)| {
                 let segments: Vec<_> = import.path().iter().map(String::as_str).collect();
-                let definition = self.map.resolve_path(*module_id, &segments, ResolveStrategy::Lexical)?;
+                let definition =
+                    self.map
+                        .resolve_path(*module_id, &segments, ResolveStrategy::Lexical)?;
                 Some((
                     *module_id,
                     import.binding_name()?.to_string(),
@@ -856,12 +1047,17 @@ impl DefMapBuilder<'_> {
     }
 }
 
+fn syntax_range(node: &rua_syntax::SyntaxNode) -> TextRange {
+    let range = node.text_range();
+    TextRange::new(range.start().into(), range.end().into())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::ResolveStrategy;
     use crate::{
         AnalysisHost, Change, DefKind, FileId, FileKind, SourceRootId, SourceRootKind, Visibility,
     };
-    use super::ResolveStrategy;
 
     fn host_with_module_tree() -> (AnalysisHost, FileId, FileId) {
         let root_id = SourceRootId::new(0);
@@ -898,7 +1094,9 @@ mod tests {
         let map = host.analysis().def_map(main_id);
         let root = map.root();
 
-        let root_fn = map.resolve_path(root, &["root_fn"], ResolveStrategy::First).expect("root function");
+        let root_fn = map
+            .resolve_path(root, &["root_fn"], ResolveStrategy::First)
+            .expect("root function");
         assert_eq!(root_fn.kind(), DefKind::Function);
         assert_eq!(root_fn.visibility(), Visibility::Public);
         assert_eq!(root_fn.file_id(), main_id);
@@ -916,7 +1114,9 @@ mod tests {
             DefKind::Struct
         );
 
-        let math = map.resolve_path(root, &["math"], ResolveStrategy::First).expect("file module");
+        let math = map
+            .resolve_path(root, &["math"], ResolveStrategy::First)
+            .expect("file module");
         let math_module = math.target_module().expect("math module target");
         assert_eq!(
             map.module(math_module).expect("math data").file_id(),

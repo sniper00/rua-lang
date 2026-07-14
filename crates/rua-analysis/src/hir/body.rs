@@ -661,6 +661,16 @@ pub(crate) fn lower_trait_method_body(
     lower.finish()
 }
 
+pub(crate) fn lower_chunk_body(
+    owner: DefId,
+    file_id: FileId,
+    owner_syntax: &SyntaxNode,
+) -> (Body, BodySourceMap) {
+    let mut lower = BodyLowerer::new(owner, file_id, owner_syntax);
+    lower.lower_chunk(owner_syntax.children().filter_map(AstStmt::cast));
+    lower.finish()
+}
+
 struct BodyLowerer {
     file_id: FileId,
     body: Body,
@@ -752,12 +762,26 @@ impl BodyLowerer {
         };
     }
 
+    fn lower_chunk<I>(&mut self, statements: I)
+    where
+        I: IntoIterator<Item = AstStmt>,
+    {
+        self.body.root_expr = self.lower_statement_block(
+            statements.into_iter().collect(),
+            self.source_map.body_range.range,
+        );
+    }
+
     fn lower_block(&mut self, block: AstBlock) -> ExprId {
         let range = node_range(block.syntax());
         let statements = block.stmts().collect::<Vec<_>>();
         if statements.is_empty() && !has_direct_token(block.syntax(), SyntaxKind::LBrace) {
             return self.alloc_expr(Expr::Missing, range);
         }
+        self.lower_statement_block(statements, range)
+    }
+
+    fn lower_statement_block(&mut self, statements: Vec<AstStmt>, range: TextRange) -> ExprId {
         let tail_index = statements.len().checked_sub(1).filter(
             |index| matches!(&statements[*index], AstStmt::Expr(stmt) if !stmt.has_semicolon()),
         );

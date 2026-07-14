@@ -77,23 +77,21 @@ pub fn lower_source_file(sf: &SourceFile) -> Doc {
                 }
                 parts.push(Doc::text(c.text.as_str()));
             }
-            Entry::Node { leading, trailing, node, blank_line_before } => {
+            Entry::Node {
+                leading,
+                trailing,
+                node,
+                blank_line_before,
+            } => {
                 let item = node_to_item(node);
+                let statement = node_to_stmt(node);
                 let first = parts.is_empty();
-                // Spacing between items: blank line except between consecutive
-                // uses that the author wrote on adjacent lines.
-                if let Some(ref it) = item
-                    && !first
-                {
-                    let both_use = prev_item_kind == Some(K::UseDecl)
-                        && matches!(it, Item::Use(_));
-                    if both_use && !blank_line_before {
-                        // Adjacent use declarations — single newline.
-                        parts.push(Doc::HardLine);
-                    } else {
-                        // Everything else gets a blank line (collapsing
-                        // N≥1 author blank lines to one).
-                        parts.push(Doc::HardLine);
+                if !first {
+                    let both_use =
+                        prev_item_kind == Some(K::UseDecl) && matches!(item, Some(Item::Use(_)));
+                    let touches_item = prev_item_kind.is_some() || item.is_some();
+                    parts.push(Doc::HardLine);
+                    if touches_item && (!both_use || *blank_line_before) {
                         parts.push(Doc::HardLine);
                     }
                 }
@@ -111,8 +109,11 @@ pub fn lower_source_file(sf: &SourceFile) -> Doc {
                 if let Some(it) = item {
                     parts.push(item_doc(&it));
                     prev_item_kind = Some(it.syntax().kind());
+                } else if let Some(statement) = statement {
+                    parts.push(stmt_doc(&statement));
+                    prev_item_kind = None;
                 } else {
-                    // Non-item child node (shouldn't normally happen at file level).
+                    // Error/recovery node.
                     parts.push(Doc::text(compact(node)));
                     prev_item_kind = None;
                 }
@@ -139,7 +140,10 @@ struct Ser {
 
 impl Ser {
     fn new() -> Self {
-        Ser { out: String::new(), prev: None }
+        Ser {
+            out: String::new(),
+            prev: None,
+        }
     }
 
     fn push(&mut self, t: &SyntaxToken) {
@@ -156,7 +160,10 @@ impl Ser {
     fn space(prev: K, cur: K) -> bool {
         use K::*;
         // No space *after* these.
-        if matches!(prev, ColonColon | LParen | LBracket | LBrace | Amp | Lt | Dot) {
+        if matches!(
+            prev,
+            ColonColon | LParen | LBracket | LBrace | Amp | Lt | Dot
+        ) {
             return false;
         }
         // No space *before* these.
@@ -243,7 +250,11 @@ fn item_doc(it: &Item) -> Doc {
 
 fn fn_doc(f: &FnDecl) -> Doc {
     match f.body() {
-        Some(b) => Doc::concat([Doc::text(decl_header(f.syntax())), Doc::text(" "), block_doc(&b)]),
+        Some(b) => Doc::concat([
+            Doc::text(decl_header(f.syntax())),
+            Doc::text(" "),
+            block_doc(&b),
+        ]),
         None => Doc::text(format!("{};", decl_header(f.syntax()))),
     }
 }
@@ -251,14 +262,22 @@ fn fn_doc(f: &FnDecl) -> Doc {
 fn struct_doc(s: &StructDecl) -> Doc {
     match s.field_list() {
         Some(fl) => {
-            let fields = lower_container(fl.syntax(), |node| {
-                if let Some(fd) = FieldDecl::cast(node.clone()) {
-                    Doc::text(format!("{},", ser_node(fd.syntax())))
-                } else {
-                    Doc::text(compact(node))
-                }
-            }, false);
-            Doc::concat([Doc::text(decl_header(s.syntax())), Doc::text(" "), brace_block(fields)])
+            let fields = lower_container(
+                fl.syntax(),
+                |node| {
+                    if let Some(fd) = FieldDecl::cast(node.clone()) {
+                        Doc::text(format!("{},", ser_node(fd.syntax())))
+                    } else {
+                        Doc::text(compact(node))
+                    }
+                },
+                false,
+            );
+            Doc::concat([
+                Doc::text(decl_header(s.syntax())),
+                Doc::text(" "),
+                brace_block(fields),
+            ])
         }
         // Unit struct `struct S;`.
         None => Doc::text(ser_node(s.syntax())),
@@ -267,16 +286,24 @@ fn struct_doc(s: &StructDecl) -> Doc {
 
 fn enum_doc(e: &EnumDecl) -> Doc {
     let variants = match e.variant_list() {
-        Some(vl) => lower_container(vl.syntax(), |node| {
-            if let Some(v) = EnumVariant::cast(node.clone()) {
-                Doc::text(format!("{},", variant_str(&v)))
-            } else {
-                Doc::text(compact(node))
-            }
-        }, false),
+        Some(vl) => lower_container(
+            vl.syntax(),
+            |node| {
+                if let Some(v) = EnumVariant::cast(node.clone()) {
+                    Doc::text(format!("{},", variant_str(&v)))
+                } else {
+                    Doc::text(compact(node))
+                }
+            },
+            false,
+        ),
         None => Vec::new(),
     };
-    Doc::concat([Doc::text(decl_header(e.syntax())), Doc::text(" "), brace_block(variants)])
+    Doc::concat([
+        Doc::text(decl_header(e.syntax())),
+        Doc::text(" "),
+        brace_block(variants),
+    ])
 }
 
 fn variant_str(v: &EnumVariant) -> String {
@@ -299,59 +326,95 @@ fn variant_str(v: &EnumVariant) -> String {
 }
 
 fn trait_doc(t: &TraitDecl) -> Doc {
-    let methods = lower_container(t.syntax(), |node| {
-        if let Some(tm) = TraitMethod::cast(node.clone()) {
-            trait_method_doc(&tm)
-        } else {
-            Doc::text(compact(node))
-        }
-    }, true);
-    Doc::concat([Doc::text(decl_header(t.syntax())), Doc::text(" "), brace_block_spaced(methods)])
+    let methods = lower_container(
+        t.syntax(),
+        |node| {
+            if let Some(tm) = TraitMethod::cast(node.clone()) {
+                trait_method_doc(&tm)
+            } else {
+                Doc::text(compact(node))
+            }
+        },
+        true,
+    );
+    Doc::concat([
+        Doc::text(decl_header(t.syntax())),
+        Doc::text(" "),
+        brace_block_spaced(methods),
+    ])
 }
 
 fn trait_method_doc(tm: &TraitMethod) -> Doc {
     match tm.default_body() {
-        Some(b) => {
-            Doc::concat([Doc::text(decl_header(tm.syntax())), Doc::text(" "), block_doc(&b)])
-        }
+        Some(b) => Doc::concat([
+            Doc::text(decl_header(tm.syntax())),
+            Doc::text(" "),
+            block_doc(&b),
+        ]),
         None => Doc::text(ser_node(tm.syntax())),
     }
 }
 
 fn impl_doc(i: &ImplDecl) -> Doc {
-    let methods = lower_container(i.syntax(), |node| {
-        if let Some(f) = FnDecl::cast(node.clone()) {
-            fn_doc(&f)
-        } else {
-            Doc::text(compact(node))
-        }
-    }, true);
-    Doc::concat([Doc::text(decl_header(i.syntax())), Doc::text(" "), brace_block_spaced(methods)])
+    let methods = lower_container(
+        i.syntax(),
+        |node| {
+            if let Some(f) = FnDecl::cast(node.clone()) {
+                fn_doc(&f)
+            } else {
+                Doc::text(compact(node))
+            }
+        },
+        true,
+    );
+    Doc::concat([
+        Doc::text(decl_header(i.syntax())),
+        Doc::text(" "),
+        brace_block_spaced(methods),
+    ])
 }
 
 fn extern_doc(x: &ExternBlock) -> Doc {
-    let fns = lower_container(x.syntax(), |node| {
-        if let Some(ef) = ExternFn::cast(node.clone()) {
-            Doc::text(ser_node(ef.syntax()))
-        } else {
-            Doc::text(compact(node))
-        }
-    }, false);
-    Doc::concat([Doc::text(decl_header(x.syntax())), Doc::text(" "), brace_block(fns)])
+    let fns = lower_container(
+        x.syntax(),
+        |node| {
+            if let Some(ef) = ExternFn::cast(node.clone()) {
+                Doc::text(ser_node(ef.syntax()))
+            } else {
+                Doc::text(compact(node))
+            }
+        },
+        false,
+    );
+    Doc::concat([
+        Doc::text(decl_header(x.syntax())),
+        Doc::text(" "),
+        brace_block(fns),
+    ])
 }
 
 fn mod_doc(m: &ModDecl) -> Doc {
     if m.is_file() {
         Doc::text(ser_node(m.syntax()))
     } else {
-        let items = lower_container(m.syntax(), |node| {
-            if let Some(it) = node_to_item(node) {
-                item_doc(&it)
-            } else {
-                Doc::text(compact(node))
-            }
-        }, true);
-        Doc::concat([Doc::text(decl_header(m.syntax())), Doc::text(" "), brace_block_spaced(items)])
+        let items = lower_container(
+            m.syntax(),
+            |node| {
+                if let Some(it) = node_to_item(node) {
+                    item_doc(&it)
+                } else if let Some(statement) = node_to_stmt(node) {
+                    stmt_doc(&statement)
+                } else {
+                    Doc::text(compact(node))
+                }
+            },
+            true,
+        );
+        Doc::concat([
+            Doc::text(decl_header(m.syntax())),
+            Doc::text(" "),
+            brace_block_spaced(items),
+        ])
     }
 }
 
@@ -363,7 +426,10 @@ fn brace_block(entries: Vec<Doc>) -> Doc {
     } else {
         Doc::concat([
             Doc::text("{"),
-            Doc::indent(Doc::concat([Doc::HardLine, Doc::join(Doc::HardLine, entries)])),
+            Doc::indent(Doc::concat([
+                Doc::HardLine,
+                Doc::join(Doc::HardLine, entries),
+            ])),
             Doc::HardLine,
             Doc::text("}"),
         ])
@@ -411,7 +477,12 @@ fn lower_container(
             Entry::Comment(c) => {
                 docs.push(Doc::text(c.text.as_str()));
             }
-            Entry::Node { leading, trailing, node, blank_line_before } => {
+            Entry::Node {
+                leading,
+                trailing,
+                node,
+                blank_line_before,
+            } => {
                 let mut parts: Vec<Doc> = Vec::new();
                 // In non-spaced blocks, a blank line before this node adds an
                 // extra HardLine; the brace_block HardLine join turns that into
@@ -441,20 +512,24 @@ fn block_doc(b: &Block) -> Doc {
         .and_then(|e| e.syntax().parent())
         .map(|p| p.text_range());
 
-    let docs = lower_container(b.syntax(), |node| {
-        if let Some(stmt) = node_to_stmt(node) {
-            let is_tail = tail_stmt_range.is_some_and(|r| r == stmt.syntax().text_range());
-            if is_tail
-                && let Stmt::Expr(es) = &stmt
-                && let Some(e) = es.expr()
-            {
-                return expr_doc(&e);
+    let docs = lower_container(
+        b.syntax(),
+        |node| {
+            if let Some(stmt) = node_to_stmt(node) {
+                let is_tail = tail_stmt_range.is_some_and(|r| r == stmt.syntax().text_range());
+                if is_tail
+                    && let Stmt::Expr(es) = &stmt
+                    && let Some(e) = es.expr()
+                {
+                    return expr_doc(&e);
+                }
+                stmt_doc(&stmt)
+            } else {
+                Doc::text(compact(node))
             }
-            stmt_doc(&stmt)
-        } else {
-            Doc::text(compact(node))
-        }
-    }, false);
+        },
+        false,
+    );
 
     brace_block(docs)
 }
@@ -504,7 +579,10 @@ fn stmt_doc(s: &Stmt) -> Doc {
             None => Doc::Nil,
         },
         Stmt::While(w) => {
-            let body = w.body().map(|b| block_doc(&b)).unwrap_or_else(|| Doc::text("{}"));
+            let body = w
+                .body()
+                .map(|b| block_doc(&b))
+                .unwrap_or_else(|| Doc::text("{}"));
             let head: Doc = if w.is_while_let() {
                 let pat = w.let_pattern().map(|p| pat_str(&p)).unwrap_or_default();
                 let ex = w.condition().map(|c| expr_inline(&c)).unwrap_or(Doc::Nil);
@@ -516,14 +594,25 @@ fn stmt_doc(s: &Stmt) -> Doc {
             Doc::concat([head, body])
         }
         Stmt::Loop(l) => {
-            let body = l.body().map(|b| block_doc(&b)).unwrap_or_else(|| Doc::text("{}"));
+            let body = l
+                .body()
+                .map(|b| block_doc(&b))
+                .unwrap_or_else(|| Doc::text("{}"));
             Doc::concat([Doc::text("loop "), body])
         }
         Stmt::For(f) => {
             let var = f.var().map(tok_text).unwrap_or_default();
             let it = f.iter().map(|e| expr_inline(&e)).unwrap_or(Doc::Nil);
-            let body = f.body().map(|b| block_doc(&b)).unwrap_or_else(|| Doc::text("{}"));
-            Doc::concat([Doc::text(format!("for {var} in ")), it, Doc::text(" "), body])
+            let body = f
+                .body()
+                .map(|b| block_doc(&b))
+                .unwrap_or_else(|| Doc::text("{}"));
+            Doc::concat([
+                Doc::text(format!("for {var} in ")),
+                it,
+                Doc::text(" "),
+                body,
+            ])
         }
         Stmt::Break(_) => Doc::text("break;"),
         Stmt::Continue(_) => Doc::text("continue;"),
@@ -551,7 +640,10 @@ fn if_doc(i: &IfExpr) -> Doc {
     } else {
         Doc::concat([Doc::text("if "), cond])
     };
-    let then = i.then_block().map(|b| block_doc(&b)).unwrap_or_else(|| Doc::text("{}"));
+    let then = i
+        .then_block()
+        .map(|b| block_doc(&b))
+        .unwrap_or_else(|| Doc::text("{}"));
     let mut parts = vec![head, Doc::text(" "), then];
     if let Some(eb) = i.else_block() {
         parts.push(Doc::text(" else "));
@@ -600,7 +692,11 @@ fn arm_doc(a: &MatchArm) -> Doc {
 /// Collapse a subtree to a single whitespace-normalized line. Only used as a
 /// fallback for block-bearing expressions nested inside an inline context.
 fn compact(n: &SyntaxNode) -> String {
-    n.text().to_string().split_whitespace().collect::<Vec<_>>().join(" ")
+    n.text()
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build a wrapping, comma-separated list: stays flat if it fits on one line,
@@ -657,12 +753,8 @@ fn arg_list_doc(args: Option<ArgList>) -> Doc {
 /// groups that break across lines when too wide.
 fn expr_inline(e: &Expr) -> Doc {
     match e {
-        Expr::Literal(l) => {
-            Doc::text(l.value().map(tok_text).unwrap_or_default())
-        }
-        Expr::Path(p) => {
-            Doc::text(p.segments().map(tok_text).collect::<Vec<_>>().join("::"))
-        }
+        Expr::Literal(l) => Doc::text(l.value().map(tok_text).unwrap_or_default()),
+        Expr::Path(p) => Doc::text(p.segments().map(tok_text).collect::<Vec<_>>().join("::")),
         Expr::Paren(pe) => Doc::concat([
             Doc::text("("),
             pe.inner().map(|i| expr_inline(&i)).unwrap_or(Doc::Nil),
@@ -700,7 +792,14 @@ fn expr_inline(e: &Expr) -> Doc {
             let recv = m.receiver().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil);
             let method = m.method_name().map(tok_text).unwrap_or_default();
             let args = arg_list_doc(m.arg_list());
-            Doc::concat([recv, Doc::text("."), Doc::text(method), Doc::text("("), args, Doc::text(")")])
+            Doc::concat([
+                recv,
+                Doc::text("."),
+                Doc::text(method),
+                Doc::text("("),
+                args,
+                Doc::text(")"),
+            ])
         }
         Expr::Field(f) => Doc::concat([
             f.base().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil),
@@ -721,7 +820,11 @@ fn expr_inline(e: &Expr) -> Doc {
 }
 
 fn struct_lit_doc(s: &StructLitExpr) -> Doc {
-    let path = s.path_segments().map(tok_text).collect::<Vec<_>>().join("::");
+    let path = s
+        .path_segments()
+        .map(tok_text)
+        .collect::<Vec<_>>()
+        .join("::");
     let fields: Vec<Doc> = s
         .fields()
         .map(|fi| {
@@ -735,7 +838,11 @@ fn struct_lit_doc(s: &StructLitExpr) -> Doc {
     if fields.is_empty() {
         Doc::text(format!("{path} {{}}"))
     } else {
-        Doc::concat([Doc::text(path), Doc::text(" "), wrap_list("{", fields, "}", true)])
+        Doc::concat([
+            Doc::text(path),
+            Doc::text(" "),
+            wrap_list("{", fields, "}", true),
+        ])
     }
 }
 
@@ -772,20 +879,38 @@ fn pat_str(p: &Pattern) -> String {
         PatternKind::Range => match p.range() {
             Some(range) => format!(
                 "{}{}{}",
-                range.start().map(|literal| literal.text()).unwrap_or_default(),
+                range
+                    .start()
+                    .map(|literal| literal.text())
+                    .unwrap_or_default(),
                 range.operator_token().text(),
-                range.end().map(|literal| literal.text()).unwrap_or_default()
+                range
+                    .end()
+                    .map(|literal| literal.text())
+                    .unwrap_or_default()
             ),
             None => compact(p.syntax()),
         },
-        PatternKind::Path => p.path_segments().map(tok_text).collect::<Vec<_>>().join("::"),
+        PatternKind::Path => p
+            .path_segments()
+            .map(tok_text)
+            .collect::<Vec<_>>()
+            .join("::"),
         PatternKind::TupleVariant => {
-            let path = p.path_segments().map(tok_text).collect::<Vec<_>>().join("::");
+            let path = p
+                .path_segments()
+                .map(tok_text)
+                .collect::<Vec<_>>()
+                .join("::");
             let elems: Vec<String> = p.sub_patterns().map(|sp| pat_str(&sp)).collect();
             format!("{path}({})", elems.join(", "))
         }
         PatternKind::StructVariant => {
-            let path = p.path_segments().map(tok_text).collect::<Vec<_>>().join("::");
+            let path = p
+                .path_segments()
+                .map(tok_text)
+                .collect::<Vec<_>>()
+                .join("::");
             let mut fields: Vec<String> = p
                 .pattern_fields()
                 .map(|field| match field.pattern() {

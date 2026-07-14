@@ -5,8 +5,8 @@
 
 mod support;
 
-use support::{uri, TestServer};
 use rua_analysis::Change;
+use support::{TestServer, uri};
 
 #[test]
 fn incremental_edit_preserves_parse_of_unrelated_file() {
@@ -30,10 +30,16 @@ fn incremental_edit_preserves_parse_of_unrelated_file() {
     let snap2 = srv.snapshot();
 
     // a.rua should now have errors
-    assert!(!snap2.parse(a_id).errors().is_empty(), "a.rua should have parse error");
+    assert!(
+        !snap2.parse(a_id).errors().is_empty(),
+        "a.rua should have parse error"
+    );
 
     // b.rua should still be clean (unaffected by a.rua edit)
-    assert!(snap2.parse(b_id).errors().is_empty(), "b.rua should still be clean");
+    assert!(
+        snap2.parse(b_id).errors().is_empty(),
+        "b.rua should still be clean"
+    );
 }
 
 #[test]
@@ -75,8 +81,11 @@ fn incremental_add_whitespace_does_not_invalidate_type_inference() {
 
     let diags_after: Vec<_> = srv.snapshot().diagnostics(file_id);
     // Whitespace changes should not introduce new diagnostics
-    assert_eq!(diags_before.len(), diags_after.len(),
-        "whitespace changes should not change diagnostic count");
+    assert_eq!(
+        diags_before.len(),
+        diags_after.len(),
+        "whitespace changes should not change diagnostic count"
+    );
 }
 
 #[test]
@@ -103,8 +112,11 @@ fn incremental_edit_one_function_does_not_invalidate_other_function_body() {
     let b_body_after = snap2.body(b_def2.id()).unwrap();
 
     // fn b's body should be unchanged (same expr count)
-    assert_eq!(b_body_after.exprs().count(), b_expr_count_before,
-        "unrelated fn's body should not change");
+    assert_eq!(
+        b_body_after.exprs().count(),
+        b_expr_count_before,
+        "unrelated fn's body should not change"
+    );
 }
 
 #[test]

@@ -1,6 +1,152 @@
 use crate::compile_str;
 
 #[test]
+fn parser_preserves_top_level_chunk_order() {
+    use crate::ast::ChunkEntry;
+
+    let program = crate::parser::parse(
+        "let before = 1; fn value() -> i64 { before } println!(\"{}\", value());",
+    )
+    .expect("parse executable chunk");
+    assert_eq!(
+        program.source_order,
+        [
+            ChunkEntry::Statement(0),
+            ChunkEntry::Item(0),
+            ChunkEntry::Statement(1),
+        ]
+    );
+    assert_eq!(program.items.len(), 1);
+    assert_eq!(program.chunk.stmts.len(), 2);
+}
+
+#[test]
+fn strict_parser_preserves_normalized_api_documentation() {
+    let program = crate::parser::parse(
+        r#"
+        /// Function docs.
+        fn documented() {}
+
+        /// Detached docs.
+
+        fn plain() {}
+
+        /** Structure docs. */
+        struct Point {
+            /// X coordinate.
+            x: i64,
+        }
+
+        enum Color {
+            /// Red variant.
+            Red,
+        }
+
+        mod api {
+            //! Module docs.
+            /// Nested function.
+            fn call() {}
+        }
+
+        extern "lua" {
+            /// Host function.
+            fn host();
+        }
+        "#,
+    )
+    .unwrap();
+
+    let crate::ast::Item::Fn(documented) = &program.items[0] else {
+        panic!("expected function")
+    };
+    assert_eq!(documented.documentation.as_deref(), Some("Function docs."));
+    let crate::ast::Item::Fn(plain) = &program.items[1] else {
+        panic!("expected function")
+    };
+    assert_eq!(plain.documentation, None);
+    let crate::ast::Item::Struct(point) = &program.items[2] else {
+        panic!("expected struct")
+    };
+    assert_eq!(point.documentation.as_deref(), Some("Structure docs."));
+    assert_eq!(
+        point.fields[0].documentation.as_deref(),
+        Some("X coordinate.")
+    );
+    let crate::ast::Item::Enum(color) = &program.items[3] else {
+        panic!("expected enum")
+    };
+    assert_eq!(
+        color.variants[0].documentation.as_deref(),
+        Some("Red variant.")
+    );
+    let crate::ast::Item::Mod(api) = &program.items[4] else {
+        panic!("expected module")
+    };
+    assert_eq!(api.documentation.as_deref(), Some("Module docs."));
+    let crate::ast::Item::Fn(call) = &api.items[0] else {
+        panic!("expected nested function")
+    };
+    assert_eq!(call.documentation.as_deref(), Some("Nested function."));
+    let crate::ast::Item::Extern(block) = &program.items[5] else {
+        panic!("expected extern block")
+    };
+    assert_eq!(
+        block.fns[0].documentation.as_deref(),
+        Some("Host function.")
+    );
+}
+
+#[test]
+fn strict_parser_enforces_token_and_nesting_budgets() {
+    let token_error = crate::parser::parse_with_budget(
+        "fn main() {}",
+        crate::parser::ParseBudget {
+            max_tokens: 2,
+            max_nesting: 512,
+        },
+    )
+    .expect_err("small token budget must reject input");
+    assert_eq!(
+        token_error.diagnostic().code,
+        rua_core::DiagnosticCode::ParseResourceLimit
+    );
+
+    let nested = format!("{}1{};", "(".repeat(64), ")".repeat(64));
+    let nesting_error = crate::parser::parse_with_budget(
+        &nested,
+        crate::parser::ParseBudget {
+            max_tokens: 1_000,
+            max_nesting: 16,
+        },
+    )
+    .expect_err("small nesting budget must reject input");
+    assert_eq!(
+        nesting_error.diagnostic().code,
+        rua_core::DiagnosticCode::ParseResourceLimit
+    );
+}
+
+#[test]
+fn lua_result_extern_requires_non_variadic_builtin_result_return() {
+    for source in [
+        r#"extern "lua-result" { fn bad() -> i64; }"#,
+        r#"extern "lua-result" { fn bad(value: i64, ...) -> Result<i64, String>; }"#,
+        r#"
+            struct Result<T, E> { value: T }
+            extern "lua-result" { fn bad() -> Result<i64, String>; }
+        "#,
+    ] {
+        let (diagnostics, _) = crate::check_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(
+                |diagnostic| diagnostic.code == rua_core::DiagnosticCode::TypeInvalidFfiAdapter
+            ),
+            "missing invalid FFI adapter diagnostic for:\n{source}\n{diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn parser_closure_supports_expression_typed_block_and_empty_params() {
     use crate::ast::{ClosureBody, ExprKind, Item, Stmt};
 
@@ -43,13 +189,36 @@ fn parser_closure_supports_expression_typed_block_and_empty_params() {
 }
 
 #[test]
+fn parser_supports_callable_types() {
+    use crate::ast::{Item, Type};
+
+    let program = crate::parser::parse(
+        "fn apply(value: i64, callback: fn(i64) -> String) -> String { callback(value) }",
+    )
+    .expect("parse callable type");
+    let Item::Fn(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    assert!(matches!(function.params[1].ty, Type::Function { .. }));
+}
+
+#[test]
+fn parser_supports_tuple_types() {
+    use crate::ast::{Item, Type};
+
+    let program = crate::parser::parse("fn pair() -> (i64, String) {}").unwrap();
+    let Item::Fn(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    assert!(matches!(function.ret, Some(Type::Tuple(ref items)) if items.len() == 2));
+}
+
+#[test]
 fn parser_range_keeps_exclusive_and_inclusive_forms() {
     use crate::ast::{ExprKind, Item, Stmt};
 
-    let program = crate::parser::parse(
-        "fn main() { for x in 0..3 {} for y in 0..=3 {} }",
-    )
-    .expect("parse ranges");
+    let program = crate::parser::parse("fn main() { for x in 0..3 {} for y in 0..=3 {} }")
+        .expect("parse ranges");
     let Item::Fn(function) = &program.items[0] else {
         panic!("expected function");
     };
@@ -103,15 +272,6 @@ fn main() -> i64 {
             diagnostics.is_empty(),
             "valid closure produced diagnostics: {diagnostics:?}"
         );
-        let bindings = crate::binding_types(source);
-        assert!(
-            bindings
-                .hits()
-                .iter()
-                .any(|binding| binding.display == "closure parameter value: i64"),
-            "closure parameter was not contextually inferred: {:?}",
-            bindings.hits()
-        );
     }
 }
 
@@ -128,9 +288,11 @@ fn main() {
         .iter()
         .map(|diagnostic| diagnostic.msg.as_str())
         .collect();
-    assert!(messages.iter().any(|message| {
-        message.contains("closure expects return type `bool`, found `String`")
-    }));
+    assert!(
+        messages.iter().any(|message| {
+            message.contains("closure expects return type `bool`, found `String`")
+        })
+    );
     assert!(messages.iter().any(|message| {
         message.contains("argument 1 of closure `stringify` expects `String`, found `i64`")
     }));
@@ -153,13 +315,6 @@ fn main() {
         diagnostics.is_empty(),
         "iterator closure context produced diagnostics: {diagnostics:?}"
     );
-    let bindings = crate::binding_types(source);
-    let inferred = bindings
-        .hits()
-        .iter()
-        .filter(|binding| binding.display == "closure parameter value: i64")
-        .count();
-    assert_eq!(inferred, 2, "both adapter closures should infer i64");
 }
 
 #[test]
@@ -201,9 +356,9 @@ fn iterator_type_info(source: &str) -> crate::typeck::TypeInfo {
     let mut files = vec![String::new()];
     crate::resolve::resolve_modules(&mut program.items, None, &mut files)
         .expect("resolve iterator source");
-    crate::resolve::resolve_uses(&mut program);
-    crate::check::check(&program, &files).expect("structurally check iterator source");
-    crate::typeck::check(&program, &files).expect("type-check iterator source")
+    let hir = crate::hir::resolve(&program);
+    crate::check::check_resolved(&program, &hir).expect("structurally check iterator source");
+    crate::typeck::check_resolved(&program, &hir).expect("type-check iterator source")
 }
 
 #[test]
@@ -240,30 +395,47 @@ fn main() {
         .expect("collect plan");
     assert_eq!(collect.source.kind, S::VecIter);
     assert_eq!(
-        collect.adapters.iter().map(|adapter| adapter.kind).collect::<Vec<_>>(),
-        [A::Map, A::Filter, A::FilterMap, A::Enumerate, A::Skip, A::Take]
+        collect
+            .adapters
+            .iter()
+            .map(|adapter| adapter.kind)
+            .collect::<Vec<_>>(),
+        [
+            A::Map,
+            A::Filter,
+            A::FilterMap,
+            A::Enumerate,
+            A::Skip,
+            A::Take
+        ]
     );
     assert_eq!(collect.item_type, "(i64, i64)");
     assert_eq!(collect.output_type, "Vec<(i64, i64)>");
 
     assert!(plans.iter().any(|plan| {
-        plan.source.kind == S::VecIntoIter
-            && plan.consumer == C::Fold
-            && plan.output_type == "i64"
+        plan.source.kind == S::VecIntoIter && plan.consumer == C::Fold && plan.output_type == "i64"
     }));
-    assert!(plans.iter().any(|plan| {
-        plan.source.kind == S::ExclusiveRange && plan.consumer == C::Count
-    }));
-    assert!(plans.iter().any(|plan| {
-        plan.source.kind == S::InclusiveRange && plan.consumer == C::Any
-    }));
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.source.kind == S::ExclusiveRange && plan.consumer == C::Count })
+    );
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.source.kind == S::InclusiveRange && plan.consumer == C::Any })
+    );
     assert!(plans.iter().any(|plan| plan.consumer == C::All));
-    assert!(plans.iter().any(|plan| {
-        plan.consumer == C::Find && plan.output_type == "Option<i64>"
-    }));
-    assert!(plans.iter().any(|plan| {
-        plan.source.kind == S::Vec && plan.consumer == C::For
-    }));
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.consumer == C::Find && plan.output_type == "Option<i64>" })
+    );
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.source.kind == S::Vec && plan.consumer == C::For })
+    );
 }
 
 #[test]
@@ -275,14 +447,11 @@ fn main() {
 }
 "#;
     let (diagnostics, _) = crate::check_diags(source);
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet"));
-    let bindings = crate::binding_types(source);
-    assert!(bindings
-        .hits()
-        .iter()
-        .any(|binding| binding.display == "let pending: Iterator<i64>"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet")
+    );
 }
 
 #[test]
@@ -300,7 +469,11 @@ fn main() {
     let plans: Vec<_> = info.iter_plans().collect();
     assert_eq!(plans.len(), 2);
     assert!(plans.iter().all(|plan| plan.consumer == C::For));
-    assert!(plans.iter().any(|plan| plan.source.kind == S::ExclusiveRange));
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan.source.kind == S::ExclusiveRange)
+    );
     assert!(plans.iter().any(|plan| plan.source.kind == S::VecIter));
 }
 
@@ -328,10 +501,21 @@ fn main() -> Vec<i64> {
     let lua = crate::compile_str(source).expect("compile fused iterator chain");
     assert_eq!(lua.matches("for ").count(), 1, "expected one loop: {lua}");
     assert!(lua.contains(".n - 1 do"), "Vec loop must use `.n`: {lua}");
-    for forbidden in [":iter(", ":map(", ":filter(", ":skip(", ":take(", ":collect(", "coroutine"] {
+    for forbidden in [
+        ":iter(",
+        ":map(",
+        ":filter(",
+        ":skip(",
+        ":take(",
+        ":collect(",
+        "coroutine",
+    ] {
         assert!(!lua.contains(forbidden), "found {forbidden:?}: {lua}");
     }
-    assert!(!lua.contains("function("), "per-item closure emitted: {lua}");
+    assert!(
+        !lua.contains("function("),
+        "per-item closure emitted: {lua}"
+    );
     assert_eq!(
         lua.matches("rt.vec(").count(),
         2,
@@ -367,9 +551,18 @@ fn main() -> Vec<i64> {
 }
 "#;
     let lua = crate::compile_str(source).expect("compile block iterator closure");
-    assert!(lua.contains("goto __t"), "closure return was not lowered: {lua}");
-    assert!(lua.contains("_done::"), "closure return label missing: {lua}");
-    assert!(!lua.contains("function("), "per-item closure emitted: {lua}");
+    assert!(
+        lua.contains("goto __t"),
+        "closure return was not lowered: {lua}"
+    );
+    assert!(
+        lua.contains("_done::"),
+        "closure return label missing: {lua}"
+    );
+    assert!(
+        !lua.contains("function("),
+        "per-item closure emitted: {lua}"
+    );
 }
 
 #[test]
@@ -455,7 +648,10 @@ fn iterator_escape_reports_stored_passed_returned_and_assigned_plans() {
 fn iterator_escape_does_not_reject_immediate_consumers() {
     let source = "fn main() -> i64 { (0..4).map(|value| value + 1).count() }";
     let (diagnostics, _) = crate::check_diags(source);
-    assert!(diagnostics.is_empty(), "consumer was treated as escape: {diagnostics:?}");
+    assert!(
+        diagnostics.is_empty(),
+        "consumer was treated as escape: {diagnostics:?}"
+    );
 }
 
 fn compile(src: &str) -> String {
@@ -466,7 +662,7 @@ fn compile(src: &str) -> String {
 fn empty_fn() {
     let lua = compile("fn main() {}");
     assert!(lua.contains("function main()"));
-    assert!(lua.contains("main()"));
+    assert!(!lua.trim_end().ends_with("main()"));
 }
 
 #[test]
@@ -482,6 +678,31 @@ fn let_and_arithmetic() {
     assert!(lua.contains("function f(a, b)"));
     assert!(lua.contains("local x = a + b * 2"));
     assert!(lua.contains("return x"));
+}
+
+#[test]
+fn immutable_assignment_requires_mutable_binding_identity() {
+    for source in [
+        "let value = 1; value = 2;",
+        "struct Point { x: i64 } let point = Point { x: 1 }; point.x = 2;",
+        "let values = vec![1]; values[0] = 2;",
+        "struct Point { x: i64 } impl Point { fn update(&self) { self.x = 2; } }",
+    ] {
+        let diagnostics = compile_str(source).unwrap_err();
+        assert!(
+            diagnostics.contains("cannot assign to immutable binding"),
+            "source: {source}\ndiagnostics: {diagnostics}"
+        );
+    }
+
+    compile_str(
+        "struct Point { x: i64 }\n\
+         impl Point { fn update(&mut self) { self.x = 2; } }\n\
+         let mut point = Point { x: 1 };\n\
+         point.x = 2;\n\
+         point.update();",
+    )
+    .expect("mutable locals and &mut self receivers accept assignment");
 }
 
 #[test]
@@ -558,7 +779,20 @@ fn mutual_recursion_predeclared() {
 #[test]
 fn parse_error_reports_line() {
     let err = compile_str("fn f( {}").unwrap_err();
-    assert!(err.contains(':'), "expected line-prefixed error, got: {err}");
+    assert!(
+        err.contains(":"),
+        "expected line-prefixed error, got: {err}"
+    );
+}
+
+#[test]
+fn parser_error_exposes_structured_diagnostic() {
+    let error = crate::parser::parse("fn broken( {}").unwrap_err();
+    assert_eq!(
+        error.diagnostic().code,
+        rua_core::DiagnosticCode::ParseUnexpectedToken
+    );
+    assert!(error.diagnostic().range.is_some());
 }
 
 // --- P2: struct / enum / match / Option / Result / ? / impl ---------------
@@ -573,7 +807,10 @@ fn struct_decl_and_literal() {
     );
     assert!(lua.contains("local Point"), "got: {lua}");
     assert!(lua.contains("Point.__index = Point"));
-    assert!(lua.contains("setmetatable({ x = 0.0, y = 0.0 }, Point)"), "got: {lua}");
+    assert!(
+        lua.contains("setmetatable({ x = 0.0, y = 0.0 }, Point)"),
+        "got: {lua}"
+    );
 }
 
 #[test]
@@ -614,9 +851,18 @@ fn enum_construction_tagged() {
         fn c() -> Shape { Shape::Unit }
     "#,
     );
-    assert!(lua.contains(r#"setmetatable({ tag = "Circle", 2.0 }, Shape)"#), "got: {lua}");
-    assert!(lua.contains(r#"setmetatable({ tag = "Rect", w = 3.0, h = 4.0 }, Shape)"#), "got: {lua}");
-    assert!(lua.contains(r#"setmetatable({ tag = "Unit" }, Shape)"#), "got: {lua}");
+    assert!(
+        lua.contains(r#"setmetatable({ tag = "Circle", 2.0 }, Shape)"#),
+        "got: {lua}"
+    );
+    assert!(
+        lua.contains(r#"setmetatable({ tag = "Rect", w = 3.0, h = 4.0 }, Shape)"#),
+        "got: {lua}"
+    );
+    assert!(
+        lua.contains(r#"setmetatable({ tag = "Unit" }, Shape)"#),
+        "got: {lua}"
+    );
 }
 
 #[test]
@@ -627,8 +873,14 @@ fn option_pure_nil() {
         fn none_v() -> Option<i64> { let y = None; y }
     "#,
     );
-    assert!(lua.contains("local x = 5"), "Some(5) should be bare 5; got: {lua}");
-    assert!(lua.contains("local y = nil"), "None should be nil; got: {lua}");
+    assert!(
+        lua.contains("local x = 5"),
+        "Some(5) should be bare 5; got: {lua}"
+    );
+    assert!(
+        lua.contains("local y = nil"),
+        "None should be nil; got: {lua}"
+    );
 }
 
 #[test]
@@ -642,9 +894,8 @@ fn result_and_try() {
         }
     "#,
     );
-    assert!(lua.contains("{ ok = 3 }"), "got: {lua}");
-    // `?` desugars to an Err-propagating early return
-    assert!(lua.contains(".err ~= nil then return"), "got: {lua}");
+    assert!(lua.contains("rt.result_ok(3)"), "got: {lua}");
+    assert!(lua.contains(".tag == \"err\" then return"), "got: {lua}");
 }
 
 #[test]
@@ -697,7 +948,10 @@ fn operator_overload_add() {
     "#,
     );
     assert!(lua.contains("function V2:add(o)"), "got: {lua}");
-    assert!(lua.contains("V2.__add = V2.add"), "operator alias; got: {lua}");
+    assert!(
+        lua.contains("V2.__add = V2.add"),
+        "operator alias; got: {lua}"
+    );
 }
 
 #[test]
@@ -716,7 +970,10 @@ fn trait_default_method_inherited() {
     );
     // `describe` provided by impl, `name` inherited as default
     assert!(lua.contains("function Cat:describe()"), "got: {lua}");
-    assert!(lua.contains("function Cat:name()"), "default inherited; got: {lua}");
+    assert!(
+        lua.contains("function Cat:name()"),
+        "default inherited; got: {lua}"
+    );
     assert!(lua.contains("\"thing\""));
 }
 
@@ -730,7 +987,10 @@ fn trait_default_not_emitted_when_overridden() {
     "#,
     );
     assert!(lua.contains("\"dog\""));
-    assert!(!lua.contains("\"thing\""), "overridden default must not be emitted; got: {lua}");
+    assert!(
+        !lua.contains("\"thing\""),
+        "overridden default must not be emitted; got: {lua}"
+    );
 }
 
 #[test]
@@ -784,14 +1044,27 @@ fn checker_unknown_variant() {
 #[test]
 fn checker_duplicate_definition() {
     let err = compile_str("fn f() {} fn f() {}").unwrap_err();
-    assert!(err.contains("duplicate top-level definition `f`"), "got: {err}");
+    assert!(
+        err.contains("duplicate top-level definition `f`"),
+        "got: {err}"
+    );
 }
 
 #[test]
-fn checker_allows_unknown_external_names() {
-    // `print` and other unknown call targets must NOT be rejected (extern/P4).
-    let lua = compile("fn main() { print(\"hi\"); }");
+fn checker_allows_declared_external_names() {
+    let lua = compile(
+        r#"
+        extern "lua" { fn print(value: String); }
+        fn main() { print("hi"); }
+    "#,
+    );
     assert!(lua.contains("print(\"hi\")"));
+}
+
+#[test]
+fn checker_rejects_unresolved_call_target() {
+    let err = compile_str("fn main() { missing(\"hi\"); }").unwrap_err();
+    assert!(err.contains("cannot resolve name `missing`"), "got: {err}");
 }
 
 #[test]
@@ -807,20 +1080,23 @@ fn match_guard() {
     "#,
     );
     assert!(lua.contains("local x ="), "binds x for guard; got: {lua}");
-    assert!(lua.contains("if x > 0 then"), "guard uses binding; got: {lua}");
+    assert!(
+        lua.contains("if x > 0 then"),
+        "guard uses binding; got: {lua}"
+    );
 }
 
 // --- P4: for / range / index / macros / Vec -------------------------------
 
 #[test]
 fn for_range_exclusive() {
-    let lua = compile("fn f() { for i in 0..10 { print(i); } }");
+    let lua = compile("fn f() { for i in 0..10 { print!(\"{}\", i); } }");
     assert!(lua.contains("for i = 0, 9 do"), "got: {lua}");
 }
 
 #[test]
 fn for_range_inclusive() {
-    let lua = compile("fn f() { for i in 1..=5 { print(i); } }");
+    let lua = compile("fn f() { for i in 1..=5 { print!(\"{}\", i); } }");
     assert!(lua.contains("for i = 1, 5 do"), "got: {lua}");
 }
 
@@ -830,7 +1106,7 @@ fn for_over_vec() {
         r#"
         fn f() {
             let v = vec![1, 2, 3];
-            for x in v { print(x); }
+            for x in v { print!("{}", x); }
         }
     "#,
     );
@@ -840,8 +1116,14 @@ fn for_over_vec() {
 #[test]
 fn vec_macro_zero_based() {
     let lua = compile("fn f() { let v = vec![10, 20]; }");
-    assert!(lua.contains("rt.vec({ [0] = 10, [1] = 20, n = 2 })"), "got: {lua}");
-    assert!(lua.contains("local rt = require(\"rua_rt\")"), "emits require; got: {lua}");
+    assert!(
+        lua.contains("rt.vec({ [0] = 10, [1] = 20, n = 2 })"),
+        "got: {lua}"
+    );
+    assert!(
+        lua.contains("local rt = require(\"rua_rt\")"),
+        "emits require; got: {lua}"
+    );
 }
 
 #[test]
@@ -865,7 +1147,10 @@ fn macro_panic() {
 #[test]
 fn no_require_when_rt_unused() {
     let lua = compile("fn main() { let x = 1; }");
-    assert!(!lua.contains("require(\"rua_rt\")"), "no require without rt; got: {lua}");
+    assert!(
+        !lua.contains("require(\"rua_rt\")"),
+        "no require without rt; got: {lua}"
+    );
 }
 
 #[test]
@@ -889,8 +1174,11 @@ fn extern_block_emits_no_code() {
         fn main() { print("hi"); }
     "#,
     );
-    // Externs get local stubs so generated code runs standalone.
-    assert!(lua.contains("local print = print or function(...) end"), "got: {lua}");
+    // Externs bind the host global and fail fast when the host contract is absent.
+    assert!(
+        lua.contains("local print = assert(_G[\"print\"], \"missing Lua extern `print`\")"),
+        "got: {lua}"
+    );
     assert!(lua.contains("print(\"hi\")"), "got: {lua}");
 }
 
@@ -917,7 +1205,10 @@ fn extern_duplicate_of_fn_is_error() {
     "#,
     )
     .unwrap_err();
-    assert!(err.contains("duplicate top-level definition `foo`"), "got: {err}");
+    assert!(
+        err.contains("duplicate top-level definition `foo`"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -956,13 +1247,16 @@ fn diagnostic_reports_line_number() {
     )
     .unwrap_err();
     assert!(err.contains("no field `z`"), "got: {err}");
-    assert!(err.starts_with("4:"), "error should be prefixed with line 4; got: {err}");
+    assert!(
+        err.starts_with("4:"),
+        "error should be prefixed with line 4; got: {err}"
+    );
 }
 
 #[test]
 fn diagnostic_line_for_variant_arity() {
-    let err = compile_str("enum E { Pair(i64, i64) }\nfn f() -> E {\n    E::Pair(1)\n}\n")
-        .unwrap_err();
+    let err =
+        compile_str("enum E { Pair(i64, i64) }\nfn f() -> E {\n    E::Pair(1)\n}\n").unwrap_err();
     assert!(err.contains("expects 2 argument"), "got: {err}");
     assert!(err.starts_with("3:"), "arity error on line 3; got: {err}");
 }
@@ -978,7 +1272,10 @@ fn typeck_non_bool_if_condition() {
 #[test]
 fn typeck_non_bool_while_condition() {
     let err = compile_str("fn f() { while 3 { } }").unwrap_err();
-    assert!(err.contains("`while` condition must be `bool`"), "got: {err}");
+    assert!(
+        err.contains("`while` condition must be `bool`"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -996,28 +1293,33 @@ fn typeck_let_annotation_mismatch() {
 #[test]
 fn typeck_fn_arity() {
     let err = compile_str("fn g(a: i64, b: i64) -> i64 { a + b }\nfn f() { g(1); }").unwrap_err();
-    assert!(err.contains("function `g` expects 2 argument"), "got: {err}");
+    assert!(
+        err.contains("function `g` expects 2 argument"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn typeck_fn_arg_type() {
-    let err =
-        compile_str("fn g(a: bool) {}\nfn f() { g(5); }").unwrap_err();
-    assert!(err.contains("argument 1 of `g` expects `bool`"), "got: {err}");
+    let err = compile_str("fn g(a: bool) {}\nfn f() { g(5); }").unwrap_err();
+    assert!(
+        err.contains("argument 1 of `g` expects `bool`"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn typeck_arithmetic_on_bool() {
     let err = compile_str("fn f() { let x = true + 1; }").unwrap_err();
-    assert!(err.contains("arithmetic operator applied to `bool`"), "got: {err}");
+    assert!(
+        err.contains("arithmetic operator applied to `bool`"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn typeck_field_access_unknown() {
-    let err = compile_str(
-        "struct P { x: i64 }\nfn f(p: P) -> i64 { p.y }",
-    )
-    .unwrap_err();
+    let err = compile_str("struct P { x: i64 }\nfn f(p: P) -> i64 { p.y }").unwrap_err();
     assert!(err.contains("struct `P` has no field `y`"), "got: {err}");
 }
 
@@ -1030,10 +1332,10 @@ fn typeck_numeric_mixing_is_allowed() {
 
 #[test]
 fn typeck_extern_calls_not_flagged() {
-    // Unknown/extern names never trigger type errors.
+    // Declared extern names participate in resolution without type false positives.
     let lua = compile(
         r#"
-        extern "lua" { fn thing(x: i64) -> bool; }
+        extern "lua" { fn thing(x: i64) -> bool; fn other(); }
         fn f() { if thing(1) { } let y = other(); }
     "#,
     );
@@ -1046,7 +1348,10 @@ fn typeck_method_arity() {
         "struct P { x: i64 }\nimpl P { fn get(self) -> i64 { self.x } }\nfn f(p: P) -> i64 { p.get(5) }",
     )
     .unwrap_err();
-    assert!(err.contains("method `P::get` expects 0 argument"), "got: {err}");
+    assert!(
+        err.contains("method `P::get` expects 0 argument"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1055,7 +1360,10 @@ fn typeck_method_arg_type() {
         "struct P { x: i64 }\nimpl P { fn set(self, v: bool) {} }\nfn f(p: P) { p.set(3); }",
     )
     .unwrap_err();
-    assert!(err.contains("argument 1 of `P::set` expects `bool`"), "got: {err}");
+    assert!(
+        err.contains("argument 1 of `P::set` expects `bool`"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1081,7 +1389,10 @@ fn typeck_inherited_default_method_ok() {
         fn f(s: S) -> i64 { s.twice() }
     "#,
     );
-    assert!(lua.contains("S.twice") || lua.contains("S:twice"), "got: {lua}");
+    assert!(
+        lua.contains("S.twice") || lua.contains("S:twice"),
+        "got: {lua}"
+    );
 }
 
 #[test]
@@ -1098,7 +1409,10 @@ fn typeck_inherited_default_method_arity_checked() {
     "#,
     )
     .unwrap_err();
-    assert!(err.contains("method `S::twice` expects 0 argument"), "got: {err}");
+    assert!(
+        err.contains("method `S::twice` expects 0 argument"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1147,9 +1461,7 @@ fn typeck_try_unwraps_result_element() {
 
 #[test]
 fn typeck_map_contains_key_is_bool_ok() {
-    let lua = compile(
-        r#"fn f() { let m = HashMap::new(); if m.contains_key("a") { } }"#,
-    );
+    let lua = compile(r#"fn f() { let m = HashMap::new(); if m.contains_key("a") { } }"#);
     assert!(lua.contains("m:contains_key"), "got: {lua}");
 }
 
@@ -1163,7 +1475,8 @@ fn typeck_option_result_return_ok() {
         fn c() -> Result<i64, String> { Err("x") }
     "#,
     );
-    assert!(lua.contains("{ ok = 2 }"), "got: {lua}");
+    assert!(lua.contains("rt.result_ok(2)"), "got: {lua}");
+    assert!(lua.contains("rt.result_err(\"x\")"), "got: {lua}");
 }
 
 #[test]
@@ -1178,7 +1491,10 @@ fn codegen_integer_division() {
 fn codegen_float_division_stays_slash() {
     let lua = compile("fn f() -> f64 { 7.0 / 2.0 }");
     assert!(lua.contains("7.0 / 2.0"), "got: {lua}");
-    assert!(!lua.contains("//"), "should not use integer division; got: {lua}");
+    assert!(
+        !lua.contains("//"),
+        "should not use integer division; got: {lua}"
+    );
 }
 
 #[test]
@@ -1190,11 +1506,12 @@ fn codegen_mixed_division_stays_slash() {
 }
 
 #[test]
-fn codegen_unknown_division_stays_slash() {
-    // Generic/unknown operand types default to float division (safe).
-    let lua = compile("fn f(a: T, b: T) { let x = a / b; }");
-    assert!(lua.contains("a / b"), "got: {lua}");
-    assert!(!lua.contains("//"), "got: {lua}");
+fn generic_division_requires_operator_bound() {
+    let error = crate::compile_str("fn f<T>(a: T, b: T) { let x = a / b; }").unwrap_err();
+    assert!(
+        error.contains("cannot apply arithmetic operator to `T` and `T`"),
+        "got: {error}"
+    );
 }
 
 #[test]
@@ -1258,10 +1575,8 @@ fn typeck_string_len_is_i64() {
 #[test]
 fn typeck_string_split_returns_vec_of_string() {
     // `split` yields `Vec<String>`; indexing gives `String`, so `if el { }` fails.
-    let err = compile_str(
-        r#"fn f(s: String) { let v = s.split(","); if v.get(0) { } }"#,
-    )
-    .unwrap_err();
+    let err =
+        compile_str(r#"fn f(s: String) { let v = s.split(","); if v.get(0) { } }"#).unwrap_err();
     assert!(err.contains("must be `bool`"), "got: {err}");
 }
 
@@ -1286,6 +1601,25 @@ fn typeck_operator_overload_not_flagged() {
     "#,
     );
     assert!(lua.contains("V.__add"), "got: {lua}");
+}
+
+#[test]
+fn user_trait_named_like_operator_does_not_enable_operator_lowering() {
+    let error = compile_str(
+        r#"
+        trait Add { fn add(&self, other: Point) -> Point; }
+        struct Point { x: i64 }
+        impl Add for Point {
+            fn add(&self, other: Point) -> Point { Point { x: self.x + other.x } }
+        }
+        fn combine(left: Point, right: Point) -> Point { left + right }
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("does not implement operator trait `Add`"),
+        "got: {error}"
+    );
 }
 
 // --- P4c: if let / while let ------------------------------------------------
@@ -1331,9 +1665,8 @@ fn if_let_ok_unwraps_result() {
         }
     "#,
     );
-    // Ok arm: not nil and no err; binds from `.ok`.
-    assert!(lua.contains(".err == nil"), "got: {lua}");
-    assert!(lua.contains(".ok"), "got: {lua}");
+    assert!(lua.contains(".tag == \"ok\""), "got: {lua}");
+    assert!(lua.contains(".value"), "got: {lua}");
 }
 
 #[test]
@@ -1374,7 +1707,7 @@ fn while_let_drains_with_break() {
 // --- P4c: module system (slice 1: inline mod / use / pub) -------------------
 
 #[test]
-fn module_emits_do_block_and_table() {
+fn module_emits_one_table_identity() {
     let lua = compile(
         r#"
         mod math {
@@ -1384,15 +1717,14 @@ fn module_emits_do_block_and_table() {
     "#,
     );
     assert!(lua.contains("math = {}"), "got: {lua}");
-    assert!(lua.contains("do"), "got: {lua}");
-    assert!(lua.contains("math.add = add"), "got: {lua}");
+    assert!(lua.contains("function math.add(a, b)"), "got: {lua}");
     // Qualified call `math::add` lowers to `math.add`.
     assert!(lua.contains("math.add(1, 2)"), "got: {lua}");
 }
 
 #[test]
 fn module_sibling_call_is_block_local() {
-    // `double` calls `add` unqualified; both are locals inside the do-block.
+    // The sibling call resolves to the module field identity.
     let lua = compile(
         r#"
         mod m {
@@ -1402,8 +1734,8 @@ fn module_sibling_call_is_block_local() {
         fn main() {}
     "#,
     );
-    assert!(lua.contains("local add, double"), "got: {lua}");
-    assert!(lua.contains("return add(x, x)"), "got: {lua}");
+    assert!(lua.contains("function m.add"), "got: {lua}");
+    assert!(lua.contains("return m.add(x, x)"), "got: {lua}");
 }
 
 #[test]
@@ -1418,8 +1750,8 @@ fn nested_module_qualified_access() {
         fn main() { println!("{}", outer::inner::f()); }
     "#,
     );
-    assert!(lua.contains("outer.inner = inner"), "got: {lua}");
-    assert!(lua.contains("inner.f = f"), "got: {lua}");
+    assert!(lua.contains("outer.inner = {}"), "got: {lua}");
+    assert!(lua.contains("function outer.inner.f()"), "got: {lua}");
     assert!(lua.contains("outer.inner.f()"), "got: {lua}");
 }
 
@@ -1460,6 +1792,49 @@ fn use_alias_and_group_desugar() {
 }
 
 #[test]
+fn use_alias_keeps_structural_checks_identity_driven() {
+    let missing_field = compile_str(
+        r#"
+        mod model { pub struct Point { x: i64, y: i64 } }
+        use model::Point as P;
+        let point = P { x: 1 };
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        missing_field.contains("missing field `y`"),
+        "{missing_field}"
+    );
+
+    let wrong_variant_arity = compile_str(
+        r#"
+        mod model { pub enum Pair { Both(i64, i64) } }
+        use model::Pair::Both as B;
+        let pair = B(1);
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        wrong_variant_arity.contains("expects 2 argument(s), got 1"),
+        "{wrong_variant_arity}"
+    );
+}
+
+#[test]
+fn use_alias_keeps_type_checks_identity_driven() {
+    let error = compile_str(
+        r#"
+        mod math { pub fn double(value: i64) -> i64 { value + value } }
+        use math::double as twice;
+        let value = twice(true);
+        "#,
+    )
+    .unwrap_err();
+    assert!(error.contains("argument 1"), "{error}");
+    assert!(error.contains("expects `i64`, found `bool`"), "{error}");
+}
+
+#[test]
 fn same_fn_name_across_modules_no_dup_error() {
     // Two modules may each define `f` without a duplicate-definition error.
     let lua = compile(
@@ -1490,10 +1865,10 @@ fn module_struct_qualified_literal_and_assoc_fn() {
         }
     "#,
     );
-    // Class table lives inside the module's do-block.
-    assert!(lua.contains("Point = {}; Point.__index = Point"), "got: {lua}");
-    assert!(lua.contains("function Point.new(x, y)"), "got: {lua}");
-    assert!(lua.contains("geo.Point = Point"), "got: {lua}");
+    // The class table has one module-owned backend place.
+    assert!(lua.contains("geo.Point = {}"), "got: {lua}");
+    assert!(lua.contains("geo.Point.__index = geo.Point"), "got: {lua}");
+    assert!(lua.contains("function geo.Point.new(x, y)"), "got: {lua}");
     // Cross-module associated fn + struct literal use the qualified table.
     assert!(lua.contains("geo.Point.new(1.0, 2.0)"), "got: {lua}");
     assert!(
@@ -1546,7 +1921,7 @@ fn module_method_and_self_call() {
         }
     "#,
     );
-    assert!(lua.contains("function P:get()"), "got: {lua}");
+    assert!(lua.contains("function geo.P:get()"), "got: {lua}");
     // Method call resolves at runtime via metatable (colon call).
     assert!(lua.contains("p:get()"), "got: {lua}");
 }
@@ -1566,8 +1941,7 @@ fn module_trait_default_method() {
     "#,
     );
     // Inherited default method is emitted onto the module-local class table.
-    assert!(lua.contains("function Sq:tag()"), "got: {lua}");
-    assert!(lua.contains("shapes.Sq = Sq"), "got: {lua}");
+    assert!(lua.contains("function shapes.Sq:tag()"), "got: {lua}");
 }
 
 #[test]
@@ -1580,8 +1954,10 @@ fn same_type_name_across_modules_no_dup_error() {
         fn main() {}
     "#,
     );
-    assert!(lua.contains("a.Point = Point"), "got: {lua}");
-    assert!(lua.contains("b.Point = Point"), "got: {lua}");
+    assert!(lua.contains("a.Point = {}"), "got: {lua}");
+    assert!(lua.contains("a.Point.__index = a.Point"), "got: {lua}");
+    assert!(lua.contains("b.Point = {}"), "got: {lua}");
+    assert!(lua.contains("b.Point.__index = b.Point"), "got: {lua}");
 }
 
 #[test]
@@ -1679,7 +2055,7 @@ fn root_private_item_visible_everywhere() {
 
 #[test]
 fn private_item_same_module_ok() {
-    // A module may use its own private items internally (bare, block-local).
+    // A module may use its own private items through its resolved table place.
     let lua = compile(
         r#"
         mod m {
@@ -1689,7 +2065,7 @@ fn private_item_same_module_ok() {
         fn main() { println!("{}", m::reveal()); }
     "#,
     );
-    assert!(lua.contains("return secret()"), "got: {lua}");
+    assert!(lua.contains("return m.secret()"), "got: {lua}");
 }
 
 #[test]
@@ -1725,8 +2101,7 @@ fn use_scope_does_not_leak_to_root() {
     "#,
     );
     // Root `helper()` stays bare (not rewritten to the module alias target).
-    assert!(lua.contains("helper()"), "got: {lua}");
-    assert!(!lua.contains("m.inner.deep()"), "got: {lua}");
+    assert!(lua.contains("rt.println(\"{}\", helper())"), "got: {lua}");
 }
 
 #[test]
@@ -1758,7 +2133,10 @@ fn duplicate_fn_in_module_is_rejected() {
     "#,
     )
     .unwrap_err();
-    assert!(err.contains("duplicate definition `f` in module `m`"), "got: {err}");
+    assert!(
+        err.contains("duplicate definition `f` in module `m`"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1774,7 +2152,12 @@ fn tmp_dir(tag: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     let mut d = std::env::temp_dir();
-    d.push(format!("ruac_test_{}_{}_{}", tag, std::process::id(), nanos));
+    d.push(format!(
+        "ruac_test_{}_{}_{}",
+        tag,
+        std::process::id(),
+        nanos
+    ));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -1790,7 +2173,7 @@ fn file_module_resolution() {
     std::fs::write(dir.join("util.rua"), "pub fn f() -> i64 { 7 }\n").unwrap();
     let lua = crate::compile_path(&dir.join("main.rua")).unwrap();
     assert!(lua.contains("util = {}"), "got: {lua}");
-    assert!(lua.contains("util.f = f"), "got: {lua}");
+    assert!(lua.contains("function util.f()"), "got: {lua}");
     assert!(lua.contains("util.f()"), "got: {lua}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1832,6 +2215,18 @@ fn mod_dir_style_resolution() {
 }
 
 #[test]
+fn ambiguous_file_module_layout_is_rejected() {
+    let dir = tmp_dir("ambiguous_mod");
+    std::fs::write(dir.join("main.rua"), "mod api;\n").unwrap();
+    std::fs::write(dir.join("api.rua"), "pub fn flat() {}\n").unwrap();
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    std::fs::write(dir.join("api/mod.rua"), "pub fn nested() {}\n").unwrap();
+    let error = crate::compile_path(&dir.join("main.rua")).unwrap_err();
+    assert!(error.contains("ambiguous module `api`"), "got: {error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn missing_file_module_errors() {
     let dir = tmp_dir("missing");
     std::fs::write(dir.join("main.rua"), "mod nope;\nfn main() {}\n").unwrap();
@@ -1869,13 +2264,12 @@ fn type_error_in_child_file_attributes_file_and_line() {
     )
     .unwrap();
     // Return type mismatch on line 2 of util.rua.
-    std::fs::write(
-        dir.join("util.rua"),
-        "pub fn f() -> bool {\n    1 + 2\n}\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("util.rua"), "pub fn f() -> bool {\n    1 + 2\n}\n").unwrap();
     let err = crate::compile_path(&dir.join("main.rua")).unwrap_err();
-    assert!(err.contains("util.rua:2:"), "expected file:line attribution; got: {err}");
+    assert!(
+        err.contains("util.rua:2:"),
+        "expected file:line attribution; got: {err}"
+    );
     assert!(
         err.contains("expected return type `bool`, found `i64`"),
         "got: {err}"
@@ -2033,7 +2427,7 @@ fn impl_generic_bound_in_module_ok() {
         fn main() {}
     "#,
     );
-    assert!(lua.contains("function label(x)"), "got: {lua}");
+    assert!(lua.contains("function z.label(x)"), "got: {lua}");
     assert!(lua.contains("x:name()"), "got: {lua}");
 }
 
@@ -2237,8 +2631,7 @@ fn generic_method_builtin_bound_not_checked() {
 
 #[test]
 fn same_struct_name_in_two_modules_no_false_positive() {
-    // Two modules each declaring `Point` with different fields must compile;
-    // the checker degrades an ambiguous simple name to Unknown (no field error).
+    // Resolved identities keep the two field schemas separate.
     let lua = compile(
         r#"
         mod a { pub struct Point { pub x: i64 } }
@@ -2269,8 +2662,7 @@ fn unique_struct_field_still_checked() {
 
 #[test]
 fn same_fn_name_in_two_modules_no_false_positive() {
-    // Same free-fn name in two modules with different arity must not be flagged
-    // when called through qualified paths.
+    // Same free-fn name in two modules resolves to two independent signatures.
     let lua = compile(
         r#"
         mod a { pub fn f(x: i64) -> i64 { x } }
@@ -2283,6 +2675,167 @@ fn same_fn_name_in_two_modules_no_false_positive() {
     );
     assert!(lua.contains("a.f"), "got: {lua}");
     assert!(lua.contains("b.f"), "got: {lua}");
+}
+
+#[test]
+fn same_fn_name_in_two_modules_checks_each_resolved_signature() {
+    let err = compile_str(
+        r#"
+        mod a { pub fn f(x: i64) -> i64 { x } }
+        mod b { pub fn f(x: i64, y: i64) -> i64 { x + y } }
+        fn main() {
+            let _ = a::f(1, 2);
+            let _ = b::f(1);
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("function `a::f` expects 1 argument(s), got 2"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("function `b::f` expects 2 argument(s), got 1"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn same_type_name_in_two_modules_preserves_return_and_field_identity() {
+    let err = compile_str(
+        r#"
+        mod a {
+            pub struct Point { pub x: i64 }
+            pub fn make() -> Point { Point { x: 1 } }
+        }
+        mod b {
+            pub struct Point { pub y: bool }
+            pub fn make() -> Point { Point { y: true } }
+        }
+        fn main() {
+            let p = a::make();
+            if p.x {}
+            let q = b::make();
+            let _ = q.y + 1;
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("`if` condition must be `bool`, found `i64`"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("arithmetic operator applied to `bool`"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn same_type_name_in_two_modules_checks_each_resolved_method() {
+    let err = compile_str(
+        r#"
+        mod a {
+            pub struct Value { pub n: i64 }
+            impl Value { pub fn add(&self, x: i64) -> i64 { self.n + x } }
+        }
+        mod b {
+            pub struct Value { pub n: i64 }
+            impl Value { pub fn add(&self, x: i64, y: i64) -> i64 { self.n + x + y } }
+        }
+        fn main() {
+            let a_value = a::Value { n: 1 };
+            let b_value = b::Value { n: 2 };
+            let _ = a_value.add(1, 2);
+            let _ = b_value.add(1);
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("method `Value::add` expects 1 argument(s), got 2"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("method `Value::add` expects 2 argument(s), got 1"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn qualified_trait_bounds_use_trait_and_type_identity() {
+    let source = r#"
+        mod left {
+            pub trait Gate {}
+            pub struct Token {}
+            impl Gate for Token {}
+        }
+        mod right {
+            pub trait Gate {}
+            pub struct Token {}
+            impl Gate for Token {}
+        }
+        fn require_left<T: left::Gate>(value: T) -> T { value }
+        let _ok = require_left(left::Token {});
+    "#;
+    compile_str(source).unwrap();
+
+    let failing = format!("{}\nlet _bad = require_left(right::Token {{}});", source);
+    let error = compile_str(&failing).unwrap_err();
+    assert!(
+        error.contains("does not implement trait `Gate`"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn generic_receiver_method_uses_qualified_trait_identity() {
+    let lua = compile(
+        r#"
+        mod left {
+            pub trait Value { fn value(&self) -> i64; }
+            pub struct Number { value: i64 }
+            impl Value for Number {
+                fn value(&self) -> i64 { self.value }
+            }
+        }
+        mod right {
+            pub trait Value { fn value(&self, fallback: bool) -> bool; }
+        }
+        fn read<T: left::Value>(item: T) -> i64 { item.value() }
+        let answer = read(left::Number { value: 42 });
+        "#,
+    );
+    assert!(lua.contains("local answer = read("), "{lua}");
+}
+
+#[test]
+fn associated_function_uses_resolved_method_identity() {
+    let err = compile_str(
+        r#"
+        mod a {
+            pub struct Value { pub n: i64 }
+            impl Value { pub fn make(n: i64) -> Value { Value { n: n } } }
+        }
+        mod b {
+            pub struct Value { pub n: i64 }
+            impl Value { pub fn make(n: i64, extra: i64) -> Value { Value { n: n + extra } } }
+        }
+        fn main() {
+            let _ = a::Value::make(1, 2);
+            let _ = b::Value::make(1);
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("function `a::Value::make` expects 1 argument(s), got 2"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("function `b::Value::make` expects 2 argument(s), got 1"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -2409,6 +2962,36 @@ fn ruai_module_omitted_from_codegen() {
 }
 
 #[test]
+fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
+    let dir = tmp_dir("ruai_root_declaration");
+    let root = dir.join("api.ruai");
+    std::fs::write(&root, "pub fn answer() -> i64 {}\n").unwrap();
+    let artifact = crate::compile_path_artifact(&root).expect("compile declaration root");
+    assert!(artifact.source_map.is_empty(), "{artifact:#?}");
+    assert!(
+        !artifact.source.contains("function answer"),
+        "{}",
+        artifact.source
+    );
+
+    std::fs::write(&root, "pub fn answer() -> i64 { 42 }\n").unwrap();
+    let failure = crate::compile_path_artifact(&root).unwrap_err();
+    assert_eq!(
+        failure.diagnostics[0].code,
+        rua_core::DiagnosticCode::NameInvalidDeclaration
+    );
+
+    std::fs::write(&root, "mod child;\n").unwrap();
+    std::fs::write(dir.join("child.rua"), "pub fn answer() -> i64 { 42 }\n").unwrap();
+    let failure = crate::compile_path_artifact(&root).unwrap_err();
+    assert_eq!(
+        failure.diagnostics[0].code,
+        rua_core::DiagnosticCode::NameInvalidDeclaration
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn ruai_declaration_type_checked() {
     // Calls against a `.ruai` declaration are arity/type checked.
     let dir = tmp_dir("ruai_check");
@@ -2529,12 +3112,18 @@ fn check_diags_reports_located_span_for_struct_field() {
         .iter()
         .find(|d| d.msg.contains("has no field `y`"))
         .expect("expected a `has no field` diagnostic");
-    assert!(d.len > 0, "located diag should carry a non-empty span: {d:?}");
+    assert!(
+        !d.is_empty(),
+        "located diag should carry a non-empty span: {d:?}"
+    );
     // The span must fall inside the source and cover part of the literal.
-    assert!(d.start + d.len <= src.len(), "span out of bounds: {d:?}");
+    assert!(
+        d.start() + d.len() <= src.len(),
+        "span out of bounds: {d:?}"
+    );
     assert!(d.line >= 1, "line should be 1-based: {d:?}");
     // The byte range should intersect the struct-literal text on line 2.
-    let snippet = &src[d.start..d.start + d.len];
+    let snippet = &src[d.start()..d.start() + d.len()];
     assert!(
         snippet.contains('P') || snippet.contains('y') || snippet.contains('{'),
         "span {snippet:?} should point at the struct literal"
@@ -2551,8 +3140,31 @@ fn check_diags_bare_for_duplicate_definition() {
         .iter()
         .find(|d| d.msg.contains("duplicate top-level definition `dup`"))
         .expect("expected a duplicate-definition diagnostic");
-    assert_eq!(d.start, 0, "bare diag has no start: {d:?}");
-    assert_eq!(d.len, 0, "bare diag has no length: {d:?}");
+    assert_eq!(d.start(), 0, "bare diag has no start: {d:?}");
+    assert_eq!(d.len(), 0, "bare diag has no length: {d:?}");
+    assert_eq!(d.code, rua_core::DiagnosticCode::NameDuplicateDefinition);
+}
+
+#[test]
+fn compiler_diagnostic_api_preserves_parse_name_and_type_codes() {
+    let (parse, _) = crate::check_diagnostics("fn broken( {");
+    assert!(
+        parse
+            .iter()
+            .any(|diagnostic| diagnostic.code.category() == rua_core::DiagnosticCategory::Parse)
+    );
+
+    let (name, _) = crate::check_diagnostics("fn run() { missing(); }");
+    assert!(
+        name.iter()
+            .any(|diagnostic| diagnostic.code == rua_core::DiagnosticCode::NameUnresolved)
+    );
+
+    let (ty, _) = crate::check_diagnostics("fn run() -> i64 { true }");
+    assert!(
+        ty.iter()
+            .any(|diagnostic| diagnostic.code == rua_core::DiagnosticCode::TypeMismatch)
+    );
 }
 
 #[test]
@@ -2565,8 +3177,11 @@ fn check_diags_locates_match_pattern_error() {
         .iter()
         .find(|d| d.msg.contains("has no tuple payload"))
         .expect("expected a unit-variant payload diagnostic");
-    assert!(d.len > 0, "pattern diag should now be located: {d:?}");
-    assert!(d.start + d.len <= src.len(), "span out of bounds: {d:?}");
+    assert!(!d.is_empty(), "pattern diag should now be located: {d:?}");
+    assert!(
+        d.start() + d.len() <= src.len(),
+        "span out of bounds: {d:?}"
+    );
 }
 
 #[test]
@@ -2578,320 +3193,17 @@ fn check_diags_clean_program_has_no_diags() {
 
 // --- B1: member_index (LSP member resolution) --------------------------------
 
-use crate::typeck::MemberKind;
-
-/// Byte offset of the `n`-th (0-based) whole-word occurrence of `needle`.
-fn nth_word(src: &str, needle: &str, n: usize) -> usize {
-    let b = src.as_bytes();
-    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut rem = n;
-    let mut pos = 0;
-    loop {
-        let off = pos + src[pos..].find(needle).expect("occurrence not found");
-        let after = off + needle.len();
-        let left = off == 0 || !is_id(b[off - 1]);
-        let right = after >= b.len() || !is_id(b[after]);
-        if left && right {
-            if rem == 0 {
-                return off;
-            }
-            rem -= 1;
-        }
-        pos = off + 1;
-    }
-}
-
-#[test]
-fn member_index_resolves_struct_field() {
-    let src = "struct Point { x: f64, y: f64 }\nfn main() { let p = Point { x: 1.0, y: 2.0 }; let _ = p.x; }";
-    let mi = crate::member_index(src);
-    // Cursor on the `x` in `p.x` (the use site — last occurrence of `x`).
-    let use_off = nth_word(src, "x", 2);
-    let hit = mi.at(0, use_off).expect("p.x should resolve");
-    assert_eq!(hit.kind, MemberKind::Field);
-    // Target points at the field definition `x` (first occurrence).
-    let def = nth_word(src, "x", 0);
-    assert_eq!(hit.target_start, def);
-    assert_eq!(&src[hit.target_start..hit.target_start + hit.target_len], "x");
-    assert_eq!(hit.detail, "x: f64");
-}
-
-#[test]
-fn member_index_resolves_method_call() {
-    let src = "struct P { v: i64 }\nimpl P {\n    fn get(&self) -> i64 { self.v }\n}\nfn main() { let p = P { v: 1 }; let _ = p.get(); }";
-    let mi = crate::member_index(src);
-    // Cursor on `get` in `p.get()` (second `get`; first is the definition).
-    let use_off = nth_word(src, "get", 1);
-    let hit = mi.at(0, use_off).expect("p.get() should resolve");
-    assert_eq!(hit.kind, MemberKind::Method);
-    let def = nth_word(src, "get", 0);
-    assert_eq!(hit.target_start, def);
-    assert_eq!(hit.detail, "fn get(&self) -> i64");
-}
-
-#[test]
-fn member_index_resolves_self_field() {
-    let src = "struct P { v: i64 }\nimpl P {\n    fn read(&self) -> i64 { self.v }\n}\n";
-    let mi = crate::member_index(src);
-    // `self.v` — cursor on the `v` use site (second `v`; first is field def).
-    let use_off = nth_word(src, "v", 1);
-    let hit = mi.at(0, use_off).expect("self.v should resolve");
-    assert_eq!(hit.kind, MemberKind::Field);
-    assert_eq!(hit.detail, "v: i64");
-}
-
-#[test]
-fn member_index_records_builtin_vec_and_string_methods() {
-    // Vec::push, String::to_string, and String::len are now recorded with
-    // zero-length sentinel target spans so the LSP can show hover detail
-    // (there is no source definition to jump to; go-to-def is suppressed).
-    let src = "fn main() { let v = vec![1, 2]; v.push(3); let s = \"hi\".to_string(); let _ = s.len(); }";
-    let mi = crate::member_index(src);
-    assert_eq!(mi.len(), 3, "builtin/std member calls must be recorded: {:?}", mi.hits());
-    // Each hit should have a zero-length target span (sentinel: no jump target).
-    for hit in mi.hits() {
-        assert_eq!(hit.target_len, 0, "builtin method '{}' should have zero target_len", hit.detail);
-        assert!(!hit.detail.is_empty(), "builtin method should have hover detail");
-    }
-    // Verify specific details.
-    let push = mi.hits().iter().find(|h| h.detail.contains("push")).unwrap();
-    assert!(push.detail.contains("Vec") || push.detail.contains("i64"), "push detail: {}", push.detail);
-    let to_string = mi.hits().iter().find(|h| h.detail.contains("to_string")).unwrap();
-    assert!(to_string.detail.contains("String"), "to_string detail: {}", to_string.detail);
-    let len = mi.hits().iter().find(|h| h.detail.contains("len(&self)")).unwrap();
-    assert!(len.detail.contains("i64"), "len detail: {}", len.detail);
-}
-
-#[test]
-fn member_index_skips_unknown_receiver() {
-    // Field access on an unknown-typed receiver is not recorded.
-    let src = "fn main() { let _ = foo().bar; }";
-    let mi = crate::member_index(src);
-    assert!(mi.is_empty(), "unknown receiver must not be recorded: {:?}", mi.hits());
-}
-
-#[test]
-fn member_index_parse_error_is_empty() {
-    let mi = crate::member_index("fn (((");
-    assert!(mi.is_empty());
-}
-
-// --- C0: type_members (member-completion catalog) ----------------------------
-
-#[test]
-fn type_members_lists_struct_fields_and_methods() {
-    let src = "struct Point { x: f64, y: f64 }\nimpl Point {\n    fn dist(&self) -> f64 { self.x }\n    fn scale(&self, k: f64) -> f64 { self.x }\n}";
-    let tm = crate::type_members(src);
-    let got: Vec<(&str, MemberKind)> = tm
-        .get("Point")
-        .iter()
-        .map(|m| (m.name.as_str(), m.kind))
-        .collect();
-    assert_eq!(
-        got,
-        vec![
-            ("x", MemberKind::Field),
-            ("y", MemberKind::Field),
-            ("dist", MemberKind::Method),
-            ("scale", MemberKind::Method),
-        ]
-    );
-    let f = tm.get("Point").iter().find(|m| m.name == "x").unwrap();
-    assert_eq!(f.detail, "x: f64");
-    let d = tm.get("Point").iter().find(|m| m.name == "dist").unwrap();
-    assert_eq!(d.detail, "fn dist(&self) -> f64");
-}
-
-#[test]
-fn type_members_includes_trait_default_and_impl_methods() {
-    let src = "trait Area {\n    fn area(&self) -> f64;\n    fn name(&self) -> String { \"s\".to_string() }\n}\nstruct C { r: f64 }\nimpl Area for C {\n    fn area(&self) -> f64 { self.r }\n}";
-    let tm = crate::type_members(src);
-    let names: Vec<&str> = tm.get("C").iter().map(|m| m.name.as_str()).collect();
-    assert!(names.contains(&"r")); // field
-    assert!(names.contains(&"area")); // impl method
-    assert!(names.contains(&"name")); // inherited default
-}
-
-#[test]
-fn type_members_enum_methods_only() {
-    let src = "enum Dir { N, S }\nimpl Dir {\n    fn flip(&self) -> i64 { 0 }\n}";
-    let tm = crate::type_members(src);
-    let ms = tm.get("Dir");
-    assert_eq!(ms.len(), 1);
-    assert_eq!(ms[0].name, "flip");
-    assert_eq!(ms[0].kind, MemberKind::Method);
-}
-
-#[test]
-fn type_members_unknown_and_builtins_are_empty() {
-    let tm = crate::type_members("fn f() { let v = vec![1]; }");
-    assert!(tm.get("Nope").is_empty());
-    assert!(tm.get("Vec").is_empty()); // builtin container never in catalog
-}
-
-#[test]
-fn type_members_parse_error_is_empty() {
-    assert!(crate::type_members("struct {{{").is_empty());
-}
-
-#[test]
-fn type_members_drops_ambiguous_cross_module_type() {
-    // Same simple name in two modules → dropped (zero false positives).
-    let src = "mod a { pub struct P { pub x: i64 } }\nmod b { pub struct P { pub y: i64 } }";
-    assert!(crate::type_members(src).get("P").is_empty());
-}
-
-// --- C1: member_completion (ReceiverIndex + TypeMembers) --------------------
-
-#[test]
-fn member_completion_records_field_receiver() {
-    let src =
-        "struct Point { x: f64 }\nfn main() { let p = Point { x: 1.0 }; let _ = p.x; }";
-    let (tm, ri) = crate::member_completion(src);
-    let p = nth_word(src, "p", 1); // `p` in `p.x`
-    let r = ri.at_end(0, p + 1).expect("receiver p recorded"); // len("p")==1
-    assert_eq!(r.type_name, "Point");
-    assert!(!tm.get("Point").is_empty());
-}
-
-#[test]
-fn member_completion_records_self_receiver() {
-    let src = "struct P { v: i64 }\nimpl P {\n    fn get(&self) -> i64 { self.v }\n}";
-    let (_, ri) = crate::member_completion(src);
-    let s = nth_word(src, "self", 1); // `self` in `self.v` (0 is `&self`)
-    let r = ri.at_end(0, s + "self".len()).expect("self receiver recorded");
-    assert_eq!(r.type_name, "P");
-}
-
-#[test]
-fn member_completion_records_method_call_receiver() {
-    let src = "struct P { v: i64 }\nimpl P {\n    fn get(&self) -> i64 { self.v }\n}\nfn main() { let p = P { v: 1 }; let _ = p.get(); }";
-    let (_, ri) = crate::member_completion(src);
-    let p = nth_word(src, "p", 1); // `p` in `p.get()`
-    let r = ri
-        .at_end(0, p + 1)
-        .expect("method-call receiver recorded");
-    assert_eq!(r.type_name, "P");
-}
-
-#[test]
-fn member_completion_nested_chain_by_end() {
-    let src = "struct Inner { z: i64 }\nstruct Outer { inner: Inner }\nfn main() { let o = Outer { inner: Inner { z: 1 } }; let _ = o.inner.z; }";
-    let (_, ri) = crate::member_completion(src);
-    let pos = src.find("o.inner.z").unwrap();
-    // receiver of `.inner` is `o` (Outer); end at end of `o`.
-    assert_eq!(ri.at_end(0, pos + 1).unwrap().type_name, "Outer");
-    // receiver of `.z` is `o.inner` (Inner); end at end of `inner`.
-    assert_eq!(
-        ri.at_end(0, pos + "o.inner".len()).unwrap().type_name,
-        "Inner"
-    );
-}
-
-#[test]
-fn member_completion_skips_unknown_receiver() {
-    let (_, ri1) = crate::member_completion("fn main() { let q = bogus(); let _ = q.z; }");
-    assert!(ri1.is_empty()); // Unknown receiver -> not recorded
-}
-
-#[test]
-fn member_completion_records_builtin_vec_receiver() {
-    // Vec receivers are now recorded (with a built-in member catalog) so `v.`
-    // completion lists Vec methods.
-    let src = "fn main() { let v = vec![1, 2]; v.push(3); }";
-    let p = nth_word(src, "v", 1); // `v` in `v.push`
-    let (tm, ri) = crate::member_completion(src);
-    let r = ri.at_end(0, p + 1).expect("Vec receiver recorded"); // len("v")==1
-    assert_eq!(r.type_name, "Vec<i64>");
-    let members = tm.get("Vec<i64>");
-    let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
-    assert!(names.contains(&"push"), "Vec methods: {names:?}");
-    assert!(names.contains(&"len"));
-    assert!(names.contains(&"get"));
-}
-
-#[test]
-fn member_completion_records_builtin_string_receiver() {
-    let src = "fn f(s: String) { let _ = s.len(); }";
-    let p = nth_word(src, "s", 1); // `s` in `s.len`
-    let (tm, ri) = crate::member_completion(src);
-    let r = ri.at_end(0, p + 1).expect("String receiver recorded");
-    assert_eq!(r.type_name, "String");
-    let names: Vec<&str> = tm.get("String").iter().map(|m| m.name.as_str()).collect();
-    assert!(names.contains(&"trim"), "String methods: {names:?}");
-    assert!(names.contains(&"to_uppercase"));
-    assert!(names.contains(&"split"));
-}
-
-#[test]
-fn member_completion_parse_error_is_empty() {
-    let (tm, ri) = crate::member_completion("struct {{{");
-    assert!(tm.is_empty() && ri.is_empty());
-}
-
-/// The recorded hover text for the binding whose display starts with `prefix`.
-fn binding_display(src: &str, prefix: &str) -> String {
-    let bt = crate::binding_types(src);
-    bt.hits()
-        .iter()
-        .find(|b| b.display.starts_with(prefix))
-        .unwrap_or_else(|| panic!("no binding starting with {prefix:?} in {:?}", bt.hits()))
-        .display
-        .clone()
-}
-
-#[test]
-fn empty_hashmap_infers_kv_from_insert() {
-    let src = "fn main() { let mut scores = HashMap::new(); scores.insert(\"alice\", 10); }";
-    assert_eq!(
-        binding_display(src, "let mut scores"),
-        "let mut scores: HashMap<String, i64>"
-    );
-}
-
-#[test]
-fn empty_vec_infers_element_from_push() {
-    let src = "fn main() { let mut xs = Vec::new(); xs.push(1); }";
-    assert_eq!(binding_display(src, "let mut xs"), "let mut xs: Vec<i64>");
-}
-
-#[test]
-fn empty_hashmap_infers_value_from_local_var() {
-    // Value comes from an already-bound local (side-effect-free quick type).
-    let src = "fn main() { let n = 3; let mut m = HashMap::new(); m.insert(\"k\", n); }";
-    assert_eq!(
-        binding_display(src, "let mut m"),
-        "let mut m: HashMap<String, i64>"
-    );
-}
-
-#[test]
-fn empty_hashmap_without_insert_stays_unknown() {
-    // No inserts: key/value remain `?` (no invented types).
-    let src = "fn main() { let mut m = HashMap::new(); }";
-    assert_eq!(binding_display(src, "let mut m"), "let mut m: HashMap<?, ?>");
-}
-
-#[test]
-fn annotated_hashmap_is_not_overridden_by_usage() {
-    // An explicit annotation wins; usage-based refinement only applies to
-    // inferred bindings.
-    let src = "fn main() { let mut m: HashMap<String, bool> = HashMap::new(); m.insert(\"k\", 1); }";
-    assert_eq!(
-        binding_display(src, "let mut m"),
-        "let mut m: HashMap<String, bool>"
-    );
-}
-
 #[test]
 fn hashmap_insert_value_type_mismatch_is_reported() {
     // scores inferred as HashMap<String, i64>; inserting a String value errors.
     let src = "fn main() {\n    let mut scores = HashMap::new();\n    scores.insert(\"alice\", 10);\n    scores.insert(\"bob\", \"world\");\n}";
     let (diags, _) = crate::check_diags(src);
     assert!(
-        diags.iter().any(|d| d.msg.contains("HashMap value type mismatch")
-            && d.msg.contains("expected `i64`")
-            && d.msg.contains("found `String`")),
+        diags
+            .iter()
+            .any(|d| d.msg.contains("HashMap value type mismatch")
+                && d.msg.contains("expected `i64`")
+                && d.msg.contains("found `String`")),
         "expected a HashMap value mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );
@@ -2913,7 +3225,9 @@ fn hashmap_key_type_mismatch_is_reported() {
     let src = "fn main() {\n    let mut m = HashMap::new();\n    m.insert(\"a\", 1);\n    m.insert(2, 3);\n}";
     let (diags, _) = crate::check_diags(src);
     assert!(
-        diags.iter().any(|d| d.msg.contains("HashMap key type mismatch")),
+        diags
+            .iter()
+            .any(|d| d.msg.contains("HashMap key type mismatch")),
         "expected a HashMap key mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );
@@ -2921,12 +3235,15 @@ fn hashmap_key_type_mismatch_is_reported() {
 
 #[test]
 fn vec_push_type_mismatch_is_reported() {
-    let src = "fn main() {\n    let mut xs = Vec::new();\n    xs.push(1);\n    xs.push(\"nope\");\n}";
+    let src =
+        "fn main() {\n    let mut xs = Vec::new();\n    xs.push(1);\n    xs.push(\"nope\");\n}";
     let (diags, _) = crate::check_diags(src);
     assert!(
-        diags.iter().any(|d| d.msg.contains("Vec element type mismatch")
-            && d.msg.contains("expected `i64`")
-            && d.msg.contains("found `String`")),
+        diags
+            .iter()
+            .any(|d| d.msg.contains("Vec element type mismatch")
+                && d.msg.contains("expected `i64`")
+                && d.msg.contains("found `String`")),
         "expected a Vec element mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );

@@ -575,6 +575,33 @@ fn associated_shadow() -> i64 { /*associated_call*/Vec::new() }
 }
 
 #[test]
+fn declared_option_and_result_types_shadow_builtin_type_semantics() {
+    const SOURCE: &str = r#"
+enum Option<T> { Value(T) }
+enum Result<T, E> { Value(T), Error(E) }
+
+fn user_types(
+    /*option_binding*/option: Option<i64>,
+    /*result_binding*/result: Result<i64, String>,
+) -> i64 {
+    0
+}
+"#;
+    let fixture = fixture(SOURCE, "user_types");
+
+    for (marker, expected_name) in [
+        ("/*option_binding*/", "Option"),
+        ("/*result_binding*/", "Result"),
+    ] {
+        let binding = binding_at(&fixture, marker);
+        let Some(Ty::Named(named)) = fixture.inference.type_of_binding(binding) else {
+            panic!("{expected_name} binding must use the declared type identity");
+        };
+        assert_eq!(named.path(), expected_name);
+    }
+}
+
+#[test]
 fn inference_calls_reports_expected_branch_constructor_vec_and_pattern_mismatches() {
     const SOURCE: &str = r#"
 fn bad_branch(flag: bool) -> i64 { if flag { "text" } else { 1 } }
@@ -884,7 +911,7 @@ fn inference_calls_cache_invalidates_when_declaration_module_signature_changes()
 }
 
 #[test]
-fn type_parity_supported_binding_types_match_compiler_oracle() {
+fn supported_binding_types_have_stable_native_inference() {
     const SOURCE: &str = r#"
 fn parity(flag: bool, count: i64) -> i64 {
     let integer = 1;
@@ -896,7 +923,6 @@ fn parity(flag: bool, count: i64) -> i64 {
 }
 "#;
     let fixture = fixture(SOURCE, "parity");
-    let compiler = ruac::binding_types(SOURCE);
     assert!(fixture.inference.diagnostics().is_empty());
     let (compiler_diagnostics, _) = ruac::check_diags(SOURCE);
     assert!(compiler_diagnostics.is_empty());
@@ -905,23 +931,18 @@ fn parity(flag: bool, count: i64) -> i64 {
         let Some(name) = data.name() else {
             continue;
         };
-        let range = fixture
-            .source_map
-            .binding_range(binding)
-            .expect("binding source range");
-        let compiler_binding = compiler
-            .at(0, range.range.start() as usize)
-            .unwrap_or_else(|| panic!("compiler has no type for `{name}`"));
-        let compiler_type = compiler_binding
-            .display
-            .rsplit_once(": ")
-            .map(|(_, ty)| ty)
-            .expect("compiler binding display contains a type");
         let native_type = fixture
             .inference
             .type_of_binding(binding)
             .unwrap_or_else(|| panic!("native inference has no type for `{name}`"));
-        assert_eq!(native_type.to_string(), compiler_type, "binding `{name}`");
+        let expected = match name {
+            "flag" | "truth" => "bool",
+            "count" | "integer" | "selected" => "i64",
+            "floating" => "f64",
+            "text" => "String",
+            other => panic!("unexpected binding `{other}`"),
+        };
+        assert_eq!(native_type.to_string(), expected, "binding `{name}`");
     }
 }
 

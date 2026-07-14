@@ -7,7 +7,11 @@
 //! directory the same way (`mod bar { mod baz; }` looks for `dir/bar/baz.rua`).
 
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
+use crate::diag::Diag;
+use crate::token::SourceRange;
+use rua_core::DiagnosticCode;
+use rua_project::{FileId, LogicalSourcePath, ProjectSpec, SourceProvider};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Recursively load file modules under `items`. `dir` is the directory used to
@@ -19,35 +23,222 @@ pub fn resolve_modules(
     items: &mut [Item],
     dir: Option<&Path>,
     files: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), Diag> {
+    let mut loading = HashSet::new();
+    resolve_modules_inner(items, dir, files, &mut loading)
+}
+
+/// Resolve file modules through an IO-free project/provider contract.
+pub fn resolve_modules_with_provider<P: SourceProvider>(
+    items: &mut [Item],
+    scope_dir: &LogicalSourcePath,
+    project: &ProjectSpec,
+    provider: &P,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    resolve_modules_with_provider_diagnostics(items, scope_dir, project, provider, files)
+}
+
+/// Resolve project modules while preserving machine-readable diagnostic data.
+pub fn resolve_modules_with_provider_diagnostics<P: SourceProvider>(
+    items: &mut [Item],
+    scope_dir: &LogicalSourcePath,
+    project: &ProjectSpec,
+    provider: &P,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    let mut loading = HashSet::new();
+    resolve_project_modules_inner(items, scope_dir, project, provider, files, &mut loading)
+}
+
+fn resolve_project_modules_inner<P: SourceProvider>(
+    items: &mut [Item],
+    scope_dir: &LogicalSourcePath,
+    project: &ProjectSpec,
+    provider: &P,
+    files: &mut Vec<String>,
+    loading: &mut HashSet<FileId>,
+) -> Result<(), Diag> {
+    for item in items.iter_mut() {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        let child_scope = scope_dir.join(&module.name).map_err(|error| {
+            module_error(
+                DiagnosticCode::NameInvalidModulePath,
+                format!("module `{}`: {error}", module.name),
+            )
+        })?;
+        if module.is_file {
+            let (file_id, logical_path, is_declaration) =
+                resolve_project_module(project, scope_dir, &module.name)?;
+            if !loading.insert(file_id) {
+                return Err(module_error(
+                    DiagnosticCode::NameModuleCycle,
+                    format!("module cycle while loading `{logical_path}`"),
+                ));
+            }
+            ensure_file_registry(files, file_id, &logical_path);
+            let source = provider.load(file_id).map_err(|error| {
+                module_error(
+                    DiagnosticCode::HostSourceRead,
+                    format!("reading `{logical_path}`: {error}"),
+                )
+            })?;
+            let mut program =
+                crate::parser::parse_with_semantic_file(&source.text, file_id.index())
+                    .map_err(parser_diagnostic)?;
+            set_file_program(&mut program, file_id.index());
+            module.items = program.items;
+            module.chunk = program.chunk;
+            module.source_order = program.source_order;
+            module.is_decl = is_declaration;
+            resolve_project_modules_inner(
+                &mut module.items,
+                &child_scope,
+                project,
+                provider,
+                files,
+                loading,
+            )?;
+            if is_declaration {
+                validate_declaration_contents(&module.items, &module.chunk, file_id.index())?;
+                mark_decl(&mut module.items);
+            }
+            loading.remove(&file_id);
+        } else {
+            resolve_project_modules_inner(
+                &mut module.items,
+                &child_scope,
+                project,
+                provider,
+                files,
+                loading,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_project_module(
+    project: &ProjectSpec,
+    scope_dir: &LogicalSourcePath,
+    name: &str,
+) -> Result<(FileId, LogicalSourcePath, bool), Diag> {
+    let candidates = [
+        (scope_dir.join(format!("{name}.rua")), false),
+        (scope_dir.join(format!("{name}/mod.rua")), false),
+        (scope_dir.join(format!("{name}.ruai")), true),
+        (scope_dir.join(format!("{name}/mod.ruai")), true),
+    ];
+    let mut found = Vec::new();
+    for (path, is_declaration) in candidates {
+        let path = path.map_err(|error| {
+            module_error(DiagnosticCode::NameInvalidModulePath, error.to_string())
+        })?;
+        if let Some(file_id) = project.file_for_path(&path) {
+            found.push((file_id, path, is_declaration));
+        }
+    }
+    if found.len() > 1 {
+        return Err(Diag::bare(
+            DiagnosticCode::NameAmbiguousImport,
+            format!(
+                "ambiguous module `{name}`: {}",
+                found
+                    .iter()
+                    .map(|(_, path, _)| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    found.into_iter().next().ok_or_else(|| {
+        module_error(
+            DiagnosticCode::NameModuleNotFound,
+            format!("cannot find file for module `{name}` under logical root `{scope_dir}`"),
+        )
+    })
+}
+
+fn module_error(code: DiagnosticCode, message: String) -> Diag {
+    Diag::bare(code, message)
+}
+
+fn parser_diagnostic(error: crate::parser::ParseError) -> Diag {
+    Diag::from_structured(
+        error.diagnostic().clone(),
+        error.line(),
+        format!("parse error: {}", error.message()),
+    )
+}
+
+fn ensure_file_registry(files: &mut Vec<String>, file_id: FileId, path: &LogicalSourcePath) {
+    let index = file_id.index() as usize;
+    if files.len() <= index {
+        files.resize(index + 1, String::new());
+    }
+    files[index] = path.to_string();
+}
+
+fn resolve_modules_inner(
+    items: &mut [Item],
+    dir: Option<&Path>,
+    files: &mut Vec<String>,
+    loading: &mut HashSet<PathBuf>,
+) -> Result<(), Diag> {
     for item in items.iter_mut() {
         let Item::Mod(m) = item else { continue };
         if m.is_file {
             let dir = dir.ok_or_else(|| {
-                format!(
-                    "`mod {};` (file module) requires compiling from a file, not a string",
-                    m.name
+                module_error(
+                    DiagnosticCode::NameModuleNotFound,
+                    format!(
+                        "`mod {};` (file module) requires compiling from a file, not a string",
+                        m.name
+                    ),
                 )
             })?;
             let (file, child_dir, is_decl) = resolve_mod_file(dir, &m.name)?;
-            let src = std::fs::read_to_string(&file)
-                .map_err(|e| format!("reading {}: {}", file.display(), e))?;
-            let mut sub = crate::parser::parse(&src)
-                .map_err(|e| format!("{}: {}", file.display(), e))?;
+            let canonical = file.canonicalize().map_err(|error| {
+                module_error(
+                    DiagnosticCode::HostSourceRead,
+                    format!("canonicalizing {}: {error}", file.display()),
+                )
+            })?;
+            if !loading.insert(canonical.clone()) {
+                return Err(module_error(
+                    DiagnosticCode::NameModuleCycle,
+                    format!("module cycle while loading {}", canonical.display()),
+                ));
+            }
+            let src = std::fs::read_to_string(&file).map_err(|error| {
+                module_error(
+                    DiagnosticCode::HostSourceRead,
+                    format!("reading {}: {error}", file.display()),
+                )
+            })?;
             let id = files.len() as u32;
             files.push(file.display().to_string());
+            let mut sub =
+                crate::parser::parse_with_semantic_file(&src, id).map_err(parser_diagnostic)?;
             set_file_items(&mut sub.items, id);
+            set_file_block(&mut sub.chunk, id);
             m.items = sub.items;
+            m.chunk = sub.chunk;
+            m.source_order = sub.source_order;
             // A `.ruai` module (and everything under it) is declaration-only.
             m.is_decl = is_decl;
-            resolve_modules(&mut m.items, Some(&child_dir), files)?;
+            resolve_modules_inner(&mut m.items, Some(&child_dir), files, loading)?;
             if is_decl {
+                validate_declaration_contents(&m.items, &m.chunk, id)?;
                 mark_decl(&mut m.items);
             }
+            loading.remove(&canonical);
         } else {
             // Inline module: its file-children live under `dir/<name>/`.
             let child_dir = dir.map(|d| d.join(&m.name));
-            resolve_modules(&mut m.items, child_dir.as_deref(), files)?;
+            resolve_modules_inner(&mut m.items, child_dir.as_deref(), files, loading)?;
         }
     }
     Ok(())
@@ -65,32 +256,212 @@ fn set_file_items(items: &mut [Item], id: u32) {
         match it {
             Item::Fn(f) => {
                 f.name_span.file = id;
+                set_file_generics(&mut f.generics, id);
+                set_file_signature(&mut f.params, f.ret.as_mut(), id);
                 set_file_block(&mut f.body, id);
             }
             Item::Struct(s) => {
-                // Field definition spans (used by LSP cross-file member go-to-def).
+                set_file_generics(&mut s.generics, id);
                 for field in &mut s.fields {
                     field.name_span.file = id;
+                    set_file_type(&mut field.ty, id);
+                }
+            }
+            Item::Enum(e) => {
+                set_file_generics(&mut e.generics, id);
+                for variant in &mut e.variants {
+                    match &mut variant.kind {
+                        VariantKind::Unit => {}
+                        VariantKind::Tuple(types) => {
+                            for ty in types {
+                                set_file_type(ty, id);
+                            }
+                        }
+                        VariantKind::Struct(fields) => {
+                            for field in fields {
+                                field.name_span.file = id;
+                                set_file_type(&mut field.ty, id);
+                            }
+                        }
+                    }
                 }
             }
             Item::Impl(im) => {
+                set_file_generics(&mut im.generics, id);
                 for m in &mut im.methods {
                     m.name_span.file = id;
+                    set_file_generics(&mut m.generics, id);
+                    set_file_signature(&mut m.params, m.ret.as_mut(), id);
                     set_file_block(&mut m.body, id);
                 }
             }
             Item::Trait(t) => {
+                set_file_generics(&mut t.generics, id);
                 for tm in &mut t.methods {
                     tm.name_span.file = id;
+                    set_file_generics(&mut tm.generics, id);
+                    set_file_signature(&mut tm.params, tm.ret.as_mut(), id);
                     if let Some(b) = &mut tm.default {
                         set_file_block(b, id);
                     }
                 }
             }
+            Item::Extern(block) => {
+                for function in &mut block.fns {
+                    function.name_span.file = id;
+                    set_file_signature(&mut function.params, function.ret.as_mut(), id);
+                }
+            }
             // A nested inline module shares this file's id.
-            Item::Mod(m) => set_file_items(&mut m.items, id),
-            _ => {}
+            Item::Mod(m) => {
+                set_file_items(&mut m.items, id);
+                set_file_block(&mut m.chunk, id);
+            }
+            Item::Use(_) => {}
         }
+    }
+}
+
+pub(crate) fn set_file_program(program: &mut Program, file: u32) {
+    set_file_items(&mut program.items, file);
+    set_file_block(&mut program.chunk, file);
+}
+
+pub(crate) fn validate_declaration_program(program: &Program, file: u32) -> Result<(), Diag> {
+    validate_declaration_contents(&program.items, &program.chunk, file)
+}
+
+fn validate_declaration_contents(items: &[Item], chunk: &Block, file: u32) -> Result<(), Diag> {
+    if block_has_executable_body(chunk) {
+        return Err(invalid_declaration(
+            fallback_span(file),
+            "declaration files cannot contain top-level executable statements".to_string(),
+        ));
+    }
+    validate_declaration_items(items, file)
+}
+
+fn validate_declaration_items(items: &[Item], file: u32) -> Result<(), Diag> {
+    for item in items {
+        match item {
+            Item::Fn(function) if block_has_executable_body(&function.body) => {
+                return Err(invalid_declaration(
+                    function.name_span,
+                    format!(
+                        "function `{}` in a declaration file must have an empty body",
+                        function.name
+                    ),
+                ));
+            }
+            Item::Impl(implementation) => {
+                for method in &implementation.methods {
+                    if block_has_executable_body(&method.body) {
+                        return Err(invalid_declaration(
+                            method.name_span,
+                            format!(
+                                "method `{}` in a declaration file must have an empty body",
+                                method.name
+                            ),
+                        ));
+                    }
+                }
+            }
+            Item::Trait(trait_decl) => {
+                for method in &trait_decl.methods {
+                    if method
+                        .default
+                        .as_ref()
+                        .is_some_and(block_has_executable_body)
+                    {
+                        return Err(invalid_declaration(
+                            method.name_span,
+                            format!(
+                                "trait method `{}` in a declaration file must have an empty body",
+                                method.name
+                            ),
+                        ));
+                    }
+                }
+            }
+            Item::Mod(module) => {
+                if block_has_executable_body(&module.chunk) {
+                    return Err(invalid_declaration(
+                        fallback_span(file),
+                        format!(
+                            "module `{}` in a declaration file cannot contain executable statements",
+                            module.name
+                        ),
+                    ));
+                }
+                validate_declaration_items(&module.items, file)?;
+            }
+            Item::Fn(_) | Item::Struct(_) | Item::Enum(_) | Item::Extern(_) | Item::Use(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn block_has_executable_body(block: &Block) -> bool {
+    !block.stmts.is_empty() || block.tail.is_some()
+}
+
+fn fallback_span(file: u32) -> SourceRange {
+    let mut span = SourceRange::new(0, 0, 1);
+    span.file = file;
+    span
+}
+
+fn invalid_declaration(span: SourceRange, message: String) -> Diag {
+    Diag::new(
+        DiagnosticCode::NameInvalidDeclaration,
+        span.file,
+        span.start,
+        span.len,
+        span.line,
+        message,
+    )
+}
+
+fn set_file_generics(generics: &mut [GenericParam], file: u32) {
+    for generic in generics {
+        generic.id.file = file;
+        for bound in &mut generic.bounds {
+            bound.id.file = file;
+        }
+    }
+}
+
+fn set_file_signature(parameters: &mut [Param], return_type: Option<&mut Type>, file: u32) {
+    for parameter in parameters {
+        parameter.name_span.file = file;
+        set_file_type(&mut parameter.ty, file);
+    }
+    if let Some(return_type) = return_type {
+        set_file_type(return_type, file);
+    }
+}
+
+fn set_file_type(ty: &mut Type, file: u32) {
+    match ty {
+        Type::Path { id, args, .. } => {
+            id.file = file;
+            for argument in args {
+                set_file_type(argument, file);
+            }
+        }
+        Type::Ref { inner, .. } => set_file_type(inner, file),
+        Type::Function { params, ret } => {
+            for parameter in params {
+                set_file_type(parameter, file);
+            }
+            set_file_type(ret, file);
+        }
+        Type::Tuple(items) => {
+            for item in items {
+                set_file_type(item, file);
+            }
+        }
+        Type::Unit => {}
     }
 }
 
@@ -105,7 +476,18 @@ fn set_file_block(b: &mut Block, id: u32) {
 
 fn set_file_stmt(s: &mut Stmt, id: u32) {
     match s {
-        Stmt::Let { init, .. } => set_file_expr(init, id),
+        Stmt::Let {
+            name_span,
+            ty,
+            init,
+            ..
+        } => {
+            name_span.file = id;
+            if let Some(ty) = ty {
+                set_file_type(ty, id);
+            }
+            set_file_expr(init, id);
+        }
         Stmt::Expr(e) => set_file_expr(e, id),
         Stmt::Return(Some(e)) => set_file_expr(e, id),
         Stmt::Return(None) => {}
@@ -114,11 +496,20 @@ fn set_file_stmt(s: &mut Stmt, id: u32) {
             set_file_block(body, id);
         }
         Stmt::Loop { body } => set_file_block(body, id),
-        Stmt::For { iter, body, .. } => {
+        Stmt::For {
+            var_span,
+            iter,
+            body,
+            ..
+        } => {
+            var_span.file = id;
             set_file_expr(iter, id);
             set_file_block(body, id);
         }
-        Stmt::WhileLet { expr, body, .. } => {
+        Stmt::WhileLet {
+            pat, expr, body, ..
+        } => {
+            set_file_pattern(pat, id);
             set_file_expr(expr, id);
             set_file_block(body, id);
         }
@@ -127,13 +518,25 @@ fn set_file_stmt(s: &mut Stmt, id: u32) {
 }
 
 fn set_file_expr(e: &mut Expr, id: u32) {
+    e.id.file = id;
     e.span.file = id;
     match &mut e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
-        ExprKind::Closure { params, body, .. } => {
+        ExprKind::Closure {
+            params, ret, body, ..
+        } => {
             for parameter in params {
                 parameter.name_span.file = id;
+                if let Some(ty) = &mut parameter.ty {
+                    set_file_type(ty, id);
+                }
+            }
+            if let Some(ret) = ret {
+                set_file_type(ret, id);
             }
             match body {
                 ClosureBody::Expr(expr) => set_file_expr(expr, id),
@@ -153,12 +556,16 @@ fn set_file_expr(e: &mut Expr, id: u32) {
         }
         ExprKind::MethodCall {
             recv,
+            type_args,
             args,
             method_span,
             ..
         } => {
             method_span.file = id;
             set_file_expr(recv, id);
+            for ty in type_args {
+                set_file_type(ty, id);
+            }
             for a in args {
                 set_file_expr(a, id);
             }
@@ -198,11 +605,13 @@ fn set_file_expr(e: &mut Expr, id: u32) {
             set_file_else(else_block, id);
         }
         ExprKind::IfLet {
+            pat,
             expr,
             then_block,
             else_block,
             ..
         } => {
+            set_file_pattern(pat, id);
             set_file_expr(expr, id);
             set_file_block(then_block, id);
             set_file_else(else_block, id);
@@ -215,10 +624,38 @@ fn set_file_expr(e: &mut Expr, id: u32) {
         ExprKind::Match { scrut, arms } => {
             set_file_expr(scrut, id);
             for arm in arms {
+                for pattern in &mut arm.pats {
+                    set_file_pattern(pattern, id);
+                }
                 if let Some(g) = &mut arm.guard {
                     set_file_expr(g, id);
                 }
                 set_file_expr(&mut arm.body, id);
+            }
+        }
+    }
+}
+
+fn set_file_pattern(pattern: &mut Pattern, file: u32) {
+    match pattern {
+        Pattern::Wildcard => {}
+        Pattern::Binding(_, span) => span.file = file,
+        Pattern::Literal(expression) => set_file_expr(expression, file),
+        Pattern::Range { lo, hi, .. } => {
+            set_file_expr(lo, file);
+            set_file_expr(hi, file);
+        }
+        Pattern::Path { id, .. } => id.file = file,
+        Pattern::TupleVariant { id, elems, .. } => {
+            id.file = file;
+            for element in elems {
+                set_file_pattern(element, file);
+            }
+        }
+        Pattern::StructVariant { id, fields, .. } => {
+            id.file = file;
+            for (_, field) in fields {
+                set_file_pattern(field, file);
             }
         }
     }
@@ -232,315 +669,53 @@ fn set_file_else(else_block: &mut Option<Box<ElseBranch>>, id: u32) {
     }
 }
 
-// --- `use` desugaring -------------------------------------------------------
-//
-// Each `use a::b as c;` introduces, in its module scope, an alias `c -> [a, b]`.
-// Rather than emit runtime alias locals (which would have module-ordering
-// hazards and complicate codegen), we rewrite every bare reference whose head is
-// an in-scope alias to the fully-qualified path (`c::x` -> `a::b::x`). Local
-// bindings that shadow an alias are respected via a lexical scope stack.
-
-/// Rewrite all `use`-aliased paths in the program to fully-qualified paths.
-pub fn resolve_uses(program: &mut Program) {
-    resolve_uses_in_scope(&mut program.items);
-}
-
-fn resolve_uses_in_scope(items: &mut [Item]) {
-    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
-    for it in items.iter() {
-        if let Item::Use(u) = it {
-            for imp in &u.imports {
-                let name = imp
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| imp.path.last().cloned().unwrap_or_default());
-                aliases.insert(name, imp.path.clone());
-            }
-        }
-    }
-    for it in items.iter_mut() {
-        match it {
-            Item::Fn(f) => rewrite_fn(&f.params, f.has_self, &mut f.body, &aliases),
-            Item::Impl(im) => {
-                for m in &mut im.methods {
-                    rewrite_fn(&m.params, m.has_self, &mut m.body, &aliases);
-                }
-            }
-            Item::Trait(t) => {
-                for tm in &mut t.methods {
-                    if let Some(b) = &mut tm.default {
-                        rewrite_fn(&tm.params, tm.has_self, b, &aliases);
-                    }
-                }
-            }
-            // Nested modules carry their own `use` scope.
-            Item::Mod(md) => resolve_uses_in_scope(&mut md.items),
-            _ => {}
-        }
-    }
-}
-
-type Aliases = HashMap<String, Vec<String>>;
-type Scopes = Vec<HashSet<String>>;
-
-fn rewrite_fn(params: &[Param], has_self: bool, body: &mut Block, aliases: &Aliases) {
-    let mut scopes: Scopes = vec![HashSet::new()];
-    if has_self {
-        scopes[0].insert("self".to_string());
-    }
-    for p in params {
-        scopes[0].insert(p.name.clone());
-    }
-    rewrite_block(body, aliases, &mut scopes);
-}
-
-fn rewrite_block(b: &mut Block, aliases: &Aliases, scopes: &mut Scopes) {
-    scopes.push(HashSet::new());
-    for s in &mut b.stmts {
-        rewrite_stmt(s, aliases, scopes);
-    }
-    if let Some(t) = &mut b.tail {
-        rewrite_expr(t, aliases, scopes);
-    }
-    scopes.pop();
-}
-
-fn rewrite_stmt(s: &mut Stmt, aliases: &Aliases, scopes: &mut Scopes) {
-    match s {
-        Stmt::Let { name, init, .. } => {
-            rewrite_expr(init, aliases, scopes);
-            bind(scopes, name.clone());
-        }
-        Stmt::Expr(e) => rewrite_expr(e, aliases, scopes),
-        Stmt::Return(Some(e)) => rewrite_expr(e, aliases, scopes),
-        Stmt::Return(None) => {}
-        Stmt::While { cond, body } => {
-            rewrite_expr(cond, aliases, scopes);
-            rewrite_block(body, aliases, scopes);
-        }
-        Stmt::Loop { body } => rewrite_block(body, aliases, scopes),
-        Stmt::For { var, iter, body, .. } => {
-            rewrite_expr(iter, aliases, scopes);
-            scopes.push(HashSet::new());
-            bind(scopes, var.clone());
-            rewrite_block(body, aliases, scopes);
-            scopes.pop();
-        }
-        Stmt::WhileLet { pat, expr, body } => {
-            rewrite_expr(expr, aliases, scopes);
-            scopes.push(HashSet::new());
-            bind_pattern(scopes, pat);
-            rewrite_block(body, aliases, scopes);
-            scopes.pop();
-        }
-        Stmt::Break | Stmt::Continue => {}
-    }
-}
-
-fn rewrite_expr(e: &mut Expr, aliases: &Aliases, scopes: &mut Scopes) {
-    match &mut e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
-        ExprKind::Closure { params, body, .. } => {
-            scopes.push(HashSet::new());
-            for parameter in params {
-                bind(scopes, parameter.name.clone());
-            }
-            match body {
-                ClosureBody::Expr(expr) => rewrite_expr(expr, aliases, scopes),
-                ClosureBody::Block(block) => rewrite_block(block, aliases, scopes),
-            }
-            scopes.pop();
-        }
-        ExprKind::Path(segs) => rewrite_path(segs, aliases, scopes),
-        ExprKind::Unary { expr, .. } => rewrite_expr(expr, aliases, scopes),
-        ExprKind::Binary { lhs, rhs, .. } => {
-            rewrite_expr(lhs, aliases, scopes);
-            rewrite_expr(rhs, aliases, scopes);
-        }
-        ExprKind::Call { callee, args } => {
-            rewrite_expr(callee, aliases, scopes);
-            for a in args {
-                rewrite_expr(a, aliases, scopes);
-            }
-        }
-        ExprKind::MethodCall { recv, args, .. } => {
-            rewrite_expr(recv, aliases, scopes);
-            for a in args {
-                rewrite_expr(a, aliases, scopes);
-            }
-        }
-        ExprKind::Field { base, .. } => rewrite_expr(base, aliases, scopes),
-        ExprKind::StructLit { path, fields } => {
-            rewrite_path(path, aliases, scopes);
-            for (_, v) in fields {
-                rewrite_expr(v, aliases, scopes);
-            }
-        }
-        ExprKind::Try { expr } => rewrite_expr(expr, aliases, scopes),
-        ExprKind::Match { scrut, arms } => {
-            rewrite_expr(scrut, aliases, scopes);
-            for arm in arms {
-                for p in &mut arm.pats {
-                    rewrite_pattern_paths(p, aliases, scopes);
-                }
-                scopes.push(HashSet::new());
-                for p in &arm.pats {
-                    bind_pattern(scopes, p);
-                }
-                if let Some(g) = &mut arm.guard {
-                    rewrite_expr(g, aliases, scopes);
-                }
-                rewrite_expr(&mut arm.body, aliases, scopes);
-                scopes.pop();
-            }
-        }
-        ExprKind::Range { start, end, .. } => {
-            rewrite_expr(start, aliases, scopes);
-            rewrite_expr(end, aliases, scopes);
-        }
-        ExprKind::Index { base, index } => {
-            rewrite_expr(base, aliases, scopes);
-            rewrite_expr(index, aliases, scopes);
-        }
-        ExprKind::MacroCall { args, .. } => {
-            for a in args {
-                rewrite_expr(a, aliases, scopes);
-            }
-        }
-        ExprKind::If {
-            cond,
-            then_block,
-            else_block,
-        } => {
-            rewrite_expr(cond, aliases, scopes);
-            rewrite_block(then_block, aliases, scopes);
-            rewrite_else(else_block, aliases, scopes);
-        }
-        ExprKind::IfLet {
-            pat,
-            expr,
-            then_block,
-            else_block,
-        } => {
-            rewrite_expr(expr, aliases, scopes);
-            rewrite_pattern_paths(pat, aliases, scopes);
-            scopes.push(HashSet::new());
-            bind_pattern(scopes, pat);
-            rewrite_block(then_block, aliases, scopes);
-            scopes.pop();
-            rewrite_else(else_block, aliases, scopes);
-        }
-        ExprKind::Block(b) => rewrite_block(b, aliases, scopes),
-        ExprKind::Assign { target, value } => {
-            rewrite_expr(target, aliases, scopes);
-            rewrite_expr(value, aliases, scopes);
-        }
-    }
-}
-
-fn rewrite_else(else_block: &mut Option<Box<ElseBranch>>, aliases: &Aliases, scopes: &mut Scopes) {
-    match else_block.as_deref_mut() {
-        Some(ElseBranch::Block(b)) => rewrite_block(b, aliases, scopes),
-        Some(ElseBranch::If(inner)) => rewrite_expr(inner, aliases, scopes),
-        None => {}
-    }
-}
-
-/// Replace `alias::rest` / bare `alias` with the alias target, unless shadowed.
-fn rewrite_path(segs: &mut Vec<String>, aliases: &Aliases, scopes: &Scopes) {
-    if segs.is_empty() {
-        return;
-    }
-    let head = &segs[0];
-    if is_local(scopes, head) {
-        return;
-    }
-    if let Some(target) = aliases.get(head) {
-        let mut new = target.clone();
-        new.extend(segs.iter().skip(1).cloned());
-        *segs = new;
-    }
-}
-
-/// Rewrite the leading path of variant patterns (bindings never alias).
-fn rewrite_pattern_paths(p: &mut Pattern, aliases: &Aliases, scopes: &Scopes) {
-    match p {
-        Pattern::Path(segs) => rewrite_path(segs, aliases, scopes),
-        Pattern::TupleVariant { path, elems } => {
-            rewrite_path(path, aliases, scopes);
-            for e in elems {
-                rewrite_pattern_paths(e, aliases, scopes);
-            }
-        }
-        Pattern::StructVariant { path, fields, .. } => {
-            rewrite_path(path, aliases, scopes);
-            for (_, fp) in fields {
-                rewrite_pattern_paths(fp, aliases, scopes);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn bind(scopes: &mut Scopes, name: String) {
-    if let Some(top) = scopes.last_mut() {
-        top.insert(name);
-    }
-}
-
-fn bind_pattern(scopes: &mut Scopes, p: &Pattern) {
-    match p {
-        Pattern::Binding(n, _) => bind(scopes, n.clone()),
-        Pattern::TupleVariant { elems, .. } => {
-            for e in elems {
-                bind_pattern(scopes, e);
-            }
-        }
-        Pattern::StructVariant { fields, .. } => {
-            for (_, fp) in fields {
-                bind_pattern(scopes, fp);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_local(scopes: &Scopes, name: &str) -> bool {
-    scopes.iter().any(|s| s.contains(name))
-}
-
 /// Locate the file backing `mod <name>;` and the directory for its children,
 /// plus whether it is a declaration-only `.ruai` file. Search order:
 /// `dir/name.rua`, `dir/name/mod.rua`, then the `.ruai` equivalents.
-fn resolve_mod_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, bool), String> {
+fn resolve_mod_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, bool), Diag> {
     let child_dir = dir.join(name);
-    let flat = dir.join(format!("{name}.rua"));
-    if flat.is_file() {
-        return Ok((flat, child_dir, false));
+    let candidates = [
+        (dir.join(format!("{name}.rua")), false),
+        (child_dir.join("mod.rua"), false),
+        (dir.join(format!("{name}.ruai")), true),
+        (child_dir.join("mod.ruai"), true),
+    ];
+    let found = candidates
+        .iter()
+        .filter(|(path, _)| path.is_file())
+        .collect::<Vec<_>>();
+    if found.len() > 1 {
+        return Err(module_error(
+            DiagnosticCode::NameAmbiguousImport,
+            format!(
+                "ambiguous module `{name}`: {}",
+                found
+                    .iter()
+                    .map(|(path, _)| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     }
-    let nested = child_dir.join("mod.rua");
-    if nested.is_file() {
-        return Ok((nested, child_dir, false));
+    if let Some((file, is_decl)) = found.first() {
+        return Ok((file.clone(), child_dir, *is_decl));
     }
-    let flat_decl = dir.join(format!("{name}.ruai"));
-    if flat_decl.is_file() {
-        return Ok((flat_decl, child_dir, true));
-    }
-    let nested_decl = child_dir.join("mod.ruai");
-    if nested_decl.is_file() {
-        return Ok((nested_decl, child_dir, true));
-    }
-    Err(format!(
-        "cannot find file for module `{}` (looked for {}, {} and their `.ruai` forms)",
-        name,
-        flat.display(),
-        nested.display()
+    let flat = &candidates[0].0;
+    let nested = &candidates[1].0;
+    Err(module_error(
+        DiagnosticCode::NameModuleNotFound,
+        format!(
+            "cannot find file for module `{}` (looked for {}, {} and their `.ruai` forms)",
+            name,
+            flat.display(),
+            nested.display()
+        ),
     ))
 }
 
 /// Recursively mark nested inline modules of a `.ruai` module as declaration-only
 /// (file sub-modules are marked at load time in `resolve_modules`).
-fn mark_decl(items: &mut [Item]) {
+pub(crate) fn mark_decl(items: &mut [Item]) {
     for it in items.iter_mut() {
         if let Item::Mod(m) = it {
             m.is_decl = true;

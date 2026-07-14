@@ -1,0 +1,16 @@
+[package]
+name = "rua-lex"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless shared lexer for Rua compiler and IDE parsers."
+
+[lib]
+name = "rua_lex"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rua-core.workspace = true
+
+[dev-dependencies]
+proptest = "1"

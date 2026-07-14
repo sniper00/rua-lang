@@ -1,0 +1,31 @@
+//! Builtin `Vec<T>` — a growable array.
+//!
+//! At runtime, `Vec<T>` compiles to a Lua table with `rt.vec` metatable.
+
+pub struct Vec<T> {}
+
+impl<T> Vec<T> {
+    /// Create a new empty vector.
+    pub fn new() -> Vec<T> {}
+
+    /// Return the number of elements.
+    pub fn len(&self) -> i64 {}
+
+    /// Get the element at `index`, or `None` if out of bounds.
+    pub fn get(&self, index: i64) -> Option<T> {}
+
+    /// Append `value` to the end.
+    pub fn push(&mut self, value: T) {}
+
+    /// Remove and return the last element, or `None` if empty.
+    pub fn pop(&mut self) -> Option<T> {}
+
+    /// Replace the element at `index` with `value`.
+    pub fn set(&mut self, index: i64, value: T) {}
+
+    /// Borrow an iterator over the elements.
+    pub fn iter(&self) -> Iter<T> {}
+
+    /// Consume the vector into an iterator.
+    pub fn into_iter(self) -> Iter<T> {}
+}

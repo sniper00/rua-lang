@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn call_hierarchy_prepare_on_function() {
@@ -43,10 +43,15 @@ fn call_hierarchy_incoming_finds_callers() {
     assert!(item.is_some(), "call hierarchy prepare should succeed");
 
     let incoming = srv.snapshot().call_hierarchy_incoming(&item.unwrap());
-    // Should find at least caller_a which directly calls target
+    let mut names = incoming
+        .iter()
+        .map(|caller| caller.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["caller_a", "caller_b"]);
     assert!(
-        !incoming.is_empty(),
-        "should find at least one incoming call, got {incoming:?}"
+        incoming.iter().all(|caller| caller.call_sites.len() == 1),
+        "each caller should expose its exact call site: {incoming:?}"
     );
 }
 
@@ -64,13 +69,16 @@ fn call_hierarchy_outgoing_finds_callees() {
     let item = srv.snapshot().call_hierarchy_prepare(pp);
     assert!(item.is_some(), "call hierarchy prepare should succeed");
 
-    let _outgoing = srv.snapshot().call_hierarchy_outgoing(&item.unwrap());
-    // Outgoing calls may return empty if call graph resolution isn't
-    // fully wired. Verify the caller itself was correctly identified.
-    let caller_item = srv.snapshot().call_hierarchy_prepare(pp).unwrap();
+    let outgoing = srv.snapshot().call_hierarchy_outgoing(&item.unwrap());
+    let mut names = outgoing
+        .iter()
+        .map(|callee| callee.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["helper_a", "helper_b"]);
     assert!(
-        caller_item.name.contains("caller"),
-        "call hierarchy prepare should identify the caller"
+        outgoing.iter().all(|callee| callee.call_sites.len() == 1),
+        "each callee should expose its exact call site: {outgoing:?}"
     );
 }
 
@@ -78,7 +86,10 @@ fn call_hierarchy_outgoing_finds_callees() {
 fn call_hierarchy_on_non_callable_returns_none() {
     let uri = uri("/test/callhier_none.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, "struct Point { x: i64 }\nfn main() { let p = Point { x: 0 }; }");
+    srv.open(
+        &uri,
+        "struct Point { x: i64 }\nfn main() { let p = Point { x: 0 }; }",
+    );
 
     // cursor on `Point` struct name
     let pp = srv.pp(&uri, 0, 7).unwrap();
@@ -103,4 +114,32 @@ fn call_hierarchy_on_keyword_returns_none() {
         item.is_none(),
         "call hierarchy should return None for a keyword"
     );
+}
+
+#[test]
+fn call_hierarchy_isolates_same_named_functions_by_definition_identity() {
+    let uri = uri("/test/callhier_same_names.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "mod first {\n    pub fn helper() {}\n    pub fn caller() { helper(); }\n}\nmod second {\n    pub fn helper() {}\n    pub fn caller() { helper(); }\n}\n",
+    );
+
+    let first_helper = srv
+        .snapshot()
+        .call_hierarchy_prepare(srv.pp(&uri, 1, 12).unwrap())
+        .unwrap();
+    let second_helper = srv
+        .snapshot()
+        .call_hierarchy_prepare(srv.pp(&uri, 5, 12).unwrap())
+        .unwrap();
+    let first_caller = srv
+        .snapshot()
+        .call_hierarchy_prepare(srv.pp(&uri, 2, 12).unwrap())
+        .unwrap();
+    let outgoing = srv.snapshot().call_hierarchy_outgoing(&first_caller);
+
+    assert_eq!(outgoing.len(), 1, "{outgoing:?}");
+    assert_eq!(outgoing[0].target, first_helper.target);
+    assert_ne!(outgoing[0].target, second_helper.target);
 }

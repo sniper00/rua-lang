@@ -1,19 +1,27 @@
 use std::{fmt::Write as _, fs, path::PathBuf};
 
 use rua_analysis::{
-    AnalysisHost, Change, Diagnostic, DiagnosticOrigin, FileId, SemanticTokenKind, TextRange,
+    AnalysisHost, Change, Diagnostic, DiagnosticOrigin, FileId, FileKind, ProjectData, ProjectId,
+    ProjectPosition, ProjectRoot, SemanticTokenKind, SourceRootId, SourceRootKind, TextRange,
     reconcile_diagnostics,
 };
 
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 
-fn analysis(source: &str) -> (rua_analysis::Analysis, FileId) {
+fn analysis(source: &str) -> (rua_analysis::Analysis, FileId, ProjectId) {
     let file_id = FileId::new(0);
+    let root_id = SourceRootId::new(0);
+    let project_id = ProjectId::new(0);
     let mut change = Change::new();
-    change.set_file_text(file_id, source);
+    change.set_source_root(root_id, SourceRootKind::Workspace);
+    change.set_file_with_path(file_id, root_id, FileKind::Source, "main.rua", source);
+    change.set_project(
+        project_id,
+        ProjectData::new(file_id, [ProjectRoot::at_root(root_id)], []),
+    );
     let mut host = AnalysisHost::new();
     host.apply_change(change);
-    (host.analysis(), file_id)
+    (host.analysis(), file_id, project_id)
 }
 
 fn nth_word(source: &str, needle: &str, occurrence: usize) -> usize {
@@ -42,7 +50,7 @@ fn closure_iterator_ide_exposes_types_and_structural_tokens() {
         "  (0..3).map(|value| value + 1).filter(|item| item > 1).count()\n",
         "}\n",
     );
-    let (analysis, file_id) = analysis(source);
+    let (analysis, file_id, _) = analysis(source);
     let parameters = analysis.closure_parameters(file_id);
     assert_eq!(parameters.len(), 2);
     assert!(parameters.iter().all(|parameter| parameter.ty() == "i64"));
@@ -82,22 +90,40 @@ fn closure_iterator_ide_supports_goto_completion_references_and_rename() {
         "  let count = values.iter().map(|item| item + 1).count();\n",
         "}\n",
     );
-    let analysis = rua_syntax::analysis::Analysis::new(source);
+    let (analysis, file_id, project_id) = analysis(source);
     let definition = nth_word(source, "item", 0);
     let use_site = nth_word(source, "item", 1);
     let resolved = analysis
-        .definition_at(use_site)
+        .goto_definition(ProjectPosition::at(project_id, file_id, use_site as u32))
         .expect("closure parameter goto");
-    assert_eq!(resolved.target_range.0, definition);
-    assert_eq!(resolved.detail, "closure parameter item: i64");
+    assert_eq!(resolved.target_range().range.start() as usize, definition);
     assert!(
         analysis
-            .scope_locals(use_site)
+            .completions(ProjectPosition::at(project_id, file_id, use_site as u32))
             .iter()
-            .any(|local| { local.name == "item" && local.detail == "closure parameter item: i64" })
+            .any(|item| item.label() == "item" && item.detail() == Some("item: i64"))
     );
-    assert_eq!(analysis.references_at(use_site).len(), 2);
-    assert_eq!(analysis.rename_edits(use_site, "element").unwrap().len(), 2);
+    assert_eq!(
+        analysis
+            .references(
+                ProjectPosition::at(project_id, file_id, use_site as u32),
+                true,
+            )
+            .len(),
+        2
+    );
+    assert_eq!(
+        analysis
+            .rename(
+                ProjectPosition::at(project_id, file_id, use_site as u32),
+                "element",
+            )
+            .unwrap()
+            .file_edits()[0]
+            .edits()
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -108,10 +134,13 @@ fn closure_iterator_ide_reconciles_fast_and_compiler_diagnostics() {
         "  let count = values.iter().filter(|value| value + 1).count();\n",
         "}\n",
     );
-    let (analysis, file_id) = analysis(source);
+    let (analysis, file_id, _) = analysis(source);
     let fast = analysis.diagnostics(file_id);
     // Native type diagnostics now detect the filter predicate mismatch.
-    assert!(!fast.is_empty(), "native diagnostics should detect filter type error");
+    assert!(
+        !fast.is_empty(),
+        "native diagnostics should detect filter type error"
+    );
 
     let (compiler, _) = ruac::check_diags(source);
     let compiler: Vec<_> = compiler
@@ -120,8 +149,8 @@ fn closure_iterator_ide_reconciles_fast_and_compiler_diagnostics() {
             Diagnostic::new(
                 file_id,
                 TextRange::new(
-                    diagnostic.start as u32,
-                    (diagnostic.start + diagnostic.len) as u32,
+                    diagnostic.start() as u32,
+                    (diagnostic.start() + diagnostic.len()) as u32,
                 ),
                 diagnostic.msg,
                 DiagnosticOrigin::Compiler,
@@ -143,7 +172,7 @@ fn closure_iterator_ide_reconciles_fast_and_compiler_diagnostics() {
 #[test]
 fn closure_iterator_ide_degrades_uninferred_parameters_to_unknown() {
     let source = "fn main() { let unknown = |value| value; }";
-    let (analysis, file_id) = analysis(source);
+    let (analysis, file_id, _) = analysis(source);
     let parameters = analysis.closure_parameters(file_id);
     assert_eq!(parameters.len(), 1);
     // Native Ty::Display uses "?" for Unknown.
@@ -162,8 +191,7 @@ fn closure_iterator_snapshot() -> String {
     let (source_path, _) = closure_iterator_golden_paths();
     let source = fs::read_to_string(&source_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", source_path.display()));
-    let (analysis, file_id) = analysis(&source);
-    let syntax = rua_syntax::analysis::Analysis::new(&source);
+    let (analysis, file_id, project_id) = analysis(&source);
     let mut output = String::new();
 
     for parameter in analysis.closure_parameters(file_id) {
@@ -192,28 +220,36 @@ fn closure_iterator_snapshot() -> String {
     }
 
     let use_offset = nth_word(&source, "item", 1);
-    let definition = syntax
-        .definition_at(use_offset)
+    let position = ProjectPosition::at(project_id, file_id, use_offset as u32);
+    let definition = analysis
+        .goto_definition(position)
         .expect("closure parameter definition");
-    let completion = syntax
-        .scope_locals(use_offset)
+    let completion = analysis
+        .completions(position)
         .into_iter()
-        .find(|local| local.name == "item")
+        .find(|item| item.label() == "item")
         .expect("closure parameter completion");
     writeln!(output, "query: item at {use_offset}").unwrap();
     writeln!(
         output,
         "completion: {} {:?}",
-        completion.name, completion.detail
+        completion.label(),
+        completion.detail()
     )
     .unwrap();
     writeln!(
         output,
         "definition: {}..{} {:?}",
-        definition.target_range.0, definition.target_range.1, definition.detail
+        definition.target_range().range.start(),
+        definition.target_range().range.end(),
+        analysis
+            .hover(position)
+            .map(|hover| hover.signature().to_string())
     )
     .unwrap();
-    for (start, end) in syntax.references_at(use_offset) {
+    for reference in analysis.references(position, true) {
+        let range = reference.range().range;
+        let (start, end) = (range.start() as usize, range.end() as usize);
         writeln!(
             output,
             "reference: {start}..{end} {:?}",
@@ -221,14 +257,18 @@ fn closure_iterator_snapshot() -> String {
         )
         .unwrap();
     }
-    for (start, end, replacement) in syntax.rename_edits(use_offset, "element").unwrap() {
-        writeln!(
-            output,
-            "rename: {start}..{end} {:?} -> {:?}",
-            &source[start..end],
-            replacement
-        )
-        .unwrap();
+    for file_edit in analysis.rename(position, "element").unwrap().file_edits() {
+        for edit in file_edit.edits() {
+            let range = edit.range();
+            let (start, end) = (range.start() as usize, range.end() as usize);
+            writeln!(
+                output,
+                "rename: {start}..{end} {:?} -> {:?}",
+                &source[start..end],
+                edit.new_text()
+            )
+            .unwrap();
+        }
     }
     writeln!(
         output,

@@ -3,10 +3,9 @@
 #
 # Ensures:
 #   - rua-analysis production deps are free of ruac and LSP types
-#   - rua-syntax production deps are free of ruac (when built without legacy feature)
+#   - rua-syntax default production deps are free of ruac
 #   - rua-lsp production deps are free of ruac
-#   - No legacy semantic facade is imported in production code
-#   - No transition module is accessible in production rua-syntax
+#   - No legacy semantic facade or transition module remains
 #
 # Usage: bash scripts/check-boundaries.sh
 # Exit 0 = clean, exit 1 = violation found.
@@ -20,19 +19,32 @@ NC='\033[0m' # No Color
 pass() { echo -e "${GREEN}PASS${NC} ${1:-}"; }
 fail() { echo -e "${RED}FAIL${NC} ${1:-}"; exit 1; }
 
+dependency_tree() {
+    local label=$1
+    shift
+    local output
+    if ! output=$(cargo tree "$@" 2>&1); then
+        echo "$output" >&2
+        fail "could not inspect ${label} dependency tree"
+    fi
+    printf '%s\n' "$output"
+}
+
 echo "=== Checking dependency boundaries ==="
 
 # 1. rua-analysis must not depend on ruac in production
 echo -n "  rua-analysis production deps include ruac ... "
-if cargo tree -p rua-analysis -e normal --depth 1 2>/dev/null | grep -q "ruac"; then
+analysis_tree=$(dependency_tree "rua-analysis" -p rua-analysis -e normal --depth 1)
+if rg -q '(^|[[:space:]])ruac v' <<<"$analysis_tree"; then
     fail "rua-analysis has ruac in production deps"
 else
     pass
 fi
 
-# 2. rua-syntax (without default features) must not depend on ruac
-echo -n "  rua-syntax (--no-default-features) production deps include ruac ... "
-if cargo tree -p rua-syntax --no-default-features -e normal --depth 1 2>/dev/null | grep -q "ruac"; then
+# 2. rua-syntax default features must not depend on ruac
+echo -n "  rua-syntax default production deps include ruac ... "
+syntax_tree=$(dependency_tree "rua-syntax" -p rua-syntax -e normal --depth 1)
+if rg -q '(^|[[:space:]])ruac v' <<<"$syntax_tree"; then
     fail "rua-syntax has ruac in production deps"
 else
     pass
@@ -40,7 +52,8 @@ fi
 
 # 3. rua-lsp must not depend on ruac in production
 echo -n "  rua-lsp (lsp feature) production deps include ruac ... "
-if cargo tree -p rua-lsp --features lsp -e normal --depth 2 2>/dev/null | grep -q "ruac"; then
+lsp_tree=$(dependency_tree "rua-lsp" -p rua-lsp --features lsp -e normal --depth 2)
+if rg -q '(^|[[:space:]])ruac v' <<<"$lsp_tree"; then
     fail "rua-lsp has ruac in production deps"
 else
     pass
@@ -48,24 +61,26 @@ fi
 
 # 4. rua-analysis must not depend on LSP types in production
 echo -n "  rua-analysis production deps include lsp-types or lsp-server ... "
-if cargo tree -p rua-analysis -e normal --depth 1 2>/dev/null | grep -qE "lsp-types|lsp-server"; then
+if rg -q '(^|[[:space:]])lsp-(types|server) v' <<<"$analysis_tree"; then
     fail "rua-analysis has LSP types in production deps"
 else
     pass
 fi
 
-# 5. No transition module importable from production rua-syntax
-echo -n "  rua-syntax src/ references transition module (without legacy feature) ... "
-# The transition module should be gated behind #[cfg(feature = "legacy")]
-if grep -rn "mod transition;" crates/rua-syntax/src/lib.rs 2>/dev/null | grep -v "#[cfg(feature" | grep -q "mod transition"; then
-    fail "rua-syntax lib.rs declares mod transition without cfg gate"
+# 5. No transition or legacy facade remains in rua-syntax
+echo -n "  rua-syntax legacy facade has been deleted ... "
+if test -e crates/rua-syntax/src/transition.rs || \
+   rg -q 'mod (transition|analysis|workspace|nameres|completion);|feature = "legacy"' \
+      crates/rua-syntax/src/lib.rs crates/rua-syntax/Cargo.toml; then
+    fail "rua-syntax still exposes a legacy facade"
 else
     pass
 fi
 
 # 6. No legacy semantic facade imported in rua-lsp or rua-analysis production
 echo -n "  legacy facade imports in production code ... "
-if rg -n "rua_syntax::(analysis|workspace|nameres)" crates/rua-lsp/src/ crates/rua-analysis/src/ 2>/dev/null | grep -qv "//\|/\*"; then
+if rg -n '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+rua_syntax::(analysis|workspace|nameres)' \
+    crates/rua-lsp/src/ crates/rua-analysis/src/; then
     fail "legacy semantic facade imported in production code"
 else
     pass
@@ -73,7 +88,8 @@ fi
 
 # 7. ruac must not depend on rowan, analysis, or LSP crates
 echo -n "  ruac production deps are isolated ... "
-if cargo tree -p ruac -e normal --depth 1 2>/dev/null | grep -qE "rowan|rua-syntax|rua-analysis|lsp-types|lsp-server"; then
+ruac_tree=$(dependency_tree "ruac" -p ruac -e normal --depth 1)
+if rg -q '(^|[[:space:]])(rowan|rua-syntax|rua-analysis|lsp-types|lsp-server) v' <<<"$ruac_tree"; then
     fail "ruac depends on IDE/LSP crates"
 else
     pass

@@ -74,7 +74,11 @@ fn formatting_preserves_token_kinds_modulo_trailing_commas() {
             continue;
         }
         let out = format_str(&src);
-        assert_eq!(sig(&src), sig(&out), "token kinds changed for {path}\n---\n{out}");
+        assert_eq!(
+            sig(&src),
+            sig(&out),
+            "token kinds changed for {path}\n---\n{out}"
+        );
     }
 }
 

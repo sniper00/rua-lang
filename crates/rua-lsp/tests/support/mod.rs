@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use lsp_types::Uri;
 
-use rua_analysis::{AnalysisHost, Change, FileId, ProjectId, ProjectPosition};
+use rua_analysis::{
+    AnalysisHost, Change, FileId, FileKind, ProjectData, ProjectId, ProjectPosition, ProjectRoot,
+    SourceRootId, SourceRootKind,
+};
 use rua_syntax::LineIndex;
 
 // ---------------------------------------------------------------------------
@@ -21,6 +24,7 @@ pub struct TestServer {
     file_ids: std::collections::HashMap<PathBuf, (Uri, FileId)>,
     open_buffers: std::collections::HashMap<FileId, (Uri, String)>,
     next_file_id: u32,
+    project_root: Option<FileId>,
 }
 
 #[allow(dead_code)]
@@ -31,6 +35,7 @@ impl TestServer {
             file_ids: std::collections::HashMap::new(),
             open_buffers: std::collections::HashMap::new(),
             next_file_id: 0,
+            project_root: None,
         }
     }
 
@@ -58,8 +63,43 @@ impl TestServer {
 
     pub fn open(&mut self, uri: &Uri, text: &str) -> FileId {
         let file_id = self.ensure_file_id(uri);
+        let path = Self::doc_key(uri);
+        if self.project_root.is_none()
+            || path.file_name().and_then(|name| name.to_str()) == Some("main.rua")
+        {
+            self.project_root = Some(file_id);
+        }
+        let declaration = path.extension().and_then(|extension| extension.to_str()) == Some("ruai");
+        let source_root = SourceRootId::new(u32::from(declaration));
         let mut change = Change::new();
-        change.set_file_text(file_id, text);
+        change.set_source_root(
+            source_root,
+            if declaration {
+                SourceRootKind::Library
+            } else {
+                SourceRootKind::Workspace
+            },
+        );
+        change.set_file_with_path(
+            file_id,
+            source_root,
+            if declaration {
+                FileKind::Declaration
+            } else {
+                FileKind::Source
+            },
+            path,
+            text,
+        );
+        change.set_project(
+            ProjectId::new(0),
+            ProjectData::new(
+                self.project_root
+                    .expect("open file establishes project root"),
+                [ProjectRoot::at_root(SourceRootId::new(0))],
+                [ProjectRoot::at_root(SourceRootId::new(1))],
+            ),
+        );
         self.host.apply_change(change);
         self.open_buffers
             .insert(file_id, (uri.clone(), text.to_string()));
@@ -96,7 +136,11 @@ impl TestServer {
         let source = analysis.parse(file_id).syntax_node().text().to_string();
         let li = LineIndex::new(&source);
         let offset = li.offset(line as usize, col as usize, &source);
-        Some(ProjectPosition::at(ProjectId::new(0), file_id, offset as u32))
+        Some(ProjectPosition::at(
+            ProjectId::new(0),
+            file_id,
+            offset as u32,
+        ))
     }
 
     /// Get a `ProjectPosition` at a specific byte offset.
@@ -169,7 +213,9 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (u32, u32) {
 /// assert_eq!(source[..offset], "fn main() { let x");
 /// ```
 pub fn marker_offset(source_with_marker: &str) -> usize {
-    source_with_marker.find("$0").expect("source must contain $0 marker")
+    source_with_marker
+        .find("$0")
+        .expect("source must contain $0 marker")
 }
 
 /// Remove the `$0` marker from source and return the clean source.

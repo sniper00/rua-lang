@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{uri, TestServer};
+use support::{TestServer, uri};
 
 #[test]
 fn inlay_hint_for_let_binding_with_struct_type() {
@@ -56,7 +56,10 @@ fn inlay_hint_for_let_binding_with_struct_type() {
 fn inlay_hint_for_primitive_types() {
     let uri = uri("/test/inlay_prim.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, "fn main() { let x = 42; let b = true; let s = \"hello\"; }");
+    srv.open(
+        &uri,
+        "fn main() { let x = 42; let b = true; let s = \"hello\"; }",
+    );
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();

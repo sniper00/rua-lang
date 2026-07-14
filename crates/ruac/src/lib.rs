@@ -1,137 +1,339 @@
 //! Rua compiler library.
 //!
-//! Rua is a Rust-syntax subset language that transpiles to readable Lua 5.5
-//! source (see `docs/rua-design.md`). This crate implements the front end
-//! (hand-written lexer + recursive-descent parser, structure modeled on the
-//! lua-rs parser) and a Lua-source codegen backend.
+//! Rua transpiles Rust-style source to readable Lua 5.5 (see
+//! `docs/rua-design.md`). This crate owns the strict parser, resolved HIR,
+//! identity-driven type checking, backend layout, and structured Lua IR.
 //!
-//! Current scope: P0 + core of P1 (functions, `let`/`let mut`, arithmetic /
-//! logic / comparison with precedence, `if`/`else` as expression and statement,
-//! `while`/`loop`/`break`/`continue`, blocks, calls, `return`).
-//!
-//! # API stability
-//!
-//! The IDE-facing functions [`check_diags`], [`member_index`], [`type_members`],
-//! [`binding_types`], [`member_index_path`], [`member_index_src`],
-//! [`member_completion`], and [`member_completion_src`] are transition-only
-//! compatibility bridges for the current `rua-syntax` and `rua-lsp` crates.
-//! They are not stable compiler APIs and must not gain new consumers. Phase 5
-//! moves their queries into `rua-analysis`; Phase 6 then removes or privatizes
-//! these facades as part of narrowing `ruac`'s public API.
+//! IDE semantics live in `rua-analysis`; this crate exposes only compiler
+//! parsing, checking, and code-generation APIs.
 
 pub mod ast;
+mod backend_layout;
 pub mod builtins;
 pub mod check;
 pub mod codegen;
 pub mod diag;
+pub mod hir;
 pub mod lexer;
+mod lua_ir;
 pub mod parser;
-pub mod reader;
 pub mod resolve;
 pub mod token;
 pub mod tokenize;
 pub mod typeck;
+pub mod typed_ir;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::{error::Error, fmt};
 
 use crate::diag::Diag;
+use rua_project::{ProjectSpec, SourceProvider};
 
-/// Load builtin .ruai declarations from a directory and prepend them to the
-/// program items. If `dir` is None, looks for `builtins/` next to the compiler
-/// binary, then in the current directory.
-pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) {
-    // Try explicit path first, then binary-relative, then cwd-relative.
-    let dirs: Vec<PathBuf> = if let Some(d) = dir {
-        vec![d.to_path_buf()]
+/// Load builtin `.ruai` declarations into a declaration-only semantic module.
+///
+/// With no explicit directory, the compiler uses its embedded sysroot. An
+/// explicit directory replaces that sysroot and is never allowed to fail open.
+pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(), Diag> {
+    let items = if let Some(dir) = dir {
+        builtins::load_builtins_dir(dir)
     } else {
-        // Find the builtins directory relative to the binary.
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("builtins")));
-        let mut dirs = Vec::new();
-        if let Some(d) = exe_dir {
-            dirs.push(d);
-        }
-        dirs.push(PathBuf::from("builtins"));
-        dirs
-    };
-
-    let mut loaded = false;
-    for d in &dirs {
-        match builtins::load_builtins_dir(d) {
-            Ok(items) if !items.is_empty() => {
-                let mut combined = items;
-                combined.append(&mut program.items);
-                program.items = combined;
-                loaded = true;
-                break;
-            }
-            Ok(_) => {} // empty dir, try next
-            Err(e) => eprintln!("ruac: warning: {}", e),
+        builtins::load_embedded_builtins()
+    }
+    .map_err(|error| Diag::bare(rua_core::DiagnosticCode::HostBuiltinInvalid, error))?;
+    for entry in &mut program.source_order {
+        if let ast::ChunkEntry::Item(index) = entry {
+            *index += 1;
         }
     }
-    if !loaded {
-        // No builtins found — this is fine for minimal usage but types like
-        // Option/Result/Vec won't be available.
-    }
+    program.items.insert(
+        0,
+        ast::Item::Mod(ast::ModDecl {
+            name: "__rua_builtin".to_string(),
+            documentation: None,
+            items,
+            chunk: ast::Block {
+                stmts: Vec::new(),
+                tail: None,
+            },
+            source_order: Vec::new(),
+            is_pub: false,
+            is_file: false,
+            is_decl: true,
+        }),
+    );
+    Ok(())
 }
 
 /// Compile Rua source text to Lua 5.5 source text. File modules (`mod name;`)
 /// are not available here (no base directory); use [`compile_path`] for those.
 /// Uses default builtins directory resolution.
-pub fn compile_str(src: &str) -> Result<String, String> {
+pub fn compile_str(src: &str) -> Result<String, CompileFailure> {
     _compile_str(src, None)
 }
 
 /// Like [`compile_str`] but with an explicit builtins directory.
-pub fn compile_str_with_builtins(src: &str, builtins_dir: &Path) -> Result<String, String> {
+pub fn compile_str_with_builtins(src: &str, builtins_dir: &Path) -> Result<String, CompileFailure> {
     _compile_str(src, Some(builtins_dir))
 }
 
-fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, String> {
-    let mut program = parser::parse(src)?;
-    load_builtins(&mut program, builtins_dir);
+/// Compile a complete logical project without filesystem access.
+///
+/// The project owns stable file identities and logical module paths; the host
+/// supplies source text through [`SourceProvider`]. Builtins come from the
+/// embedded sysroot, so this entry point has no CWD or disk dependency.
+pub fn compile_project<P: SourceProvider>(
+    project: &ProjectSpec,
+    provider: &P,
+) -> Result<String, CompileFailure> {
+    compile_project_artifact(project, provider).map(|artifact| artifact.source)
+}
+
+/// Compile an IO-free logical project and retain generated-to-Rua source maps.
+pub fn compile_project_artifact<P: SourceProvider>(
+    project: &ProjectSpec,
+    provider: &P,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    compile_project_with_diagnostics(project, provider)
+}
+
+#[derive(Clone, Debug)]
+pub struct CompileFailure {
+    pub diagnostics: Vec<Diag>,
+    pub files: Vec<String>,
+}
+
+impl CompileFailure {
+    fn single(diagnostic: Diag, files: Vec<String>) -> Self {
+        Self {
+            diagnostics: vec![diagnostic],
+            files,
+        }
+    }
+
+    pub fn structured_diagnostics(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &rua_core::StructuredDiagnostic> {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| &diagnostic.diagnostic)
+    }
+
+    /// Convenience for callers migrating from text-only compiler errors.
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.to_string().contains(pattern)
+    }
+
+    /// Convenience for callers migrating from text-only compiler errors.
+    pub fn starts_with(&self, pattern: &str) -> bool {
+        self.to_string().starts_with(pattern)
+    }
+}
+
+impl fmt::Display for CompileFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&diag::render_all(&self.diagnostics, &self.files))
+    }
+}
+
+impl Error for CompileFailure {}
+
+/// Compile an IO-free project and return structured failures for host tooling.
+pub fn compile_project_with_diagnostics<P: SourceProvider>(
+    project: &ProjectSpec,
+    provider: &P,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let fail = CompileFailure::single;
+    let root_path = project
+        .files
+        .iter()
+        .find_map(|(path, file_id)| (*file_id == project.root_file).then_some(path))
+        .ok_or_else(|| {
+            fail(
+                Diag::bare(
+                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    "project root_file is not present in ProjectSpec.files".to_string(),
+                ),
+                Vec::new(),
+            )
+        })?;
+    let mut files = vec![String::new(); project.root_file.index() as usize + 1];
+    files[project.root_file.index() as usize] = root_path.to_string();
+    let source = provider.load(project.root_file).map_err(|error| {
+        fail(
+            Diag::bare(
+                rua_core::DiagnosticCode::HostSourceRead,
+                format!("reading `{root_path}`: {error}"),
+            ),
+            files.clone(),
+        )
+    })?;
+    let mut program = parser::parse_with_semantic_file(&source.text, project.root_file.index())
+        .map_err(|error| {
+            fail(
+                Diag::from_structured(
+                    error.diagnostic().clone(),
+                    error.line(),
+                    format!("parse error: {}", error.message()),
+                ),
+                files.clone(),
+            )
+        })?;
+    program.is_decl = root_path.as_str().ends_with(".ruai");
+    resolve::set_file_program(&mut program, project.root_file.index());
+    let scope_dir = root_path.parent().unwrap_or_default();
+    resolve::resolve_modules_with_provider_diagnostics(
+        &mut program.items,
+        &scope_dir,
+        project,
+        provider,
+        &mut files,
+    )
+    .map_err(|diagnostic| fail(diagnostic, files.clone()))?;
+    if program.is_decl {
+        resolve::validate_declaration_program(&program, project.root_file.index())
+            .map_err(|diagnostic| fail(diagnostic, files.clone()))?;
+        resolve::mark_decl(&mut program.items);
+    }
+    load_builtins(&mut program, None).map_err(|error| fail(error, files.clone()))?;
+    let hir = hir::resolve(&program);
+    let structural_diagnostics = check::collect_diags_resolved(&program, &hir);
+    if !structural_diagnostics.is_empty() {
+        return Err(CompileFailure {
+            diagnostics: structural_diagnostics,
+            files,
+        });
+    }
+    let info = typeck::check_resolved_diagnostics(&program, &hir).map_err(|diagnostics| {
+        CompileFailure {
+            diagnostics,
+            files: files.clone(),
+        }
+    })?;
+    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    Ok(codegen::generate_with_source_map(
+        &typed,
+        &builtins::CodegenRules::default(),
+    ))
+}
+
+fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, CompileFailure> {
     let mut files = vec![String::new()];
-    resolve::resolve_modules(&mut program.items, None, &mut files)?;
-    resolve::resolve_uses(&mut program);
-    check::check(&program, &files)?;
-    let info = typeck::check(&program, &files)?;
+    let mut program = parser::parse(src).map_err(|error| {
+        CompileFailure::single(
+            Diag::from_structured(
+                error.diagnostic().clone(),
+                error.line(),
+                format!("parse error: {}", error.message()),
+            ),
+            files.clone(),
+        )
+    })?;
+    load_builtins(&mut program, builtins_dir)
+        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    resolve::resolve_modules(&mut program.items, None, &mut files)
+        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    let hir = hir::resolve(&program);
+    check::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let info = typeck::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
     let rules = builtins::CodegenRules::default();
-    Ok(codegen::generate(&program, &info, &rules))
+    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    Ok(codegen::generate(&typed, &rules))
 }
 
 /// Compile a Rua source file (resolving `mod name;` file modules relative to the
 /// file's directory) to Lua 5.5 source text. Uses default builtins resolution.
-pub fn compile_path(path: &Path) -> Result<String, String> {
-    _compile_path(path, None)
+pub fn compile_path(path: &Path) -> Result<String, CompileFailure> {
+    compile_path_artifact(path).map(|artifact| artifact.source)
 }
 
 /// Like [`compile_path`] but with an explicit builtins directory.
-pub fn compile_path_with_builtins(path: &Path, builtins_dir: &Path) -> Result<String, String> {
-    _compile_path(path, Some(builtins_dir))
+pub fn compile_path_with_builtins(
+    path: &Path,
+    builtins_dir: &Path,
+) -> Result<String, CompileFailure> {
+    compile_path_artifact_with_builtins(path, builtins_dir).map(|artifact| artifact.source)
 }
 
-fn _compile_path(path: &Path, builtins_dir: Option<&Path>) -> Result<String, String> {
-    let (mut program, files) = parse_and_resolve(path)?;
-    load_builtins(&mut program, builtins_dir);
-    resolve::resolve_uses(&mut program);
-    check::check(&program, &files)?;
-    let info = typeck::check(&program, &files)?;
+/// Compile a Rua source file and retain generated-to-source mappings.
+pub fn compile_path_artifact(path: &Path) -> Result<codegen::GeneratedLua, CompileFailure> {
+    _compile_path_artifact(path, None)
+}
+
+/// Like [`compile_path_artifact`] but with an explicit builtins directory.
+pub fn compile_path_artifact_with_builtins(
+    path: &Path,
+    builtins_dir: &Path,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    _compile_path_artifact(path, Some(builtins_dir))
+}
+
+fn _compile_path_artifact(
+    path: &Path,
+    builtins_dir: Option<&Path>,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let (mut program, files) = parse_and_load_modules(path)?;
+    load_builtins(&mut program, builtins_dir)
+        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    let hir = hir::resolve(&program);
+    check::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let info = typeck::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
     let rules = builtins::CodegenRules::default();
-    Ok(codegen::generate(&program, &info, &rules))
+    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    Ok(codegen::generate_with_source_map(&typed, &rules))
 }
 
 /// Parse a file and splice in its file modules, without semantic checks. Returns
 /// the merged program plus the file registry (index = file id) for diagnostics.
-pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading {}: {}", path.display(), e))?;
-    let mut program = parser::parse(&src).map_err(|e| format!("{}: {}", path.display(), e))?;
+pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), CompileFailure> {
+    parse_and_load_modules(path)
+}
+
+pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>), CompileFailure> {
+    let files = vec![path.display().to_string()];
+    let src = std::fs::read_to_string(path).map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(
+                rua_core::DiagnosticCode::HostSourceRead,
+                format!("reading {}: {error}", path.display()),
+            ),
+            files.clone(),
+        )
+    })?;
+    let mut program = parser::parse(&src).map_err(|error| {
+        CompileFailure::single(
+            Diag::from_structured(
+                error.diagnostic().clone(),
+                error.line(),
+                format!("parse error: {}", error.message()),
+            ),
+            files.clone(),
+        )
+    })?;
+    program.is_decl = path
+        .extension()
+        .is_some_and(|extension| extension == "ruai");
     // The root file is id 0; child files are appended during resolution.
-    let mut files = vec![path.display().to_string()];
+    let mut files = files;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    resolve::resolve_modules(&mut program.items, Some(dir), &mut files)?;
-    resolve::resolve_uses(&mut program);
+    resolve::resolve_modules(&mut program.items, Some(dir), &mut files)
+        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    if program.is_decl {
+        resolve::validate_declaration_program(&program, 0)
+            .map_err(|error| CompileFailure::single(error, files.clone()))?;
+        resolve::mark_decl(&mut program.items);
+    }
     Ok((program, files))
 }
 
@@ -139,222 +341,52 @@ pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), Str
 /// and return every diagnostic with its byte-offset span (if available), plus the
 /// file registry (index = file id, for resolving `Diag.file` to a path).
 ///
-/// This is the entry point for LSP live diagnostics: the returned diagnostics can
-/// be converted to `lsp_types::Diagnostic` via `rua_syntax::LineIndex`.
+/// Compiler-native structured diagnostics for an in-memory source.
 ///
-/// Parse errors and resolve errors (which currently return `String`) are wrapped
-/// as [`Diag::bare`] — they carry the message but no span. When the parser is
-/// enhanced to emit structured errors with byte offsets (I2), those will flow
-/// through as properly-positioned diagnostics.
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current LSP diagnostics path. New IDE code
-/// must use the planned `rua-analysis` diagnostics query instead of extending
-/// this single-file compiler entry point. Phase 5 removes its IDE consumers.
-pub fn check_diags(src: &str) -> (Vec<Diag>, Vec<String>) {
+/// Production LSP diagnostics come from `rua-analysis`; hosts that explicitly
+/// request compiler checks can consume this API without parsing CLI text.
+pub fn check_diagnostics(src: &str) -> (Vec<Diag>, Vec<String>) {
     let mut diags: Vec<Diag> = Vec::new();
 
     // 1. Parse
     let mut program = match parser::parse(src) {
         Ok(p) => p,
         Err(e) => {
-            diags.push(Diag::bare(format!("parse error: {e}")));
+            diags.push(Diag::from_structured(
+                e.diagnostic().clone(),
+                e.line(),
+                format!("parse error: {}", e.message()),
+            ));
             return (diags, vec![String::new()]);
         }
     };
+    if let Err(error) = load_builtins(&mut program, None) {
+        diags.push(error);
+        return (diags, vec![String::new()]);
+    }
 
     // 2. Resolve (file modules will fail for in-memory sources — that's OK).
     // File id 0 with an empty path: diagnostics fall back to `line: msg`.
     let mut files = vec![String::new()];
-    if let Err(e) = resolve::resolve_modules(&mut program.items, None, &mut files) {
-        diags.push(Diag::bare(format!("resolve error: {e}")));
+    if let Err(error) = resolve::resolve_modules(&mut program.items, None, &mut files) {
+        diags.push(error);
         // Continue with what we have — structural/type checks may still find
         // issues in the rest of the program.
     }
-    resolve::resolve_uses(&mut program);
+    let hir = hir::resolve(&program);
 
     // 3. Structural checks.
-    diags.extend(check::collect_diags(&program));
+    diags.extend(check::collect_diags_resolved(&program, &hir));
 
     // 4. Type-checking.
-    diags.extend(typeck::collect_diags(&program));
+    diags.extend(typeck::collect_diags_resolved(&program, &hir));
 
     (diags, files)
 }
 
-/// Type-check in-memory `src` (single-file view) and return the member-access
-/// resolution table (`x.field` / `x.method()` → definition span + hover detail)
-/// for the LSP.
-///
-/// Single-file view: file modules (`mod name;`) are not loaded, so member
-/// accesses whose receiver type is defined in another file resolve to nothing
-/// (returned index simply omits them — zero false positives). Parse/resolve
-/// errors yield whatever partial index type-checking could still produce.
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current `rua-syntax` analysis cache. New IDE
-/// code must use the planned `rua-analysis` type-inference/member query. Phase 5
-/// removes this bridge from the IDE path.
-pub fn member_index(src: &str) -> typeck::MemberIndex {
-    let mut program = match parser::parse(src) {
-        Ok(p) => p,
-        Err(_) => return typeck::MemberIndex::default(),
-    };
-    let mut files = vec![String::new()];
-    let _ = resolve::resolve_modules(&mut program.items, None, &mut files);
-    resolve::resolve_uses(&mut program);
-    typeck::member_index(&program)
-}
-
-/// Type-check in-memory `src` (single-file view) and return the member-completion
-/// catalog (`type name → fields + methods`). Mirrors [`member_index`]; file
-/// modules are not loaded — cross-file completion uses the `_src` variant (C1).
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current member-completion implementation. New
-/// IDE code must use the planned `rua-analysis` completion queries. Phase 5
-/// removes this bridge from the IDE path.
-pub fn type_members(src: &str) -> typeck::TypeMembers {
-    let mut program = match parser::parse(src) {
-        Ok(p) => p,
-        Err(_) => return typeck::TypeMembers::default(),
-    };
-    let mut files = vec![String::new()];
-    let _ = resolve::resolve_modules(&mut program.items, None, &mut files);
-    resolve::resolve_uses(&mut program);
-    typeck::type_members(&program)
-}
-
-/// Type-check in-memory `src` (single-file view) and return the binding-type
-/// index (`let` / `for` / parameter name span → inferred-type hover text) for
-/// LSP local-variable hover. Mirrors [`member_index`]; file modules are not
-/// loaded (locals are always resolved within their own file, so file id 0
-/// matches the LSP's single-file view).
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current local-hover implementation. New IDE
-/// code must use the planned `rua-analysis` body-inference query. Phase 5
-/// removes this bridge from the IDE path.
-pub fn binding_types(src: &str) -> typeck::BindingTypes {
-    let mut program = match parser::parse(src) {
-        Ok(p) => p,
-        Err(_) => return typeck::BindingTypes::default(),
-    };
-    let mut files = vec![String::new()];
-    let _ = resolve::resolve_modules(&mut program.items, None, &mut files);
-    resolve::resolve_uses(&mut program);
-    typeck::binding_types(&program)
-}
-
-/// Multi-file variant of [`member_index`]: parse `path`, splice in its `mod name;`
-/// file modules (relative to the file's directory), then build the member table.
-///
-/// Unlike [`member_index`], receiver types defined in child files resolve, and
-/// each hit's `member_file` / `target_file` are real file ids into the returned
-/// registry (index = file id → path). File id 0 is `path` itself.
-///
-/// Parse / resolve / type errors are tolerated: whatever partial index could be
-/// produced is returned (never panics, never hard-errors), so the LSP degrades
-/// gracefully while the user is mid-edit.
-///
-/// # Transition-only
-///
-/// Compatibility bridge for path-based member lookup. It is limited to disk
-/// state and must not become a workspace API. Phase 5 replaces it with
-/// `rua-analysis` queries backed by the VFS and open buffers.
-pub fn member_index_path(path: &Path) -> (typeck::MemberIndex, Vec<String>) {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return (typeck::MemberIndex::default(), vec![path.display().to_string()]),
-    };
-    member_index_src(&src, path)
-}
-
-/// Like [`member_index_path`] but the root file's text is supplied directly
-/// (`root_src`) instead of read from disk, while `mod name;` **child** files are
-/// still loaded from disk relative to `root_path`'s directory.
-///
-/// This is the LSP entry point: the active buffer (with unsaved edits) drives the
-/// root offsets — so a member use-site span matches the editor's cursor — while
-/// types defined in sibling/child files resolve from their on-disk contents.
-///
-/// Limitation: unsaved edits in **child** files are not reflected (they load from
-/// disk). File id 0 is `root_path`.
-///
-/// # Transition-only
-///
-/// Compatibility bridge for cross-file member lookup. New IDE code must use
-/// the planned VFS-backed `rua-analysis` query, which sees all open buffers.
-/// Phase 5 removes this bridge from the IDE path.
-pub fn member_index_src(root_src: &str, root_path: &Path) -> (typeck::MemberIndex, Vec<String>) {
-    let mut program = match parser::parse(root_src) {
-        Ok(p) => p,
-        Err(_) => return (typeck::MemberIndex::default(), vec![root_path.display().to_string()]),
-    };
-    let mut files = vec![root_path.display().to_string()];
-    let dir = root_path.parent().unwrap_or_else(|| Path::new("."));
-    let _ = resolve::resolve_modules(&mut program.items, Some(dir), &mut files);
-    resolve::resolve_uses(&mut program);
-    (typeck::member_index(&program), files)
-}
-
-/// Single-file member completion: `(catalog, receiver index)`. Mirrors
-/// [`member_index`]; file modules not loaded (use [`member_completion_src`]).
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current single-file completion path. New IDE
-/// code must use the planned `rua-analysis` completion query. Phase 5 removes
-/// this bridge from the IDE path.
-pub fn member_completion(src: &str) -> (typeck::TypeMembers, typeck::ReceiverIndex) {
-    let mut program = match parser::parse(src) {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                typeck::TypeMembers::default(),
-                typeck::ReceiverIndex::default(),
-            );
-        }
-    };
-    let mut files = vec![String::new()];
-    let _ = resolve::resolve_modules(&mut program.items, None, &mut files);
-    resolve::resolve_uses(&mut program);
-    typeck::member_completion(&program)
-}
-
-/// Multi-file member completion: root text from the buffer, `mod` children
-/// from disk. Mirrors [`member_index_src`]. Returns the file registry too so the
-/// caller can map receiver `recv_file` ids (0 = root) if needed.
-///
-/// # Transition-only
-///
-/// Compatibility bridge for the current cross-file completion path. New IDE
-/// code must use the planned VFS-backed `rua-analysis` completion query. Phase 5
-/// removes this bridge from the IDE path.
-pub fn member_completion_src(
-    root_src: &str,
-    root_path: &std::path::Path,
-) -> (typeck::TypeMembers, typeck::ReceiverIndex, Vec<String>) {
-    let mut program = match parser::parse(root_src) {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                typeck::TypeMembers::default(),
-                typeck::ReceiverIndex::default(),
-                vec![root_path.display().to_string()],
-            );
-        }
-    };
-    let mut files = vec![root_path.display().to_string()];
-    let dir = root_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let _ = resolve::resolve_modules(&mut program.items, Some(dir), &mut files);
-    resolve::resolve_uses(&mut program);
-    let (tm, ri) = typeck::member_completion(&program);
-    (tm, ri, files)
+/// Backward-compatible name for [`check_diagnostics`].
+pub fn check_diags(src: &str) -> (Vec<Diag>, Vec<String>) {
+    check_diagnostics(src)
 }
 
 #[cfg(test)]

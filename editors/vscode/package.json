@@ -5,18 +5,36 @@
   "version": "0.1.0",
   "publisher": "moon-rs",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/sniper00/rua" },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Programming Languages"],
-  "keywords": ["rua", "lua"],
-  "activationEvents": ["onLanguage:rua"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sniper00/rua"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "rua",
+    "lua"
+  ],
+  "activationEvents": [
+    "onLanguage:rua"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "languages": [
       {
         "id": "rua",
-        "aliases": ["Rua", "rua"],
-        "extensions": [".rua", ".ruai"],
+        "aliases": [
+          "Rua",
+          "rua"
+        ],
+        "extensions": [
+          ".rua",
+          ".ruai"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -38,26 +56,42 @@
         },
         "rua.server.args": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Extra command-line arguments passed to the language server."
         },
         "rua.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "Trace the JSON-RPC communication between VS Code and the Rua language server."
         },
         "rua.library": {
           "type": "array",
-          "items": { "type": "string" },
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Directories or files containing `.ruai` type declarations. The language server watches these paths and reloads declarations on change."
         },
         "rua.libraryMounts": {
           "type": "object",
+          "scope": "resource",
           "default": {},
           "markdownDescription": "Named module path → file/directory mapping for `.ruai` declarations (e.g. `\"clock\": \"/lib/clock.ruai\"`)."
+        },
+        "rua.sysroot": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "markdownDescription": "Optional Rua sysroot path passed to the language server. Supports `${workspaceFolder}`."
         }
       }
     },
@@ -73,13 +107,15 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
+    "test-extension": "npm run check-types && tsc && npm run compile && cargo build --manifest-path ../../Cargo.toml -p rua-lsp --features lsp && node dist/test/runTest.js",
     "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^2.26.1",
-    "esbuild": "^0.21.5",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.1",
     "typescript": "^5.4.5"
   },
   "dependencies": {
