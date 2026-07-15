@@ -9,14 +9,15 @@ mod symbol;
 
 use std::sync::Arc;
 
+use rua_core::StdSymbolId;
 use rua_syntax::{Parse, ast::SourceFile};
 
 use crate::{
     BaseDb,
     hir::{
-        Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, BuiltinMemberId, DefId,
-        DefKind, DefMap, Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution,
-        MemberTarget, Ty,
+        Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, DefId, DefKind, DefMap,
+        Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution, MemberTarget,
+        StdLibraryIndex, StdType, Ty,
         module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
     },
     semantic::Semantics,
@@ -52,6 +53,15 @@ impl AnalysisHost {
         Arc::make_mut(&mut self.db).apply_change(change);
     }
 
+    pub fn set_standard_library(
+        &mut self,
+        library: &rua_resources::StdLibrary,
+    ) -> Result<(), String> {
+        let index = StdLibraryIndex::build(library)?;
+        Arc::make_mut(&mut self.db).set_standard_library(Arc::new(index));
+        Ok(())
+    }
+
     pub fn analysis(&self) -> Analysis {
         Analysis {
             db: Arc::clone(&self.db),
@@ -71,47 +81,39 @@ struct ProjectQueryData {
 }
 
 struct BuiltinMemberAt {
-    id: BuiltinMemberId,
+    id: StdSymbolId,
     resolution: MemberResolution,
     range: FileRange,
 }
 
+struct BuiltinTypeAt {
+    standard_type: StdType,
+    range: FileRange,
+}
+
 struct BuiltinSourceDefinition {
+    source_path: String,
     range: TextRange,
     documentation: Option<String>,
 }
 
-fn builtin_source_definition(id: BuiltinMemberId) -> Option<BuiltinSourceDefinition> {
-    let source = rua_core::BUILTIN_SOURCES
-        .iter()
-        .find(|source| source.name == id.source_name())?;
-    let parse = rua_syntax::parse(source.text);
-    let token = parse
-        .syntax_node()
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| token.kind() == rua_syntax::SyntaxKind::Ident && token.text() == id.name())?;
-    let raw_range = token.text_range();
-    let range = TextRange::new(raw_range.start().into(), raw_range.end().into());
-    let line_start = source.text[..range.start() as usize]
-        .rfind('\n')
-        .map_or(0, |index| index + 1);
-    let mut documentation = Vec::new();
-    for line in source.text[..line_start].lines().rev() {
-        let Some(line) = line.trim_start().strip_prefix("///") else {
-            break;
-        };
-        documentation.push(line.trim_start().to_string());
-    }
-    documentation.reverse();
+fn builtin_source_definition(
+    index: &MemberIndex,
+    id: StdSymbolId,
+) -> Option<BuiltinSourceDefinition> {
+    let member = index.standard_member(id)?;
     Some(BuiltinSourceDefinition {
-        range,
-        documentation: (!documentation.is_empty()).then(|| documentation.join("\n")),
+        source_path: member.source_path().to_string(),
+        range: member.name_range(),
+        documentation: member.documentation().map(str::to_string),
     })
 }
 
-fn builtin_hover_text(member: &BuiltinMemberAt) -> String {
+fn builtin_hover_text(index: &MemberIndex, member: &BuiltinMemberAt) -> String {
     let resolution = &member.resolution;
+    let name = index
+        .standard_member(member.id)
+        .map_or("<std>", |member| member.name());
     if let Some(callable) = resolution.callable() {
         let mut params = callable
             .params()
@@ -131,13 +133,27 @@ fn builtin_hover_text(member: &BuiltinMemberAt) -> String {
         }
         format!(
             "fn {}({}) -> {}",
-            member.id.name(),
+            name,
             params.join(", "),
             callable.return_ty()
         )
     } else {
-        format!("{}: {}", member.id.name(), resolution.ty())
+        format!("{}: {}", name, resolution.ty())
     }
+}
+
+fn builtin_type_hover_text(standard_type: &StdType) -> String {
+    let keyword = match standard_type.kind() {
+        crate::hir::ItemKind::Struct => "struct",
+        crate::hir::ItemKind::Enum => "enum",
+        _ => "type",
+    };
+    let generics = if standard_type.generic_params().is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", standard_type.generic_params().join(", "))
+    };
+    format!("{keyword} {}{generics}", standard_type.name())
 }
 
 fn semantic_query_data(db: &Arc<BaseDb>, position: ProjectPosition) -> Option<ProjectQueryData> {
@@ -197,6 +213,30 @@ impl Analysis {
             });
         }
         None
+    }
+
+    fn builtin_type_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<BuiltinTypeAt> {
+        let file_id = position.position.file_id;
+        let text = self.db.file_text(file_id)?;
+        let parse = self.db.parse(file_id);
+        let offset = position.position.offset.min(text.len() as u32);
+        let token = completion::token_at_offset(parse.syntax_node(), offset)?;
+        if token.kind() != rua_syntax::SyntaxKind::Ident {
+            return None;
+        }
+        let standard_type = query.member_index.standard_type(token.text())?.clone();
+        let range = token.text_range();
+        Some(BuiltinTypeAt {
+            standard_type,
+            range: FileRange::new(
+                file_id,
+                TextRange::new(range.start().into(), range.end().into()),
+            ),
+        })
     }
 
     /// Test and integration helper for syntax queries during Phase 2.
@@ -589,9 +629,12 @@ impl Analysis {
         }
 
         if let Some(member) = self.builtin_member_at(position, &query) {
-            let mut hover = HoverResult::new(member.range, builtin_hover_text(&member));
-            if let Some(documentation) =
-                builtin_source_definition(member.id).and_then(|source| source.documentation)
+            let mut hover = HoverResult::new(
+                member.range,
+                builtin_hover_text(&query.member_index, &member),
+            );
+            if let Some(documentation) = builtin_source_definition(&query.member_index, member.id)
+                .and_then(|source| source.documentation)
             {
                 hover = hover.with_documentation(documentation);
             }
@@ -640,6 +683,17 @@ impl Analysis {
                     }
                 }
             }
+        }
+
+        if let Some(standard_type) = self.builtin_type_at(position, &query) {
+            let mut hover = HoverResult::new(
+                standard_type.range,
+                builtin_type_hover_text(&standard_type.standard_type),
+            );
+            if let Some(documentation) = standard_type.standard_type.documentation() {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
         }
 
         None
@@ -762,11 +816,17 @@ impl Analysis {
         position: ProjectPosition,
     ) -> Option<BuiltinDefinitionTarget> {
         let query = self.project_query_data(position)?;
-        let member = self.builtin_member_at(position, &query)?;
-        let source = builtin_source_definition(member.id)?;
+        if let Some(member) = self.builtin_member_at(position, &query) {
+            let source = builtin_source_definition(&query.member_index, member.id)?;
+            return Some(BuiltinDefinitionTarget::new(
+                source.source_path,
+                source.range,
+            ));
+        }
+        let standard_type = self.builtin_type_at(position, &query)?.standard_type;
         Some(BuiltinDefinitionTarget::new(
-            member.id.source_name(),
-            source.range,
+            standard_type.source_path(),
+            standard_type.name_range(),
         ))
     }
 

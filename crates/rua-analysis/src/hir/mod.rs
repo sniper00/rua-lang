@@ -11,6 +11,7 @@ mod item_tree;
 mod member;
 pub(crate) mod module_resolution;
 pub mod scope;
+mod std_library;
 pub mod ty;
 
 pub use crate::base::TextRange;
@@ -36,14 +37,15 @@ pub use item_tree::{
 };
 pub(crate) use member::CallableRequirement;
 pub use member::{
-    BuiltinMemberId, BuiltinType, ImplementationData, MemberCandidate, MemberIndex, MemberKind,
-    MemberOrigin, MemberResolution, MemberTarget, TraitBound,
+    BuiltinType, ImplementationData, MemberCandidate, MemberIndex, MemberKind, MemberOrigin,
+    MemberResolution, MemberTarget, TraitBound,
 };
 pub use module_resolution::module_file_candidates;
 pub use scope::{
     BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult,
     LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,
 };
+pub use std_library::{StdLibraryIndex, StdMember, StdMemberKind, StdType, standard_library};
 pub use ty::{
     CallableTy, GenericParamId, GenericParamTy, NamedTy, NamedTypeResolver, PrimitiveTy,
     Substitution, Ty, TypeLoweringContext, UnifyResult, unify,

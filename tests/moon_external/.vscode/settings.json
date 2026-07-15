@@ -1,0 +1,5 @@
+{
+    "rua.server.path": "${workspaceFolder}/../../target/release/rua-lsp",
+    "rua.compiler.path": "${workspaceFolder}/../../target/release/ruac",
+    "rua.trace.server": "verbose"
+}

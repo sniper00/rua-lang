@@ -1,0 +1,4 @@
+tolerant:
+E0005 @51: expected `}`
+strict:
+E0001 51..51: expected `}`, found `<eof>`

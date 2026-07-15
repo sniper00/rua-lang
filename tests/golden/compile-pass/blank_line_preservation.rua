@@ -1,0 +1,13 @@
+fn total() -> i64 {
+    let left = 1;
+
+    let right = 2;
+
+    left + right
+}
+
+let value = total();
+println!("{}", value);
+
+let doubled = value * 2;
+println!("{}", doubled);

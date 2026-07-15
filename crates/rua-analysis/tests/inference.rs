@@ -759,11 +759,7 @@ fn containers() -> i64 {
     assert_expr_ty(&fixture, "/*some_call*/", &option_ty);
     assert_expr_ty(&fixture, "/*none_expr*/", &option_ty);
     assert_expr_ty(&fixture, "/*ok_call*/", &result_ty);
-    assert_expr_ty(
-        &fixture,
-        "/*map_call*/",
-        &Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
-    );
+    assert_expr_ty(&fixture, "/*map_call*/", &map_ty);
     assert_expr_ty(&fixture, "/*range_expr*/", &range_ty);
     assert_expr_ty(&fixture, "/*index_expr*/", &i64_ty);
     assert_expr_ty(&fixture, "/*unknown_call*/", &Ty::Unknown);

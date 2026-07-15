@@ -33,6 +33,7 @@ const RUAI_COMPILE_PASS_CASES: &[&str] = &[
     "workspace_shadows_library",
 ];
 const RUAI_COMPILE_FAIL_CASES: &[&str] = &["declaration_body_rejected", "declaration_type_error"];
+const MODULE_COMPILE_PASS_CASES: &[&str] = &["nested_file_modules"];
 const PHASE4A_ACTIVE_PASS_CASES: &[&str] = &[
     "closure_expr_inferred",
     "closure_block_typed",
@@ -46,6 +47,7 @@ const PHASE4A_ACTIVE_PASS_CASES: &[&str] = &[
     "iterator_any",
     "iterator_all",
     "iterator_find",
+    "iterator_first_class",
 ];
 const PHASE4A_ACTIVE_FAIL_CASES: &[&str] = &[
     "closure_param_cannot_infer",
@@ -56,7 +58,6 @@ const PHASE4A_ACTIVE_FAIL_CASES: &[&str] = &[
     "iterator_map_arg_not_closure",
     "iterator_filter_not_bool",
     "iterator_collect_mismatch",
-    "iterator_escape_unsupported",
 ];
 const REQUIRED_DIRS: &[&str] = &[
     "compile-pass",
@@ -64,6 +65,7 @@ const REQUIRED_DIRS: &[&str] = &[
     "parser/accept",
     "parser/reject",
     "parser/ranges",
+    "format",
     "modules",
     "ruai",
     "ide",
@@ -224,7 +226,7 @@ fn execute_lua(source: &Path, lua: &str) -> Result<(), String> {
         std::env::temp_dir().join(format!("ruac-golden-{}-{unique}.lua", std::process::id()));
     fs::write(&script, lua)
         .map_err(|error| format!("cannot write {}: {error}", script.display()))?;
-    let runtime = workspace_root().join("lualib/?.lua");
+    let runtime = workspace_root().join("crates/rua-resources/resources/std/?.lua");
     let output = Command::new(std::env::var("RUA_LUA").unwrap_or_else(|_| "lua".to_string()))
         .arg("-e")
         .arg("function host_format(...) return '' end")
@@ -416,6 +418,22 @@ fn run_ruai(update: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn run_modules(update: bool) -> Result<(), String> {
+    let root = golden_root().join("modules");
+    for case in MODULE_COMPILE_PASS_CASES {
+        let source = root.join(case).join("main.rua");
+        let actual = ruac::compile_path(&source).map_err(|error| {
+            format!(
+                "module compile-pass case {} failed:\n{error}",
+                fixture_label(&source)
+            )
+        })?;
+        assert_or_update(&source, &actual, GoldenKind::Lua, update)?;
+        execute_lua(&source, &actual)?;
+    }
+    Ok(())
+}
+
 fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
     let root = golden_root().join("phase4a/compile-fail");
     let mut structured = String::new();
@@ -450,7 +468,9 @@ fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
                 fixture_label(&source)
             )
         })?;
-        if case.starts_with("iterator_") || *case == "closure_capture_mut_fused" {
+        if case.starts_with("iterator_") && *case != "iterator_first_class"
+            || *case == "closure_capture_mut_fused"
+        {
             if actual.matches("for ").count() != 1 {
                 return Err(format!(
                     "Phase 4A fused output {} must contain exactly one loop",
@@ -475,7 +495,7 @@ fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
                 }
             }
             if *case == "iterator_map_filter_collect"
-                && actual.matches("rt.vec({ n = 0 })").count() != 1
+                && actual.matches("vec.from_table({ n = 0 })").count() != 1
             {
                 return Err(format!(
                     "Phase 4A collect output {} must allocate exactly one result Vec",
@@ -607,6 +627,22 @@ fn golden_ruai() {
 }
 
 #[test]
+fn golden_modules() {
+    run(run_modules(false));
+}
+
+#[test]
+#[ignore = "updates repository module golden files; run with RUA_UPDATE_GOLDENS=1"]
+fn update_module_goldens() {
+    assert_eq!(
+        std::env::var(UPDATE_ENV).as_deref(),
+        Ok("1"),
+        "refusing to update without {UPDATE_ENV}=1"
+    );
+    run(run_modules(true));
+}
+
+#[test]
 #[ignore = "updates repository golden files; run the documented explicit command"]
 fn update_goldens() {
     assert_eq!(
@@ -618,6 +654,7 @@ fn update_goldens() {
     run(run_phase4a_compile_pass(true));
     run(run_compile_fail(true));
     run(run_phase4a_compile_fail(true));
+    run(run_modules(true));
     run(run_ruai(true));
     let expected = golden_root().join("source-map/main.map.golden");
     run(source_map_snapshot().and_then(|snapshot| assert_named_golden(&expected, &snapshot, true)));

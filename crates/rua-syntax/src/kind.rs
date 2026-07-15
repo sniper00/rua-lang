@@ -116,6 +116,7 @@ pub enum SyntaxKind {
     PathType,
     RefType,
     TupleType,
+    CallableType,
     TypeArgs,
     // Statements
     Block,

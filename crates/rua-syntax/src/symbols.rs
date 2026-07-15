@@ -866,10 +866,10 @@ mod tests {
     // --- integration: example file ------------------------------------------
 
     #[test]
-    fn example_p4c_types_symbols() {
+    fn module_types_fixture_symbols() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/examples/example_rua_p4c_types.rua"
+            "/../../tests/golden/format/module_types_methods.rua"
         );
         let src = std::fs::read_to_string(path).expect("read example file");
         let s = syms(&src);

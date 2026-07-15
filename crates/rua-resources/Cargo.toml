@@ -1,0 +1,16 @@
+[package]
+name = "rua-resources"
+version = "0.1.0"
+edition = "2024"
+description = "Versioned standard declarations embedded by the Rua toolchain."
+include = ["Cargo.toml", "src/**", "resources/**"]
+
+[lib]
+name = "rua_resources"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+include_dir.workspace = true
+serde.workspace = true
+toml.workspace = true

@@ -11,7 +11,7 @@ use crate::diag::Diag;
 use crate::token::SourceRange;
 use rua_core::DiagnosticCode;
 use rua_project::{FileId, LogicalSourcePath, ProjectSpec, SourceProvider};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Recursively load file modules under `items`. `dir` is the directory used to
@@ -24,8 +24,28 @@ pub fn resolve_modules(
     dir: Option<&Path>,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
+    resolve_modules_with_libraries(items, dir, &[], &BTreeMap::new(), files)
+}
+
+/// Resolve filesystem modules with external declaration roots and explicit
+/// logical root-module mounts.
+pub fn resolve_modules_with_libraries(
+    items: &mut [Item],
+    dir: Option<&Path>,
+    library: &[PathBuf],
+    library_mounts: &BTreeMap<String, PathBuf>,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
     let mut loading = HashSet::new();
-    resolve_modules_inner(items, dir, files, &mut loading)
+    resolve_modules_inner(
+        items,
+        dir,
+        library,
+        library_mounts,
+        true,
+        files,
+        &mut loading,
+    )
 }
 
 /// Resolve file modules through an IO-free project/provider contract.
@@ -184,6 +204,9 @@ fn ensure_file_registry(files: &mut Vec<String>, file_id: FileId, path: &Logical
 fn resolve_modules_inner(
     items: &mut [Item],
     dir: Option<&Path>,
+    library: &[PathBuf],
+    library_mounts: &BTreeMap<String, PathBuf>,
+    allow_library_mounts: bool,
     files: &mut Vec<String>,
     loading: &mut HashSet<PathBuf>,
 ) -> Result<(), Diag> {
@@ -199,7 +222,35 @@ fn resolve_modules_inner(
                     ),
                 )
             })?;
-            let (file, child_dir, is_decl) = resolve_mod_file(dir, &m.name)?;
+            let resolved = resolve_mod_file(dir, &m.name);
+            let (file, child_dir, is_decl) = match resolved {
+                Ok(resolved) => resolved,
+                Err(error)
+                    if allow_library_mounts
+                        && error.diagnostic.code == DiagnosticCode::NameModuleNotFound
+                        && library_mounts.contains_key(&m.name) =>
+                {
+                    resolve_library_mount(
+                        &m.name,
+                        library_mounts
+                            .get(&m.name)
+                            .expect("mount existence checked above"),
+                    )?
+                }
+                Err(error)
+                    if allow_library_mounts
+                        && error.diagnostic.code == DiagnosticCode::NameModuleNotFound =>
+                {
+                    resolve_library_module(&m.name, library).map_err(|missing| {
+                        if missing.diagnostic.code == DiagnosticCode::NameModuleNotFound {
+                            error
+                        } else {
+                            missing
+                        }
+                    })?
+                }
+                Err(error) => return Err(error),
+            };
             let canonical = file.canonicalize().map_err(|error| {
                 module_error(
                     DiagnosticCode::HostSourceRead,
@@ -229,7 +280,15 @@ fn resolve_modules_inner(
             m.source_order = sub.source_order;
             // A `.ruai` module (and everything under it) is declaration-only.
             m.is_decl = is_decl;
-            resolve_modules_inner(&mut m.items, Some(&child_dir), files, loading)?;
+            resolve_modules_inner(
+                &mut m.items,
+                Some(&child_dir),
+                library,
+                library_mounts,
+                false,
+                files,
+                loading,
+            )?;
             if is_decl {
                 validate_declaration_contents(&m.items, &m.chunk, id)?;
                 mark_decl(&mut m.items);
@@ -238,7 +297,15 @@ fn resolve_modules_inner(
         } else {
             // Inline module: its file-children live under `dir/<name>/`.
             let child_dir = dir.map(|d| d.join(&m.name));
-            resolve_modules_inner(&mut m.items, child_dir.as_deref(), files, loading)?;
+            resolve_modules_inner(
+                &mut m.items,
+                child_dir.as_deref(),
+                library,
+                library_mounts,
+                false,
+                files,
+                loading,
+            )?;
         }
     }
     Ok(())
@@ -711,6 +778,87 @@ fn resolve_mod_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, bool), 
             nested.display()
         ),
     ))
+}
+
+fn resolve_library_mount(name: &str, mount: &Path) -> Result<(PathBuf, PathBuf, bool), Diag> {
+    if mount.is_file() {
+        if mount.extension().and_then(|extension| extension.to_str()) != Some("ruai") {
+            return Err(module_error(
+                DiagnosticCode::HostProjectInvalid,
+                format!(
+                    "library mount `{name}` must point to a `.ruai` file or a directory, found {}",
+                    mount.display()
+                ),
+            ));
+        }
+        let parent = mount.parent().unwrap_or_else(|| Path::new("."));
+        return Ok((mount.to_path_buf(), parent.join(name), true));
+    }
+
+    if mount.is_dir() {
+        let declaration = mount.join("mod.ruai");
+        if declaration.is_file() {
+            return Ok((declaration, mount.to_path_buf(), true));
+        }
+        return Err(module_error(
+            DiagnosticCode::HostProjectInvalid,
+            format!(
+                "library mount `{name}` directory {} does not contain `mod.ruai`",
+                mount.display()
+            ),
+        ));
+    }
+
+    Err(module_error(
+        DiagnosticCode::HostProjectInvalid,
+        format!("library mount `{name}` does not exist: {}", mount.display()),
+    ))
+}
+
+fn resolve_library_module(
+    name: &str,
+    library: &[PathBuf],
+) -> Result<(PathBuf, PathBuf, bool), Diag> {
+    let mut found = Vec::new();
+    for root in library {
+        if root.is_file() {
+            if root.file_stem().and_then(|stem| stem.to_str()) == Some(name)
+                && root.extension().and_then(|extension| extension.to_str()) == Some("ruai")
+            {
+                let parent = root.parent().unwrap_or_else(|| Path::new("."));
+                found.push((root.to_path_buf(), parent.join(name), true));
+            }
+            continue;
+        }
+        if !root.is_dir() {
+            continue;
+        }
+        let child = root.join(name);
+        for candidate in [root.join(format!("{name}.ruai")), child.join("mod.ruai")] {
+            if candidate.is_file() {
+                found.push((candidate, child.clone(), true));
+            }
+        }
+    }
+    if found.len() > 1 {
+        return Err(module_error(
+            DiagnosticCode::NameAmbiguousImport,
+            format!(
+                "ambiguous external module `{name}`: {}",
+                found
+                    .iter()
+                    .map(|(path, _, _)| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    found.into_iter().next().ok_or_else(|| {
+        module_error(
+            DiagnosticCode::NameModuleNotFound,
+            format!("cannot find external declaration module `{name}`"),
+        )
+    })
 }
 
 /// Recursively mark nested inline modules of a `.ruai` module as declaration-only

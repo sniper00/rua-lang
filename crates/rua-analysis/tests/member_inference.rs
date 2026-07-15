@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use rua_analysis::{
-    Analysis, AnalysisHost, BindingId, Body, BodySourceMap, BuiltinMemberId, Change, DefId,
-    DefKind, DefMap, Expr, ExprId, FileId, FileKind, InferenceDiagnostic, InferenceResult,
-    ItemSignature, MemberIndex, MemberKind, MemberResolution, MemberTarget, NameRefId, NameRefKind,
-    NamedTy, SourceRootId, SourceRootKind, Ty,
+    Analysis, AnalysisHost, BindingId, Body, BodySourceMap, Change, DefId, DefKind, DefMap, Expr,
+    ExprId, FileId, FileKind, InferenceDiagnostic, InferenceResult, ItemSignature, MemberIndex,
+    MemberKind, MemberResolution, MemberTarget, NameRefId, NameRefKind, NamedTy, SourceRootId,
+    SourceRootKind, Ty, standard_library,
 };
 
 struct Fixture {
@@ -15,6 +15,17 @@ struct Fixture {
     inference: Arc<InferenceResult>,
     member_index: Arc<MemberIndex>,
     def_map: Arc<DefMap>,
+}
+
+fn assert_standard_target(resolution: &MemberResolution, owner: &str, name: &str) {
+    let MemberTarget::Builtin(id) = resolution.target() else {
+        panic!("expected standard target, got {:?}", resolution.target());
+    };
+    let member = standard_library()
+        .expect("standard library")
+        .member(id)
+        .expect("standard symbol");
+    assert_eq!((member.owner(), member.name()), (owner, name));
 }
 
 fn single_file_host(source: &str) -> (AnalysisHost, FileId) {
@@ -805,29 +816,23 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
 
     let vec_ty = Ty::Vec(Box::new(Ty::I64));
     let vec_get = index.resolve_method(&vec_ty, "get").expect("Vec::get");
-    assert_eq!(
-        vec_get.target(),
-        MemberTarget::Builtin(BuiltinMemberId::VecGet)
-    );
+    assert_standard_target(&vec_get, "Vec", "get");
     assert_eq!(vec_get.kind(), MemberKind::Method);
     assert_eq!(
         vec_get.callable().expect("Vec::get callable").return_ty(),
         &Ty::Option(Box::new(Ty::I64))
     );
-    assert_eq!(
-        index
+    assert_standard_target(
+        &index
             .resolve_associated_ty(&Ty::Vec(Box::new(Ty::Unknown)), "new")
-            .expect("Vec::new")
-            .target(),
-        MemberTarget::Builtin(BuiltinMemberId::VecNew)
+            .expect("Vec::new"),
+        "Vec",
+        "new",
     );
 
     let map_ty = Ty::HashMap(Box::new(Ty::STRING), Box::new(Ty::I64));
     let map_get = index.resolve_method(&map_ty, "get").expect("HashMap::get");
-    assert_eq!(
-        map_get.target(),
-        MemberTarget::Builtin(BuiltinMemberId::HashMapGet)
-    );
+    assert_standard_target(&map_get, "HashMap", "get");
     assert_eq!(
         map_get
             .callable()
@@ -839,10 +844,7 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
     let uppercase = index
         .resolve_method(&Ty::STRING, "to_uppercase")
         .expect("String::to_uppercase");
-    assert_eq!(
-        uppercase.target(),
-        MemberTarget::Builtin(BuiltinMemberId::StringToUppercase)
-    );
+    assert_standard_target(&uppercase, "String", "to_uppercase");
     assert_eq!(
         uppercase
             .callable()
@@ -857,25 +859,28 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
     assert_eq!(option_names, ["None", "Some"]);
-    assert_eq!(
-        index
+    assert_standard_target(
+        &index
             .resolve_associated_ty(&Ty::Option(Box::new(Ty::I64)), "Some")
-            .expect("Option::Some")
-            .target(),
-        MemberTarget::Builtin(BuiltinMemberId::OptionSome)
+            .expect("Option::Some"),
+        "Option",
+        "Some",
     );
     let option_methods = index
         .instance_candidates(&Ty::Option(Box::new(Ty::I64)))
         .into_iter()
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(option_methods, ["map"]);
     assert_eq!(
-        index
+        option_methods,
+        ["is_none", "is_some", "map", "unwrap", "unwrap_or"]
+    );
+    assert_standard_target(
+        &index
             .resolve_method(&Ty::Option(Box::new(Ty::I64)), "map")
-            .expect("Option::map")
-            .target(),
-        MemberTarget::Builtin(BuiltinMemberId::OptionMap)
+            .expect("Option::map"),
+        "Option",
+        "map",
     );
 
     let result_names = index
@@ -884,12 +889,12 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
     assert_eq!(result_names, ["Err", "Ok"]);
-    assert_eq!(
-        index
-            .resolve_associated_ty(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)), "Err",)
-            .expect("Result::Err")
-            .target(),
-        MemberTarget::Builtin(BuiltinMemberId::ResultErr)
+    assert_standard_target(
+        &index
+            .resolve_associated_ty(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)), "Err")
+            .expect("Result::Err"),
+        "Result",
+        "Err",
     );
 }
 
@@ -909,33 +914,32 @@ fn builtin_calls() -> i64 {
 }
 "#;
     let fixture = fixture(SOURCE, "builtin_calls");
-    for (marker, target, ty) in [
-        ("/*vec_push*/", BuiltinMemberId::VecPush, Ty::UNIT),
-        ("/*vec_len*/", BuiltinMemberId::VecLen, Ty::I64),
-        (
-            "/*string_upper*/",
-            BuiltinMemberId::StringToUppercase,
-            Ty::STRING,
-        ),
+    for (marker, owner, name, ty) in [
+        ("/*vec_push*/", "Vec", "push", Ty::UNIT),
+        ("/*vec_len*/", "Vec", "len", Ty::I64),
+        ("/*string_upper*/", "String", "to_uppercase", Ty::STRING),
         (
             "/*option_map*/",
-            BuiltinMemberId::OptionMap,
+            "Option",
+            "map",
             Ty::Option(Box::new(Ty::BOOL)),
         ),
-        ("/*map_insert*/", BuiltinMemberId::HashMapInsert, Ty::UNIT),
-        ("/*map_len*/", BuiltinMemberId::HashMapLen, Ty::I64),
+        (
+            "/*map_insert*/",
+            "HashMap",
+            "insert",
+            Ty::Option(Box::new(Ty::Unknown)),
+        ),
+        ("/*map_len*/", "HashMap", "len", Ty::I64),
     ] {
         let resolution = resolution_at(&fixture, marker, NameRefKind::Method);
-        assert_eq!(resolution.target(), MemberTarget::Builtin(target));
+        assert_standard_target(resolution, owner, name);
         assert_eq!(resolution.kind(), MemberKind::Method);
         let expr = member_expr_at(&fixture, marker, NameRefKind::Method);
         assert_eq!(fixture.inference.type_of_expr(expr), Some(&ty));
     }
     let map_new = resolution_at(&fixture, "/*map_new*/", NameRefKind::Path);
-    assert_eq!(
-        map_new.target(),
-        MemberTarget::Builtin(BuiltinMemberId::HashMapNew)
-    );
+    assert_standard_target(map_new, "HashMap", "new");
     assert_eq!(map_new.kind(), MemberKind::AssociatedFunction);
     assert!(fixture.inference.diagnostics().is_empty());
 }
@@ -950,10 +954,7 @@ fn bad_builtin() {
 "#;
     let fixture = fixture(SOURCE, "bad_builtin");
     let resolution = resolution_at(&fixture, "/*bad_new*/", NameRefKind::Path);
-    assert_eq!(
-        resolution.target(),
-        MemberTarget::Builtin(BuiltinMemberId::HashMapNew)
-    );
+    assert_standard_target(resolution, "HashMap", "new");
     assert!(
         fixture
             .inference

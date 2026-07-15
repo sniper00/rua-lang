@@ -15,10 +15,12 @@ Status meanings:
 
 Current inventory:
 
-- Compile pass: 46 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
+- Compile pass: 47 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
 - Compile fail: 44 `.rua` / `.diag.golden` pairs plus shared code/file/range/argument manifests.
-- Phase 4A: 12 compile-pass and 9 compile-fail closure/iterator pairs.
-- Parser/range: 16 accept, 6 reject, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.
+- Phase 4A: 13 compile-pass and 8 compile-fail closure/iterator pairs.
+- Parser/range: 16 accept, 6 reject with dual-parser diagnostic snapshots, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.
+- Formatter: 10 repository-level input/output pairs with parse, lossless, token-preservation, idempotence, and `check_format` invariants.
+- File modules: one nested multi-file compile/output/runtime golden.
 - `.ruai`: 5 compiler pass, 2 compiler fail, and 4 IDE snapshots.
 - General IDE: one active native closure/iterator snapshot plus exact native
   analysis and LSP suites; older snapshots are frozen migration records.
@@ -41,7 +43,7 @@ Current inventory:
 | Closures | Yes | Yes | Yes | Yes | Expression/typed/block closures, read/fused mutable capture, inference diagnostics, ranges, cursor queries, and semantic tokens are covered. |
 | Iterator adapters and fusion | Yes | Yes | Yes | Yes | All Phase 4A sources/adapters/consumers are type/codegen tested; exact Lua goldens enforce fused loops and the IDE snapshot covers item types and adapter tokens. |
 | Inline modules and `use` | Yes | Yes | Yes | Yes | Inline/nested modules, aliases/grouped imports, private imports, use ranges, module-path completion and symbols. |
-| File modules (`.rua`) | Partial | Yes | No | Yes | Cross-file source-map compilation, runtime module tests, missing-module rejection and IDE queries exist; no dedicated full-Lua module golden. |
+| File modules (`.rua`) | Yes | Yes | No | Yes | Nested and sibling file modules, module-local imports, full generated Lua, runtime execution, source maps, missing-module rejection and IDE queries. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
 | Extern Lua ABI and variadics | Yes | Partial | Yes | Partial | Plain extern and explicit `lua-result` runtime behavior, parser ranges and `.ruai` hover exist; invalid adapter diagnostics are unit-tested rather than shared goldens. |
 | Generic functions and types | Yes | Partial | Yes | No | Identity and generic ADTs covered; rejection coverage concentrates on bounds rather than inference conflicts and no generic-specific IDE snapshot exists. |
@@ -58,7 +60,7 @@ Current inventory:
 | Document symbols and docs | N/A | N/A | N/A | Yes | Struct/enum/trait/impl/module hierarchy, ranges, signatures and leading docs. |
 | Semantic tokens | N/A | N/A | N/A | Yes | Closure parameter definitions/uses, adapter methods, and range operators have an exact protocol-neutral snapshot plus LSP conversion tests. |
 | Inlay hints | N/A | N/A | N/A | Yes | Exact analysis/LSP tests cover primitive, aggregate, tuple, branch and clickable type hints. |
-| Formatter/comment stability | Yes | N/A | Yes | N/A | Shared comment/whitespace compile golden plus parser trivia corpus; formatter also has crate-local goldens. |
+| Formatter/comment stability | Yes | N/A | Yes | N/A | Shared comment/whitespace compile golden, parser trivia corpus, and 10 repository-level formatter goldens. |
 | Lua source maps and trace | Yes | No | N/A | N/A | A cross-file golden locks generated slices to exact Rua `FileId` and byte ranges; trace rendering remains tracked separately. |
 
 ## Known Gaps
@@ -67,7 +69,6 @@ Current inventory:
   protected by a repository golden.
 - `Vec` and `HashMap` mismatch behavior has unit tests but no shared
   compile-fail oracle.
-- File-based `.rua` module compilation has runtime and cross-file source-map coverage but lacks a dedicated full-Lua golden under `tests/golden/modules/`.
 - External `.ruai` roots are LSP configuration rather than compiler inputs;
   exact multi-root, mount, reload and watcher protocol tests own this contract.
 - Conservative name/call checking intentionally leaves unresolved external

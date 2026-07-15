@@ -15,8 +15,9 @@ matrix in the same change as its fixtures.
 compile-pass/       single-file `.rua` -> `.lua.golden`
 compile-fail/       rejected `.rua` -> `.diag.golden`
 parser/accept/      sources both parsers must accept
-parser/reject/      sources the compiler parser must reject
+parser/reject/      rejected sources + dual-parser diagnostic snapshots
 parser/ranges/      token and text-range snapshots
+format/             formatter inputs + byte-exact `.rua.golden` outputs
 modules/            multi-file compiler fixtures
 ruai/               declaration and external-library fixtures
 ide/                completion, hover, navigation, and rename snapshots
@@ -52,6 +53,7 @@ Focused compiler checks are available as:
 ```sh
 cargo test -p ruac --test golden golden_compile_pass
 cargo test -p ruac --test golden golden_compile_fail
+cargo test -p ruac --test golden golden_modules
 cargo test -p ruac --test golden golden_ruai
 cargo test -p ruac --test golden phase4a_golden
 ```
@@ -62,6 +64,12 @@ The shared parser corpus and CST byte-range snapshots are checked with:
 cargo test -p rua-syntax --test parser_goldens parser_conformance -- --exact
 cargo test -p rua-syntax range_conformance
 cargo test -p rua-syntax --test parser_goldens range_golden -- --exact
+```
+
+The formatter corpus and its structural invariants are checked with:
+
+```sh
+cargo test -p rua-syntax --test formatter_goldens formatter_golden -- --exact
 ```
 
 The active native IDE snapshot is checked with:
@@ -79,10 +87,22 @@ To accept an intentional compiler-output change, review the diff produced by:
 RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden update_goldens -- --ignored --exact
 ```
 
-Range snapshots have a separate guarded update target:
+To update only multi-file module output:
 
 ```sh
-RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test parser_goldens update_parser_range_snapshots -- --ignored --exact
+RUA_UPDATE_GOLDENS=1 cargo test -p ruac --test golden update_module_goldens -- --ignored --exact
+```
+
+Parser rejection and range snapshots have a guarded update target:
+
+```sh
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test parser_goldens update_parser_goldens -- --ignored --exact
+```
+
+Formatter snapshots use the same guard:
+
+```sh
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test formatter_goldens update_formatter_goldens -- --ignored --exact
 ```
 
 The active native IDE snapshot also requires an explicit guarded update:
@@ -97,13 +117,20 @@ mechanism alone is insufficient to write files.
 ## Assertions
 
 - Compile-pass output is the byte-exact result of `ruac::compile_path` and must execute successfully under Lua.
+- Multi-file module cases use `main.rua` as their entry point, compare the
+  complete generated chunk, and execute it so nested and imported paths are
+  verified at runtime.
 - Compile-fail output is the exact compiler error with the fixture root replaced
   by `<golden>` so snapshots do not depend on an absolute checkout path. Shared
   manifests additionally lock code, file, byte range, and named arguments.
 - Parser accept/reject sources must produce the same outcome in the compiler and
   CST parsers; every CST parse must remain lossless, including rejected input.
+  Reject cases snapshot the tolerant error sequence and the strict parser's
+  stable code, byte range, and message.
 - Range output records every CST node and non-trivia token with its exact byte
   range. `parser/ranges/<case>.rua` pairs with `<case>.range.golden`.
+- Formatter output is byte-exact, reparses without errors, is idempotent, passes
+  `check_format`, preserves significant tokens, and is accepted by both parsers.
 - `.ruai` compiler fixtures prove declarations participate in checking, reject
   executable bodies/chunks, and are skipped by codegen. Native analysis/LSP
   tests own completion, hover/goto, references, and read-only rename behavior.

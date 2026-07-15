@@ -72,6 +72,7 @@ pub struct BackendLayout {
     externs: BTreeMap<ExternId, Place>,
     locals: BTreeMap<LocalId, Place>,
     local_names: BTreeMap<(ModuleId, String), String>,
+    root_names: BTreeSet<String>,
     next_temporary: usize,
 }
 
@@ -163,12 +164,15 @@ impl BackendLayout {
             };
             locals.insert(local.id, Place::name(place));
         }
+        let mut root_names = used.remove(&hir.root).unwrap_or_default();
+        root_names.extend(["rt".to_string(), "__rua_table_create".to_string()]);
         Self {
             modules,
             definitions,
             externs,
             locals,
             local_names,
+            root_names,
             next_temporary: 0,
         }
     }
@@ -206,6 +210,18 @@ impl BackendLayout {
 
     pub fn member_name(&self, name: &str) -> String {
         user_identifier(name)
+    }
+
+    pub fn runtime_module_alias(&mut self, preferred: &str) -> String {
+        let base = user_identifier(preferred);
+        if self.root_names.insert(base.clone()) {
+            return base;
+        }
+        let mut candidate = format!("{base}__runtime");
+        while !self.root_names.insert(candidate.clone()) {
+            candidate.push('_');
+        }
+        candidate
     }
 
     pub fn fresh_temporary(&mut self) -> String {

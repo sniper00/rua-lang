@@ -77,6 +77,14 @@ fn parse_function_with_return_type() {
 }
 
 #[test]
+fn parse_callable_and_tuple_types() {
+    let source = "fn apply(f: fn((i64, bool)) -> String) -> (String, i64) {}";
+    let parse = parse_source_file(source);
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+    assert_eq!(parse.syntax_node().text().to_string(), source);
+}
+
+#[test]
 fn parse_function_no_return_type() {
     let node = parse_no_errors("fn say_hello() { }");
     assert!(has_kind(&node, SyntaxKind::FnDecl));

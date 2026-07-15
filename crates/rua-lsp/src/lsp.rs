@@ -63,10 +63,11 @@ use lsp_types::{
 };
 
 use rua_analysis::{
-    AnalysisHost, Change, CompletionInsert, CompletionKind, DefId, DefKind, FileId, FileKind,
-    HoverResult, MacroDelimiter, NavigationTarget, ProjectData, ProjectFile, ProjectId,
-    ProjectPosition, ProjectRoot, QueryContext, ReferenceResult, SemanticTokenKind, SourceChange,
-    SourceRootId, SourceRootKind, TextRange, WorkspaceSymbol as AnalysisWorkspaceSymbol,
+    AnalysisHost, BuiltinDefinitionTarget, Change, CompletionInsert, CompletionKind, DefId,
+    DefKind, FileId, FileKind, HoverResult, MacroDelimiter, NavigationTarget, ProjectData,
+    ProjectFile, ProjectId, ProjectPosition, ProjectRoot, QueryContext, ReferenceResult,
+    SemanticTokenKind, SourceChange, SourceRootId, SourceRootKind, TextRange,
+    WorkspaceSymbol as AnalysisWorkspaceSymbol,
 };
 use rua_syntax::LineIndex;
 
@@ -578,6 +579,11 @@ impl Server {
                 analysis
                     .goto_definition(pp)
                     .and_then(|target| self.nav_to_location(&target))
+                    .or_else(|| {
+                        analysis
+                            .goto_builtin_definition(pp)
+                            .and_then(|target| self.std_target_to_location(&target))
+                    })
             }
         );
     }
@@ -2310,7 +2316,15 @@ impl Server {
     }
 
     fn reload_configuration(&mut self, settings: &serde_json::Value) {
-        let Ok(request) = LibraryScanRequest::from_settings(settings) else {
+        let settings =
+            match crate::filesystem::merge_project_configs(settings, &self.workspace_folders) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("rua-lsp: project configuration failed: {error}");
+                    return;
+                }
+            };
+        let Ok(request) = LibraryScanRequest::from_settings(&settings) else {
             return;
         };
         if let Some((_, cancellation)) = self.library_scan.take() {
@@ -2325,7 +2339,10 @@ impl Server {
             .worker_pool
             .try_execute(move || {
                 let result = request.scan(&mut || cancellation.is_cancelled());
-                let _ = sender.send(BackgroundResult::LibraryScan { generation, result });
+                let _ = sender.send(BackgroundResult::LibraryScan {
+                    generation,
+                    result: Box::new(result),
+                });
             })
             .is_err()
         {
@@ -2334,6 +2351,20 @@ impl Server {
     }
 
     fn apply_library_config(&mut self, config: LibraryConfig) {
+        let standard_library = config
+            .standard_library
+            .as_ref()
+            .map(Ok)
+            .unwrap_or_else(|| rua_resources::embedded_std().map_err(ToString::to_string));
+        if let Ok(standard_library) = standard_library {
+            let _ = self.host.set_standard_library(standard_library);
+        }
+        self.standard_library_root = config.std_root.clone();
+        self.standard_library_navigation_root = config.std_root.clone().or_else(|| {
+            rua_resources::materialized_embedded_std()
+                .ok()
+                .map(Path::to_path_buf)
+        });
         let mut change = Change::new();
 
         if let Some(old_root) = self.library_source_root.take() {
@@ -2459,6 +2490,15 @@ impl Server {
                 Self::try_add_watcher(&glob, &mut self.watched_paths, &mut watchers);
             }
         }
+        if let Some(root) = &self.standard_library_root
+            && let Ok(canonical) = std::fs::canonicalize(root)
+        {
+            let glob = canonical
+                .join("**/*.{ruai,toml}")
+                .to_string_lossy()
+                .to_string();
+            Self::try_add_watcher(&glob, &mut self.watched_paths, &mut watchers);
+        }
 
         if watchers.is_empty() {
             return;
@@ -2527,17 +2567,25 @@ impl Server {
     }
 
     fn handle_watched_file_change(&mut self, params: &DidChangeWatchedFilesParams) {
-        let Some(root_id) = self.library_source_root else {
-            return;
-        };
-
         let mut change = Change::new();
+        let mut standard_library_changed = false;
 
         for event in &params.changes {
             let Some(path) = uri_to_path(&event.uri) else {
                 continue;
             };
             let path = normalize_physical_path(&path);
+            if self
+                .standard_library_root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+            {
+                standard_library_changed = true;
+                continue;
+            }
+            let Some(root_id) = self.library_source_root else {
+                continue;
+            };
             let file_id = self.ensure_file_id_for_path(&path);
             match event.typ {
                 lsp_types::FileChangeType::CREATED | lsp_types::FileChangeType::CHANGED => {
@@ -2574,6 +2622,13 @@ impl Server {
                 }
                 _ => {}
             }
+        }
+
+        if standard_library_changed
+            && let Some(root) = &self.standard_library_root
+            && let Ok(library) = rua_resources::load_std_dir(root)
+        {
+            let _ = self.host.set_standard_library(&library);
         }
 
         self.rebuild_project_dependency_roots();
@@ -2650,6 +2705,28 @@ impl Server {
         let uri = self.uri_for_file(file_range.file_id)?;
         let range = self.range_for_file(file_range.file_id, file_range.range)?;
         Some(GotoDefinitionResponse::Scalar(Location { uri, range }))
+    }
+
+    fn std_target_to_location(
+        &self,
+        target: &BuiltinDefinitionTarget,
+    ) -> Option<GotoDefinitionResponse> {
+        let path = self
+            .standard_library_navigation_root
+            .as_ref()?
+            .join(target.source_name());
+        let source = std::fs::read_to_string(&path).ok()?;
+        let line_index = LineIndex::new(&source);
+        let start = line_index.line_col(target.range().start() as usize, &source);
+        let end = line_index.line_col(target.range().end() as usize, &source);
+        let uri = path_to_uri(&path)?;
+        Some(GotoDefinitionResponse::Scalar(Location {
+            uri,
+            range: Range::new(
+                Position::new(start.0 as u32, start.1 as u32),
+                Position::new(end.0 as u32, end.1 as u32),
+            ),
+        }))
     }
 
     fn ref_to_location(&self, r: &rua_analysis::ReferenceResult) -> Option<Location> {
@@ -2836,6 +2913,7 @@ fn main() {
 impl Server {
     fn index_workspace_folders(&mut self, folders: &[Uri]) {
         let roots = folders.iter().filter_map(uri_to_path).collect::<Vec<_>>();
+        self.workspace_folders = roots.clone();
         if let Some((_, cancellation)) = self.workspace_scan.take() {
             cancellation.cancel();
         }

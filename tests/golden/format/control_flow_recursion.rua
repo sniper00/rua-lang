@@ -1,0 +1,43 @@
+// Control flow, loops, direct calls, and mutual recursion.
+
+fn abs(x: i64) -> i64 {
+    if x < 0 { -x } else { x }
+}
+
+fn gcd(a: i64, b: i64) -> i64 {
+    let mut x = abs(a);
+    let mut y = abs(b);
+    while y != 0 {
+        let t = y;
+        y = x % y;
+        x = t;
+    }
+    x
+}
+
+fn is_even(n: i64) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+
+fn is_odd(n: i64) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+
+fn main() {
+    print("gcd(48, 36) = ");
+    print(gcd(48, 36));
+    print("\n");
+
+    let mut i = 0;
+    while i < 6 {
+        if i == 3 {
+            i = i + 1;
+            continue;
+        }
+        print(i);
+        print(" is_even=");
+        print(is_even(i));
+        print("\n");
+        i = i + 1;
+    }
+}

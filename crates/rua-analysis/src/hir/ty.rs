@@ -403,6 +403,7 @@ pub type NamedTypeResolver<'a> = dyn Fn(&str) -> Option<DefId> + 'a;
 #[derive(Default)]
 pub struct TypeLoweringContext<'a> {
     generic_params: BTreeMap<String, GenericParamId>,
+    type_aliases: BTreeMap<String, Ty>,
     named_resolver: Option<&'a NamedTypeResolver<'a>>,
 }
 
@@ -411,6 +412,7 @@ impl fmt::Debug for TypeLoweringContext<'_> {
         formatter
             .debug_struct("TypeLoweringContext")
             .field("generic_params", &self.generic_params)
+            .field("type_aliases", &self.type_aliases)
             .field("has_named_resolver", &self.named_resolver.is_some())
             .finish()
     }
@@ -436,6 +438,16 @@ impl<'a> TypeLoweringContext<'a> {
         self
     }
 
+    pub fn with_type_aliases<I, S>(mut self, aliases: I) -> Self
+    where
+        I: IntoIterator<Item = (S, Ty)>,
+        S: Into<String>,
+    {
+        self.type_aliases
+            .extend(aliases.into_iter().map(|(name, ty)| (name.into(), ty)));
+        self
+    }
+
     pub fn with_named_resolver(mut self, resolver: &'a NamedTypeResolver<'a>) -> Self {
         self.named_resolver = Some(resolver);
         self
@@ -453,6 +465,12 @@ impl<'a> TypeLoweringContext<'a> {
     }
 
     fn lower_path(&self, path: String, args: Vec<Ty>) -> Ty {
+        if !path.contains("::")
+            && args.is_empty()
+            && let Some(ty) = self.type_aliases.get(&path)
+        {
+            return ty.clone();
+        }
         if !path.contains("::")
             && args.is_empty()
             && let Some(id) = self.generic_params.get(&path)

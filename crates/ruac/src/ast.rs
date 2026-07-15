@@ -12,6 +12,9 @@ pub struct Program {
     pub source_order: Vec<ChunkEntry>,
     /// The root source is a declaration-only `.ruai` input.
     pub is_decl: bool,
+    /// Versioned standard-library bindings installed by the host. Parsers leave
+    /// this empty; `load_builtins` fills it together with declaration items.
+    pub(crate) standard_library: Option<crate::builtins::StandardMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,8 +86,8 @@ pub struct ModDecl {
     /// sibling `.rua` file during resolution; `false` for an inline `mod { .. }`.
     pub is_file: bool,
     /// `true` when the module's items came from a `.ruai` declaration file: they
-    /// are registered with the checkers but emit **no** Lua (references resolve to
-    /// host-provided globals, e.g. `moon`). Set during resolution.
+    /// are registered with the checkers but emit no definitions. Referenced
+    /// declaration modules are loaded with `require` by codegen.
     pub is_decl: bool,
 }
 
@@ -262,8 +265,13 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    /// Whether each statement was preceded by at least one empty source line.
+    /// This stays parallel to `stmts` and is consumed only by presentation.
+    pub statement_blank_before: Vec<bool>,
     /// Trailing expression (block value), if the block ends without `;`.
     pub tail: Option<Box<Expr>>,
+    /// Whether the trailing expression was preceded by an empty source line.
+    pub tail_blank_before: bool,
 }
 
 #[derive(Debug, Clone)]

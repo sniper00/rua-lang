@@ -23,23 +23,36 @@ pub mod tokenize;
 pub mod typeck;
 pub mod typed_ir;
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::{error::Error, fmt};
 
 use crate::diag::Diag;
 use rua_project::{ProjectSpec, SourceProvider};
+
+/// Filesystem compilation inputs that are independent from Rua source text.
+#[derive(Clone, Debug, Default)]
+pub struct CompileOptions {
+    /// Optional standard-library root containing `std.toml`.
+    pub std_path: Option<PathBuf>,
+    /// External `.ruai` files or directories searched by module filename.
+    pub library: Vec<PathBuf>,
+    /// Logical root module name to external `.ruai` file or module directory.
+    pub library_mounts: BTreeMap<String, PathBuf>,
+}
 
 /// Load builtin `.ruai` declarations into a declaration-only semantic module.
 ///
 /// With no explicit directory, the compiler uses its embedded sysroot. An
 /// explicit directory replaces that sysroot and is never allowed to fail open.
 pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(), Diag> {
-    let items = if let Some(dir) = dir {
+    let loaded = if let Some(dir) = dir {
         builtins::load_builtins_dir(dir)
     } else {
         builtins::load_embedded_builtins()
     }
     .map_err(|error| Diag::bare(rua_core::DiagnosticCode::HostBuiltinInvalid, error))?;
+    program.standard_library = Some(loaded.metadata);
     for entry in &mut program.source_order {
         if let ast::ChunkEntry::Item(index) = entry {
             *index += 1;
@@ -50,10 +63,12 @@ pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(
         ast::Item::Mod(ast::ModDecl {
             name: "__rua_builtin".to_string(),
             documentation: None,
-            items,
+            items: loaded.items,
             chunk: ast::Block {
                 stmts: Vec::new(),
+                statement_blank_before: Vec::new(),
                 tail: None,
+                tail_blank_before: false,
             },
             source_order: Vec::new(),
             is_pub: false,
@@ -73,7 +88,12 @@ pub fn compile_str(src: &str) -> Result<String, CompileFailure> {
 
 /// Like [`compile_str`] but with an explicit builtins directory.
 pub fn compile_str_with_builtins(src: &str, builtins_dir: &Path) -> Result<String, CompileFailure> {
-    _compile_str(src, Some(builtins_dir))
+    compile_str_with_std(src, builtins_dir)
+}
+
+/// Compile with an explicit standard-library root containing `std.toml`.
+pub fn compile_str_with_std(src: &str, std_path: &Path) -> Result<String, CompileFailure> {
+    _compile_str(src, Some(std_path))
 }
 
 /// Compile a complete logical project without filesystem access.
@@ -252,17 +272,31 @@ pub fn compile_path(path: &Path) -> Result<String, CompileFailure> {
     compile_path_artifact(path).map(|artifact| artifact.source)
 }
 
+/// Compile a source file with explicit standard-library and external-library
+/// inputs.
+pub fn compile_path_with_options(
+    path: &Path,
+    options: &CompileOptions,
+) -> Result<String, CompileFailure> {
+    compile_path_artifact_with_options(path, options).map(|artifact| artifact.source)
+}
+
 /// Like [`compile_path`] but with an explicit builtins directory.
 pub fn compile_path_with_builtins(
     path: &Path,
     builtins_dir: &Path,
 ) -> Result<String, CompileFailure> {
-    compile_path_artifact_with_builtins(path, builtins_dir).map(|artifact| artifact.source)
+    compile_path_with_std(path, builtins_dir)
+}
+
+/// Compile a source file with an explicit `std.toml` root.
+pub fn compile_path_with_std(path: &Path, std_path: &Path) -> Result<String, CompileFailure> {
+    compile_path_artifact_with_std(path, std_path).map(|artifact| artifact.source)
 }
 
 /// Compile a Rua source file and retain generated-to-source mappings.
 pub fn compile_path_artifact(path: &Path) -> Result<codegen::GeneratedLua, CompileFailure> {
-    _compile_path_artifact(path, None)
+    compile_path_artifact_with_options(path, &CompileOptions::default())
 }
 
 /// Like [`compile_path_artifact`] but with an explicit builtins directory.
@@ -270,15 +304,32 @@ pub fn compile_path_artifact_with_builtins(
     path: &Path,
     builtins_dir: &Path,
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
-    _compile_path_artifact(path, Some(builtins_dir))
+    compile_path_artifact_with_std(path, builtins_dir)
 }
 
-fn _compile_path_artifact(
+/// Compile a source file with an explicit `std.toml` root and retain mappings.
+pub fn compile_path_artifact_with_std(
     path: &Path,
-    builtins_dir: Option<&Path>,
+    std_path: &Path,
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
-    let (mut program, files) = parse_and_load_modules(path)?;
-    load_builtins(&mut program, builtins_dir)
+    compile_path_artifact_with_options(
+        path,
+        &CompileOptions {
+            std_path: Some(std_path.to_path_buf()),
+            library: Vec::new(),
+            library_mounts: BTreeMap::new(),
+        },
+    )
+}
+
+/// Compile a source file with explicit inputs and retain source mappings.
+pub fn compile_path_artifact_with_options(
+    path: &Path,
+    options: &CompileOptions,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let (mut program, files) =
+        parse_and_load_modules_with_libraries(path, &options.library, &options.library_mounts)?;
+    load_builtins(&mut program, options.std_path.as_deref())
         .map_err(|error| CompileFailure::single(error, files.clone()))?;
     let hir = hir::resolve(&program);
     check::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
@@ -301,6 +352,14 @@ pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), Com
 }
 
 pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>), CompileFailure> {
+    parse_and_load_modules_with_libraries(path, &[], &BTreeMap::new())
+}
+
+fn parse_and_load_modules_with_libraries(
+    path: &Path,
+    library: &[PathBuf],
+    library_mounts: &BTreeMap<String, PathBuf>,
+) -> Result<(ast::Program, Vec<String>), CompileFailure> {
     let files = vec![path.display().to_string()];
     let src = std::fs::read_to_string(path).map_err(|error| {
         CompileFailure::single(
@@ -327,8 +386,14 @@ pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>)
     // The root file is id 0; child files are appended during resolution.
     let mut files = files;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    resolve::resolve_modules(&mut program.items, Some(dir), &mut files)
-        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    resolve::resolve_modules_with_libraries(
+        &mut program.items,
+        Some(dir),
+        library,
+        library_mounts,
+        &mut files,
+    )
+    .map_err(|error| CompileFailure::single(error, files.clone()))?;
     if program.is_decl {
         resolve::validate_declaration_program(&program, 0)
             .map_err(|error| CompileFailure::single(error, files.clone()))?;

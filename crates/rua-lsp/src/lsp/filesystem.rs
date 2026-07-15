@@ -9,18 +9,121 @@ pub(super) struct LibraryConfig {
     pub(super) bases: Vec<PathBuf>,
     pub(super) project_bases: BTreeMap<u32, Vec<PathBuf>>,
     pub(super) files: Vec<LibraryFile>,
+    pub(super) std_root: Option<PathBuf>,
+    pub(super) standard_library: Option<rua_resources::StdLibrary>,
 }
 
 pub(super) struct LibraryScanRequest {
     roots: Vec<PathBuf>,
     mounts: HashMap<String, PathBuf>,
     projects: Vec<ProjectLibraryScanRequest>,
+    std_root: Option<PathBuf>,
 }
 
 struct ProjectLibraryScanRequest {
     project_index: u32,
     roots: Vec<PathBuf>,
     mounts: HashMap<String, PathBuf>,
+    std_root: Option<PathBuf>,
+}
+
+pub(super) fn merge_project_configs(
+    settings: &serde_json::Value,
+    workspace_roots: &[PathBuf],
+) -> Result<serde_json::Value, String> {
+    let mut rua = settings
+        .get("rua")
+        .cloned()
+        .unwrap_or_else(|| settings.clone());
+    let rua_object = rua
+        .as_object_mut()
+        .ok_or_else(|| "Rua settings must be an object".to_string())?;
+    let mut workspace_settings = rua_object
+        .remove("workspaceSettings")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+
+    for (project_index, root) in workspace_roots.iter().enumerate() {
+        let config_path = root.join(rua_project::PROJECT_CONFIG_FILE);
+        if !config_path.is_file() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&config_path)
+            .map_err(|error| format!("reading {}: {error}", config_path.display()))?;
+        let config = rua_project::parse_project_config(&source)
+            .map_err(|error| format!("parsing {}: {error}", config_path.display()))?
+            .resolve(root)
+            .map_err(|error| format!("resolving {}: {error}", config_path.display()))?;
+
+        let setting_index = workspace_settings
+            .iter()
+            .position(|setting| {
+                setting
+                    .get("projectIndex")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(project_index as u64)
+            })
+            .unwrap_or_else(|| {
+                workspace_settings.push(serde_json::json!({
+                    "projectIndex": project_index,
+                    "workspaceFolder": root.to_string_lossy(),
+                }));
+                workspace_settings.len() - 1
+            });
+        let setting = workspace_settings[setting_index]
+            .as_object_mut()
+            .ok_or_else(|| format!("workspace setting {project_index} must be an object"))?;
+
+        let configured_library_is_empty = setting
+            .get("library")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        if configured_library_is_empty && !config.library.is_empty() {
+            setting.insert("library".to_string(), serde_json::json!(config.library));
+        }
+
+        let mut mounts = config
+            .library_mounts
+            .into_iter()
+            .map(|(name, path)| {
+                (
+                    name,
+                    serde_json::Value::String(path.to_string_lossy().into()),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        if let Some(configured) = setting
+            .get("libraryMounts")
+            .and_then(serde_json::Value::as_object)
+        {
+            mounts.extend(configured.clone());
+        }
+        if !mounts.is_empty() {
+            setting.insert(
+                "libraryMounts".to_string(),
+                serde_json::Value::Object(mounts),
+            );
+        }
+
+        let configured_std_is_empty = setting
+            .get("stdPath")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty);
+        if configured_std_is_empty && let Some(std_path) = config.std_path {
+            setting.insert(
+                "stdPath".to_string(),
+                serde_json::Value::String(std_path.to_string_lossy().into()),
+            );
+        }
+    }
+
+    if !workspace_settings.is_empty() {
+        rua_object.insert(
+            "workspaceSettings".to_string(),
+            serde_json::Value::Array(workspace_settings),
+        );
+    }
+    Ok(serde_json::json!({ "rua": rua }))
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +154,7 @@ impl LibraryScanRequest {
 
         let roots = parse_library_paths(library)?;
         let mounts = parse_mounts(mounts)?;
+        let root_std = parse_std_path(settings, nested)?;
         let workspace_settings = nested
             .and_then(|rua| rua.get("workspaceSettings"))
             .or_else(|| settings.get("workspaceSettings"));
@@ -71,16 +175,30 @@ impl LibraryScanRequest {
                             project_index,
                             roots: parse_library_paths(setting.get("library"))?,
                             mounts: parse_mounts(setting.get("libraryMounts"))?,
+                            std_root: parse_std_path(setting, Some(setting))?,
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()
             })
             .transpose()?
             .unwrap_or_default();
+        let mut std_roots = projects
+            .iter()
+            .filter_map(|project| project.std_root.clone())
+            .collect::<Vec<_>>();
+        if let Some(root) = root_std {
+            std_roots.push(root);
+        }
+        std_roots.sort();
+        std_roots.dedup();
+        if std_roots.len() > 1 {
+            return Err("all workspace folders must use the same rua.std.path".to_string());
+        }
         Ok(Self {
             roots,
             mounts,
             projects,
+            std_root: std_roots.pop(),
         })
     }
 
@@ -88,6 +206,16 @@ impl LibraryScanRequest {
         self,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<LibraryConfig, String> {
+        let standard_library = self
+            .std_root
+            .as_deref()
+            .map(rua_resources::load_std_dir)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        if let Some(library) = &standard_library {
+            rua_analysis::hir::StdLibraryIndex::build(library)
+                .map_err(|error| format!("indexing configured standard library: {error}"))?;
+        }
         let mut roots = self.roots;
         let mut mounts = self.mounts;
         let (mut bases, mut files) = scan_library_inputs(&roots, &mounts, cancelled)?;
@@ -120,7 +248,28 @@ impl LibraryScanRequest {
             bases,
             project_bases,
             files,
+            std_root: self.std_root,
+            standard_library,
         })
+    }
+}
+
+fn parse_std_path(
+    settings: &serde_json::Value,
+    nested: Option<&serde_json::Value>,
+) -> Result<Option<PathBuf>, String> {
+    let value = settings
+        .get("rua.std.path")
+        .or_else(|| nested.and_then(|rua| rua.get("stdPath")))
+        .or_else(|| nested.and_then(|rua| rua.get("sysroot")))
+        .or_else(|| settings.get("stdPath"))
+        .or_else(|| settings.get("sysroot"));
+    match value {
+        Some(value) => value
+            .as_str()
+            .map(|path| (!path.is_empty()).then(|| PathBuf::from(path)))
+            .ok_or_else(|| "rua.std.path must be a string path".to_string()),
+        None => Ok(None),
     }
 }
 
@@ -375,4 +524,117 @@ fn should_skip_directory(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with('.') || matches!(name, "target" | "node_modules"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn std_path_accepts_flat_and_extension_settings_shapes() {
+        let flat = LibraryScanRequest::from_settings(&json!({
+            "rua.std.path": "/tmp/rua-std"
+        }))
+        .unwrap();
+        assert_eq!(flat.std_root, Some(PathBuf::from("/tmp/rua-std")));
+
+        let nested = LibraryScanRequest::from_settings(&json!({
+            "rua": { "stdPath": "/tmp/rua-std" }
+        }))
+        .unwrap();
+        assert_eq!(nested.std_root, Some(PathBuf::from("/tmp/rua-std")));
+    }
+
+    #[test]
+    fn std_path_loads_a_manifest_driven_library() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rua-resources/resources/std");
+        let request = LibraryScanRequest::from_settings(&json!({
+            "rua.std.path": root
+        }))
+        .unwrap();
+        let config = request.scan(&mut || false).unwrap();
+        let library = config
+            .standard_library
+            .expect("configured standard library");
+        assert_eq!(library.lang_item("option"), Some("Option"));
+        assert!(
+            library.manifest().modules.iter().any(
+                |module| module.runtime == "rua_std" && module.export.as_deref() == Some("vec")
+            )
+        );
+    }
+
+    #[test]
+    fn workspace_std_overrides_must_agree() {
+        let error = LibraryScanRequest::from_settings(&json!({
+            "rua": {
+                "workspaceSettings": [
+                    { "projectIndex": 0, "stdPath": "/tmp/std-a" },
+                    { "projectIndex": 1, "stdPath": "/tmp/std-b" }
+                ]
+            }
+        }))
+        .err()
+        .expect("conflicting standard roots must fail");
+        assert!(error.contains("same rua.std.path"));
+    }
+
+    #[test]
+    fn ruarc_toml_supplies_project_libraries_and_editor_settings_override() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rua-lsp-project-config-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(rua_project::PROJECT_CONFIG_FILE),
+            r#"
+            [workspace]
+            library = ["types/moon.ruai"]
+
+            [workspace.library_mounts]
+            host = "types/host.ruai"
+
+            [runtime]
+            std_path = "std"
+            "#,
+        )
+        .unwrap();
+
+        let config_only =
+            merge_project_configs(&json!({ "rua": {} }), std::slice::from_ref(&root)).unwrap();
+        let setting = &config_only["rua"]["workspaceSettings"][0];
+        assert_eq!(setting["library"], json!([root.join("types/moon.ruai")]));
+        assert_eq!(
+            setting["libraryMounts"]["host"],
+            json!(root.join("types/host.ruai"))
+        );
+
+        let merged = merge_project_configs(
+            &json!({
+                "rua": {
+                    "workspaceSettings": [{
+                        "projectIndex": 0,
+                        "library": [root.join("editor-types")],
+                        "libraryMounts": { "host": root.join("editor-host.ruai") }
+                    }]
+                }
+            }),
+            std::slice::from_ref(&root),
+        )
+        .unwrap();
+        let setting = &merged["rua"]["workspaceSettings"][0];
+        assert_eq!(setting["library"], json!([root.join("editor-types")]));
+        assert_eq!(
+            setting["libraryMounts"]["host"],
+            json!(root.join("editor-host.ruai"))
+        );
+        assert_eq!(setting["stdPath"], json!(root.join("std")));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

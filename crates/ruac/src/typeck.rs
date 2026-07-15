@@ -22,6 +22,8 @@ pub enum IterSourceKind {
     Vec,
     VecIter,
     VecIntoIter,
+    StringChars,
+    StringSplit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub enum IterConsumerKind {
     Any,
     All,
     Find,
+    Next,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,39 +560,10 @@ struct FnSig {
     generic_bounds: HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
 }
 
-/// Return type of a recognized builtin method on a parameterized collection
-/// type. Returns `Unknown` for anything unrecognized (never an error), so
-/// unmodeled methods on `Vec`/`HashMap` stay silently untyped.
-fn builtin_method_ret(recv: &Ty, method: &str) -> Ty {
-    match (recv, method) {
-        (Ty::Vec(t), "get" | "pop") => Ty::Option(t.clone()),
-        (Ty::Vec(_), "len") => Ty::I64,
-        (Ty::Vec(_), "push" | "set") => Ty::Unit,
-        (Ty::Map(_, v), "get" | "remove") => Ty::Option(v.clone()),
-        (Ty::Map(_, _), "len") => Ty::I64,
-        (Ty::Map(_, _), "contains_key") => Ty::Bool,
-        (Ty::Map(_, _), "insert") => Ty::Unit,
-        _ => Ty::Unknown,
-    }
-}
-
-/// Return type of a recognized std `String` method, or `None` if the method is
-/// not part of the shimmed surface (so it stays `Unknown`, never an error).
-/// Codegen routes recognized methods through the `rt.str` runtime helpers.
-fn str_method_ret(method: &str) -> Option<Ty> {
-    Some(match method {
-        "len" => Ty::I64,
-        "is_empty" | "contains" | "starts_with" | "ends_with" => Ty::Bool,
-        "to_uppercase" | "to_lowercase" | "trim" | "trim_start" | "trim_end" | "replace"
-        | "repeat" | "to_string" | "to_owned" | "clone" => Ty::Str,
-        "chars" | "split" => Ty::Vec(Box::new(Ty::Str)),
-        _ => return None,
-    })
-}
-
 /// Type-derived facts the backend needs: the sets of `/` and `%` expressions
 /// whose operands are both `i64`, so codegen can emit truncating integer helpers
-/// (`rt.idiv`/`rt.irem`) that match Rust rather than Lua's floored `//`/`%`.
+/// (the `number` export from `rua_std`) that match Rust rather than Lua's
+/// floored `//`/`%`.
 /// All expression facts are keyed by parser-owned `ExprId`; source ranges are
 /// used only for diagnostics.
 #[derive(Debug, Default)]
@@ -597,7 +571,7 @@ pub struct TypeInfo {
     int_divs: std::collections::HashSet<ExprId>,
     int_rems: std::collections::HashSet<ExprId>,
     /// Method-call expressions whose receiver is a `String` and whose method is
-    /// a recognized std string method, so codegen routes them through `rt.str`.
+    /// a recognized std string method, so codegen routes them through its configured module.
     str_methods: std::collections::HashSet<ExprId>,
     /// `+` expressions whose operands are both `String`, so codegen emits Lua
     /// string concatenation (`..`) instead of arithmetic.
@@ -605,6 +579,9 @@ pub struct TypeInfo {
     /// Method-call expressions where the receiver is `Option<T>` and the method
     /// is `map`, so codegen inlines the closure instead of emitting `:map()`.
     option_maps: std::collections::HashSet<ExprId>,
+    /// Standard method declaration selected for each call. Codegen resolves its
+    /// runtime module from the declaration file recorded by `std.toml`.
+    standard_methods: HashMap<ExprId, crate::hir::DefId>,
     /// Unary/binary expressions proven to use primitive Lua operators rather
     /// than user metamethods.
     pure_operators: std::collections::HashSet<ExprId>,
@@ -641,6 +618,10 @@ impl TypeInfo {
 
     pub fn is_option_map(&self, expression: ExprId) -> bool {
         self.option_maps.contains(&expression)
+    }
+
+    pub fn standard_method(&self, expression: ExprId) -> Option<crate::hir::DefId> {
+        self.standard_methods.get(&expression).copied()
     }
 
     pub fn is_pure_operator(&self, expression: ExprId) -> bool {
@@ -755,6 +736,7 @@ pub fn check_resolved_diagnostics(
             str_methods: tc.str_methods,
             str_concats: tc.str_concats,
             option_maps: tc.option_maps,
+            standard_methods: tc.standard_methods,
             pure_operators: tc.pure_operators,
             user_methods: tc.user_methods,
             result_tries: tc.result_tries,
@@ -800,6 +782,7 @@ struct Tc {
     str_concats: std::collections::HashSet<ExprId>,
     /// `Option::map` calls that need inline codegen.
     option_maps: std::collections::HashSet<ExprId>,
+    standard_methods: HashMap<ExprId, crate::hir::DefId>,
     pure_operators: std::collections::HashSet<ExprId>,
     user_methods: HashMap<ExprId, UserMethodDispatch>,
     result_tries: std::collections::HashSet<ExprId>,
@@ -827,6 +810,7 @@ impl Tc {
             str_methods: std::collections::HashSet::new(),
             str_concats: std::collections::HashSet::new(),
             option_maps: std::collections::HashSet::new(),
+            standard_methods: HashMap::new(),
             pure_operators: std::collections::HashSet::new(),
             user_methods: HashMap::new(),
             result_tries: std::collections::HashSet::new(),
@@ -1332,9 +1316,6 @@ impl Tc {
         }
         let ret_ty = ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit);
         let actual = self.block(body);
-        if let Some(tail) = &body.tail {
-            self.reject_iter_escape(&actual, tail.span);
-        }
         // Only check a concrete, non-unit declared return against a concrete tail.
         if let Some(tail) = &body.tail
             && ret_ty.is_concrete()
@@ -1433,7 +1414,6 @@ impl Tc {
                     }
                     None => init_ty,
                 };
-                self.reject_iter_escape(&bind_ty, init.span);
                 // For an inferred (un-annotated) empty collection, fill unknown
                 // element/key/value slots from later `push`/`insert` calls in
                 // this block (`let mut m = HashMap::new(); m.insert("a", 1)`).
@@ -1445,12 +1425,10 @@ impl Tc {
                 self.bind_mutability(name, bind_ty, *mutable);
             }
             Stmt::Expr(e) => {
-                let ty = self.infer(e);
-                self.reject_iter_escape(&ty, e.span);
+                self.infer(e);
             }
             Stmt::Return(Some(e)) => {
                 let ty = self.infer(e);
-                self.reject_iter_escape(&ty, e.span);
                 if let Some(returns) = self.closure_returns.last_mut() {
                     returns.push(ty);
                 }
@@ -1526,12 +1504,6 @@ impl Tc {
                 sp,
                 format!("{} must be `bool`, found `{}`", what, ty.name()),
             );
-        }
-    }
-
-    fn reject_iter_escape(&mut self, ty: &Ty, span: SourceRange) {
-        if matches!(ty, Ty::Iter(_, _)) {
-            self.err(span, "iterator escape is not supported yet".to_string());
         }
     }
 
@@ -1645,8 +1617,6 @@ impl Tc {
             inferred_ret = declared;
         }
 
-        self.reject_iter_escape(&inferred_ret, span);
-
         Ty::Closure(param_tys, Box::new(inferred_ret))
     }
 
@@ -1684,8 +1654,9 @@ impl Tc {
     }
 
     fn infer_method_args(&mut self, recv: &Ty, method: &str, args: &[Expr]) -> Vec<Ty> {
-        // Option<T>::map(fn) — propagate the inner type to the closure param.
-        if let Ty::Option(inner) = recv {
+        // Option<T>::map(fn) and Result<T, E>::map(fn) propagate the payload
+        // type to the closure parameter without treating the closure as escaped.
+        if let Ty::Option(inner) | Ty::Result(inner, _) = recv {
             if method == "map" && args.len() == 1 {
                 let expected = vec![(**inner).clone()];
                 if let ExprKind::Closure { params, ret, body } = &args[0].kind {
@@ -1791,6 +1762,18 @@ impl Tc {
             return Some(Ty::Option(Box::new(ret_ty)));
         }
 
+        // Result<T, E>::map(fn) -> Result<U, E>
+        if method == "map"
+            && args.len() == 1
+            && let Ty::Result(_, error) = recv
+        {
+            let ret_ty = match &arg_tys[0] {
+                Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
+                _ => Ty::Unknown,
+            };
+            return Some(Ty::Result(Box::new(ret_ty), error.clone()));
+        }
+
         let Ty::Iter(item, draft) = recv else {
             if matches!(
                 method,
@@ -1808,6 +1791,7 @@ impl Tc {
                     | "any"
                     | "all"
                     | "find"
+                    | "next"
             ) && recv.is_concrete()
                 && !matches!(recv, Ty::Named { .. })
             {
@@ -2065,7 +2049,19 @@ impl Tc {
                 self.finish_iter_plan(draft, consumer, expression, span, item, &output);
                 Some(output)
             }
-            "collect" | "fold" | "count" | "any" | "all" | "find" => {
+            "next" if args.is_empty() => {
+                let output = Ty::Option(item.clone());
+                self.finish_iter_plan(
+                    draft,
+                    IterConsumerKind::Next,
+                    expression,
+                    span,
+                    item,
+                    &output,
+                );
+                Some(output)
+            }
+            "collect" | "fold" | "count" | "any" | "all" | "find" | "next" => {
                 self.err(
                     span,
                     format!("iterator consumer `{method}` has invalid arguments"),
@@ -2160,7 +2156,7 @@ impl Tc {
                     self.pure_operators.insert(e.id);
                 }
                 // Record `i64 / i64` and `i64 % i64` so codegen can emit the
-                // truncating integer helpers (`rt.idiv`/`rt.irem`).
+                // truncating integer helpers from the `number` runtime export.
                 if matches!(l, Ty::I64) && matches!(r, Ty::I64) {
                     if *op == BinOp::Div {
                         self.int_divs.insert(e.id);
@@ -2183,14 +2179,16 @@ impl Tc {
                 ..
             } => {
                 let rt = self.infer(recv);
-                // Track Option::map calls for codegen inlining.
-                if method == "map" && matches!(rt, Ty::Option(_)) {
-                    self.option_maps.insert(e.id);
+                let standard_method = self.standard_method_definition(&rt, method);
+                if let Some(definition) = standard_method {
+                    self.standard_methods.insert(e.id, definition);
+                    if self.hir.language_item(definition)
+                        == Some(crate::builtins::LanguageItem::OptionMap)
+                    {
+                        self.option_maps.insert(e.id);
+                    }
                 }
                 let arg_tys = self.infer_method_args(&rt, method, args);
-                for (arg, ty) in args.iter().zip(&arg_tys) {
-                    self.reject_iter_escape(ty, arg.span);
-                }
                 if let Ty::Named {
                     def: owner,
                     name: type_name,
@@ -2265,25 +2263,35 @@ impl Tc {
                     }
                     return signature.ret;
                 }
-                // Std `String` methods: record the call so codegen routes it
-                // through `rt.str`, and yield the method's return type.
-                if matches!(rt, Ty::Str)
-                    && let Some(ret) = str_method_ret(method)
+                if standard_method.is_some()
+                    && matches!(rt, Ty::Str)
+                    && matches!(method.as_str(), "chars" | "split")
                 {
                     self.str_methods.insert(e.id);
-                    return ret;
+                    let kind = if method == "chars" {
+                        IterSourceKind::StringChars
+                    } else {
+                        IterSourceKind::StringSplit
+                    };
+                    return Ty::Iter(
+                        Box::new(Ty::Str),
+                        Box::new(self.iter_source(kind, e.span, &Ty::Str)),
+                    );
                 }
-                if let Some(ret) =
-                    self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, e)
+                if standard_method.is_some()
+                    && let Some(ret) =
+                        self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, e)
                 {
                     return ret;
                 }
-                // Builtin methods on parameterized collection types: check the
-                // element/key/value argument types against the (known) receiver
-                // parameters, then infer the return type. Unmodeled methods stay
-                // silently `Unknown` and are never flagged.
-                self.check_builtin_method_call(&rt, method, &arg_tys, args);
-                builtin_method_ret(&rt, method)
+                if let Some(definition) = standard_method {
+                    if matches!(rt, Ty::Str) {
+                        self.str_methods.insert(e.id);
+                    }
+                    return self
+                        .infer_standard_method_call(definition, &rt, method, &arg_tys, args, sp);
+                }
+                Ty::Unknown
             }
             ExprKind::Field { base, name, .. } => {
                 let bt = self.infer(base);
@@ -2353,9 +2361,6 @@ impl Tc {
             }
             ExprKind::MacroCall { args, .. } => {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
-                for (arg, ty) in args.iter().zip(&arg_tys) {
-                    self.reject_iter_escape(ty, arg.span);
-                }
                 match self.resolved_target(e) {
                     Some(crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroFormat)) => {
                         Ty::Str
@@ -2375,8 +2380,7 @@ impl Tc {
             }
             ExprKind::StructLit { path, fields } => {
                 for (_, field) in fields {
-                    let ty = self.infer(field);
-                    self.reject_iter_escape(&ty, field.span);
+                    self.infer(field);
                 }
                 let target = self.resolved_target(e);
                 if let Some(target) = target
@@ -2459,8 +2463,7 @@ impl Tc {
             ExprKind::Block(b) => self.block(b),
             ExprKind::Assign { target, value } => {
                 self.infer(target);
-                let value_ty = self.infer(value);
-                self.reject_iter_escape(&value_ty, value.span);
+                self.infer(value);
                 if let ExprKind::Path(segments) = &target.kind
                     && segments.len() == 1
                     && let Some(&boundary) = self.closure_boundaries.last()
@@ -2608,9 +2611,6 @@ impl Tc {
 
     fn infer_call(&mut self, callee: &Expr, args: &[Expr]) -> Ty {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
-        for (arg, ty) in args.iter().zip(&arg_tys) {
-            self.reject_iter_escape(ty, arg.span);
-        }
         if let ExprKind::Closure { params, ret, body } = &callee.kind {
             let closure = self.infer_closure(
                 callee.span,
@@ -2644,12 +2644,6 @@ impl Tc {
                 }
                 rua_core::BuiltinId::VariantResultErr => {
                     return Ty::Result(Box::new(Ty::Unknown), Box::new(a0()));
-                }
-                rua_core::BuiltinId::AssociatedVecNew => {
-                    return Ty::Vec(Box::new(Ty::Unknown));
-                }
-                rua_core::BuiltinId::AssociatedHashMapNew => {
-                    return Ty::Map(Box::new(Ty::Unknown), Box::new(Ty::Unknown));
                 }
                 _ => {}
             }
@@ -2693,6 +2687,107 @@ impl Tc {
         // Unresolved calls remain unknown; semantic checks never guess a target
         // from the source spelling.
         Ty::Unknown
+    }
+
+    fn standard_method_definition(&self, receiver: &Ty, method: &str) -> Option<crate::hir::DefId> {
+        let owner_name = match receiver {
+            Ty::Str => "String",
+            Ty::Vec(_) => "Vec",
+            Ty::Option(_) => "Option",
+            Ty::Result(_, _) => "Result",
+            Ty::Map(_, _) => "HashMap",
+            Ty::Iter(_, _) => "Iter",
+            _ => return None,
+        };
+        let prelude = self
+            .hir
+            .module(self.hir.root)
+            .scope
+            .modules
+            .get("__rua_builtin")?;
+        let owner = self.hir.module(*prelude).scope.types.get(owner_name)?;
+        self.hir
+            .associated_items
+            .get(&(*owner, method.to_string()))
+            .copied()
+    }
+
+    fn infer_standard_method_call(
+        &mut self,
+        definition: crate::hir::DefId,
+        receiver: &Ty,
+        method: &str,
+        argument_types: &[Ty],
+        arguments: &[Expr],
+        span: SourceRange,
+    ) -> Ty {
+        let Some(signature) = self.method_sigs.get(&definition).cloned() else {
+            return Ty::Unknown;
+        };
+        let receiver_arguments = match receiver {
+            Ty::Vec(item) | Ty::Option(item) | Ty::Iter(item, _) => {
+                vec![(**item).clone()]
+            }
+            Ty::Result(ok, error) | Ty::Map(ok, error) => {
+                vec![(**ok).clone(), (**error).clone()]
+            }
+            Ty::Str => Vec::new(),
+            _ => Vec::new(),
+        };
+        self.infer_standard_method_call_with_receiver_arguments(
+            definition,
+            method,
+            &signature,
+            &receiver_arguments,
+            argument_types,
+            arguments,
+            span,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_standard_method_call_with_receiver_arguments(
+        &mut self,
+        definition: crate::hir::DefId,
+        method: &str,
+        signature: &FnSig,
+        receiver_arguments: &[Ty],
+        argument_types: &[Ty],
+        arguments: &[Expr],
+        span: SourceRange,
+    ) -> Ty {
+        let mut substitution = HashMap::new();
+        for (generic, argument) in signature.generics.iter().zip(receiver_arguments) {
+            substitution.insert(generic.id, argument.clone());
+        }
+        let parameters = signature
+            .params
+            .iter()
+            .map(|parameter| subst_ty(parameter, &substitution))
+            .collect::<Vec<_>>();
+        for (parameter, argument) in parameters.iter().zip(argument_types) {
+            unify_generic(parameter, argument, &mut substitution);
+        }
+        let owner = match self.hir.definition(definition).kind {
+            crate::hir::DefKind::Method { owner } | crate::hir::DefKind::TraitMethod { owner } => {
+                self.hir.definition(owner).name.clone()
+            }
+            _ => "std".to_string(),
+        };
+        let parameters = signature
+            .params
+            .iter()
+            .map(|parameter| subst_ty(parameter, &substitution))
+            .collect::<Vec<_>>();
+        self.check_method_call(&owner, method, &parameters, argument_types, arguments, span);
+        self.check_bound_satisfaction(
+            &format!("{owner}::{method}"),
+            &signature.generics,
+            &signature.generic_bounds,
+            &substitution,
+            span,
+        );
+        subst_ty(&signature.ret, &substitution)
     }
 
     fn check_closure_call(
@@ -2894,59 +2989,6 @@ impl Tc {
                     ),
                 );
             }
-        }
-    }
-
-    /// Type-check the element/key/value arguments of a built-in collection
-    /// method (`Vec::push`/`set`, `HashMap::insert`/`get`/`remove`/
-    /// `contains_key`) against the receiver's known type parameters. Only fires
-    /// when both the receiver parameter and the argument are concrete, so
-    /// unmodeled methods and un-inferred (`?`) collections stay silent.
-    fn check_builtin_method_call(
-        &mut self,
-        recv: &Ty,
-        method: &str,
-        arg_tys: &[Ty],
-        args: &[Expr],
-    ) {
-        match recv {
-            Ty::Vec(elem) => match method {
-                "push" if arg_tys.len() == 1 => {
-                    self.check_elem_compat(elem, &arg_tys[0], args[0].span, "Vec element");
-                }
-                "set" if arg_tys.len() == 2 => {
-                    self.check_elem_compat(elem, &arg_tys[1], args[1].span, "Vec element");
-                }
-                _ => {}
-            },
-            Ty::Map(k, v) => match method {
-                "insert" if arg_tys.len() == 2 => {
-                    self.check_elem_compat(k, &arg_tys[0], args[0].span, "HashMap key");
-                    self.check_elem_compat(v, &arg_tys[1], args[1].span, "HashMap value");
-                }
-                "get" | "remove" | "contains_key" if arg_tys.len() == 1 => {
-                    self.check_elem_compat(k, &arg_tys[0], args[0].span, "HashMap key");
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    /// Report a type mismatch between a collection's declared element/key/value
-    /// type and a supplied argument. No-op unless both are concrete and
-    /// genuinely incompatible (numeric types stay mutually compatible).
-    fn check_elem_compat(&mut self, expected: &Ty, actual: &Ty, sp: SourceRange, what: &str) {
-        if expected.is_concrete() && actual.is_concrete() && !compatible(expected, actual) {
-            self.err(
-                sp,
-                format!(
-                    "{} type mismatch: expected `{}`, found `{}`",
-                    what,
-                    expected.name(),
-                    actual.name()
-                ),
-            );
         }
     }
 

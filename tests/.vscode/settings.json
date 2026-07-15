@@ -1,4 +1,5 @@
 {
-    "rua.server.path":"../target/release/rua-lsp",
+    "rua.server.path": "../target/release/rua-lsp",
+    "rua.compiler.path": "../target/release/ruac",
     "rua.trace.server": "verbose"
 }

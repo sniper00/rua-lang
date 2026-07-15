@@ -1,3 +1,0 @@
-fn escaped() {
-    return vec![1, 2, 3].iter().map(|value| value + 1);
-}

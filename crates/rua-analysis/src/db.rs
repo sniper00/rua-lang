@@ -19,9 +19,10 @@ use crate::{
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceMap, DefId, DefKind, DefMap, IdentityContext,
         IdentityInterner, IdentityLease, InferenceResult, ItemSourceKind, ItemTree, MemberIndex,
-        ModuleId, SignatureFingerprint,
+        ModuleId, SignatureFingerprint, StdLibraryIndex,
         body::{lower_chunk_body, lower_fn_body, lower_trait_method_body},
         infer::infer_body,
+        standard_library,
     },
     semantic::ReferenceIndex,
     vfs::{
@@ -36,6 +37,7 @@ pub struct BaseDb {
     session_id: u64,
     vfs: Vfs,
     identity_interner: Arc<Mutex<IdentityInterner>>,
+    standard_library: Arc<StdLibraryIndex>,
     item_tree_cache: Mutex<HashMap<FileId, Arc<ItemTree>>>,
     def_map_cache: Mutex<HashMap<DefMapKey, DefMapCacheEntry>>,
     member_index_cache: Mutex<HashMap<DefMapKey, MemberIndexCacheEntry>>,
@@ -87,6 +89,11 @@ impl Default for BaseDb {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             vfs: Vfs::default(),
             identity_interner: Arc::new(Mutex::new(IdentityInterner::default())),
+            standard_library: Arc::new(
+                standard_library()
+                    .expect("embedded standard library must be valid")
+                    .clone(),
+            ),
             item_tree_cache: Mutex::new(HashMap::new()),
             def_map_cache: Mutex::new(HashMap::new()),
             member_index_cache: Mutex::new(HashMap::new()),
@@ -105,6 +112,7 @@ impl Clone for BaseDb {
             session_id: self.session_id,
             vfs: self.vfs.clone(),
             identity_interner: Arc::clone(&self.identity_interner),
+            standard_library: Arc::clone(&self.standard_library),
             item_tree_cache: Mutex::new(lock(&self.item_tree_cache).clone()),
             def_map_cache: Mutex::new(lock(&self.def_map_cache).clone()),
             member_index_cache: Mutex::new(lock(&self.member_index_cache).clone()),
@@ -213,6 +221,19 @@ enum DefMapKey {
 impl BaseDb {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_standard_library(&mut self, library: Arc<StdLibraryIndex>) {
+        if Arc::ptr_eq(&self.standard_library, &library) {
+            return;
+        }
+        self.standard_library = library;
+        get_mut(&mut self.member_index_cache).clear();
+        get_mut(&mut self.inference_cache).clear();
+    }
+
+    pub fn standard_library(&self) -> Arc<StdLibraryIndex> {
+        Arc::clone(&self.standard_library)
     }
 
     pub fn set_file_text(&mut self, file_id: FileId, text: impl Into<Arc<str>>) {
@@ -657,7 +678,10 @@ impl BaseDb {
             return cached.index.clone();
         }
         lock(&self.query_stats).member_index += 1;
-        let index = Arc::new(MemberIndex::build_shared(def_map.clone()));
+        let index = Arc::new(MemberIndex::build_shared(
+            def_map.clone(),
+            Arc::clone(&self.standard_library),
+        ));
         lock(&self.member_index_cache).insert(
             key,
             MemberIndexCacheEntry {

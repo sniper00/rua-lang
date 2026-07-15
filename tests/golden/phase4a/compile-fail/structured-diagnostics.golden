@@ -14,5 +14,3 @@ phase4a/compile-fail/iterator_filter_not_bool.rua
   E0200 file=phase4a/compile-fail/iterator_filter_not_bool.rua range=75..92 arguments=[line="4", message="iterator filter predicate must be `bool`, found `i64`"]
 phase4a/compile-fail/iterator_collect_mismatch.rua
   E0200 file=phase4a/compile-fail/iterator_collect_mismatch.rua range=29..92 arguments=[line="2", message="collect target element type `String` is incompatible with iterator item `i64`"]
-phase4a/compile-fail/iterator_escape_unsupported.rua
-  E0200 file=phase4a/compile-fail/iterator_escape_unsupported.rua range=26..69 arguments=[line="2", message="iterator escape is not supported yet"]

@@ -8,11 +8,12 @@ description = "Rua LSP server and formatter CLI."
 default = []
 # The LSP binary pulls in lsp-server + lsp-types + serde_json. Gate it behind
 # a feature so the crate compiles without those deps when only rua-fmt is needed.
-lsp = ["dep:crossbeam-channel", "dep:ignore", "dep:lsp-server", "dep:lsp-types", "dep:rua-analysis", "dep:rua-project", "dep:serde_json", "dep:url"]
+lsp = ["dep:crossbeam-channel", "dep:ignore", "dep:lsp-server", "dep:lsp-types", "dep:rua-analysis", "dep:rua-project", "dep:rua-resources", "dep:serde_json", "dep:url"]
 
 [dependencies]
 rua-analysis = { workspace = true, optional = true }
 rua-project = { workspace = true, optional = true }
+rua-resources = { workspace = true, optional = true }
 rua-syntax = { path = "../rua-syntax", default-features = false }
 rowan = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }

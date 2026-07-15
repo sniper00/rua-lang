@@ -1,0 +1,33 @@
+// Inline and nested modules, visibility, imports, and aliases.
+
+mod math {
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    // Sibling call within the same module (resolves as a block local).
+    pub fn double(x: i64) -> i64 {
+        add(x, x)
+    }
+
+    pub mod trig {
+        pub fn triple(x: i64) -> i64 {
+            x * 3
+        }
+    }
+}
+
+// File-level imports: bind local names to qualified targets.
+use math::add;
+use math::trig::triple as tri;
+
+fn main() {
+    // Fully-qualified access.
+    println!("math::add = {}", math::add(2, 3));
+    println!("math::double = {}", math::double(10));
+    println!("nested triple = {}", math::trig::triple(4));
+
+    // `use` aliases.
+    println!("add alias = {}", add(100, 1));
+    println!("triple alias = {}", tri(7));
+}

@@ -1,0 +1,48 @@
+// Structs, enums, and impl blocks declared and used inside a module.
+
+mod geo {
+    pub struct Point {
+        x: f64,
+        y: f64,
+    }
+
+    impl Point {
+        pub fn new(x: f64, y: f64) -> Point {
+            Point { x: x, y: y }
+        }
+
+        pub fn norm_sq(&self) -> f64 {
+            self.x * self.x + self.y * self.y
+        }
+    }
+
+    pub enum Shape {
+        Circle(f64),
+        Rect { w: f64, h: f64 },
+        Dot,
+    }
+
+    // Same-module use of the enum in a match.
+    pub fn area(s: Shape) -> f64 {
+        match s {
+            Shape::Circle(r) => r * r * 3,
+            Shape::Rect { w, h } => w * h,
+            Shape::Dot => 0.0,
+        }
+    }
+}
+
+fn main() {
+    // Cross-module associated function + method call.
+    let p = geo::Point::new(3.0, 4.0);
+    println!("norm_sq = {}", p.norm_sq());
+
+    // Cross-module struct literal + field access.
+    let q = geo::Point { x: 1.0, y: 2.0 };
+    println!("q.x + q.y = {}", q.x + q.y);
+
+    // Cross-module enum construction passed to a module function.
+    println!("circle ~ {}", geo::area(geo::Shape::Circle(5.0)));
+    println!("rect   = {}", geo::area(geo::Shape::Rect { w: 2.0, h: 3.0 }));
+    println!("dot    = {}", geo::area(geo::Shape::Dot));
+}

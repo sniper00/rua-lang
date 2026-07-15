@@ -1,0 +1,93 @@
+// Generic functions, trait bounds, where clauses, and generic trait methods.
+//
+// Generics are erased at codegen: `describe<T: Shape>` becomes a single Lua
+// function `describe(s)` that calls `s:name()` / `s:area()` on whatever value it
+// receives. The bound `T: Shape` lets the type checker verify those method calls
+// (arity + argument types) at the definition site, even though there is only one
+// monomorphic Lua function at runtime. At each *call site* the checker also
+// verifies the concrete type argument actually implements the bound trait
+// (`describe(Circle { .. })` requires `impl Shape for Circle`).
+
+trait Shape {
+    fn area(&self) -> f64;
+    fn name(&self) -> String;
+}
+
+struct Circle {
+    r: f64,
+}
+
+struct Square {
+    s: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        3.14159 * self.r * self.r
+    }
+    fn name(&self) -> String {
+        format!("circle")
+    }
+}
+
+impl Shape for Square {
+    fn area(&self) -> f64 {
+        self.s * self.s
+    }
+    fn name(&self) -> String {
+        format!("square")
+    }
+}
+
+// A trait method with its own generic parameter. `rewrap<U>` is checked
+// at each call site — the type argument `U` is inferred from the argument and
+// flows through to the return type (here `i64` in / `i64` out).
+trait Boxed {
+    fn rewrap<U>(&self, x: U) -> U;
+}
+
+impl Boxed for Circle {
+    fn rewrap<U>(&self, x: U) -> U {
+        x
+    }
+}
+
+// A bounded generic: `T` must implement `Shape`, so `s.name()`/`s.area()` are
+// checked against the trait's signatures.
+fn describe<T: Shape>(s: T) -> String {
+    format!("{} area = {}", s.name(), s.area())
+}
+
+// Calls the trait's generic method through a bounded generic receiver: the
+// method-level `U` is inferred as `i64` from `v`.
+fn echo<T: Boxed>(b: T, v: i64) -> i64 {
+    b.rewrap(v)
+}
+
+// The same bound written as a `where` clause (equivalent to `<T: Shape>`).
+fn label<T>(s: T) -> String
+where
+    T: Shape,
+{
+    format!("[{}]", s.name())
+}
+
+// An unbounded generic used purely structurally (identity + container).
+fn pair<T>(a: T, b: T) -> Vec<T> {
+    vec![a, b]
+}
+
+fn main() {
+    let c = Circle { r: 2.0 };
+    let sq = Square { s: 3.0 };
+    println!("{}", describe(c));
+    println!("{}", describe(sq));
+    println!("{}", label(Circle { r: 1.0 }));
+
+    let nums = pair(10, 20);
+    println!("pair len = {}", nums.len());
+    println!("pair[0]  = {}", nums.get(0));
+    println!("pair[1]  = {}", nums.get(1));
+
+    println!("echo     = {}", echo(Circle { r: 1.0 }, 7));
+}

@@ -97,7 +97,7 @@ impl Server {
                 }
                 let (_, cancellation) = self.library_scan.take().unwrap();
                 if !cancellation.is_cancelled() {
-                    match result {
+                    match *result {
                         Ok(config) => self.apply_library_config(config),
                         Err(error) if error != "library scan cancelled" => {
                             eprintln!("rua-lsp: library scan failed: {error}");

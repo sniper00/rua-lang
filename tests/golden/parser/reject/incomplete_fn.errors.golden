@@ -1,0 +1,6 @@
+tolerant:
+E0001 @26: expected identifier
+E0001 @26: expected `{`
+E0005 @26: expected `}`
+strict:
+E0001 26..26: expected identifier, found `<eof>`

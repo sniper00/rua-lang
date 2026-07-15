@@ -1,0 +1,6 @@
+tolerant:
+E0001 @27: expected expression
+E0005 @29: expected `)`
+E0005 @29: expected `}`
+strict:
+E0001 27..28: expected expression, found `}`

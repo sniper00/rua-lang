@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rua_core::{
     BuiltinId, BuiltinTraitId, DiagnosticCode, FileId, ModulePath, StructuredDiagnostic, TextRange,
-    builtin_macro, builtin_trait, builtin_type, builtin_value,
+    builtin_macro, builtin_trait, builtin_type,
 };
 
 use crate::ast::*;
@@ -147,6 +147,11 @@ pub struct ResolvedHir {
     pub root: ModuleId,
     pub modules: Vec<ModuleData>,
     pub definitions: Vec<DefData>,
+    /// Source file containing each callable declaration. Standard-library
+    /// runtime linkage consumes this identity instead of matching method names.
+    pub definition_files: BTreeMap<DefId, u32>,
+    pub(crate) standard_library: Option<crate::builtins::StandardMetadata>,
+    pub(crate) language_items: BTreeMap<DefId, crate::builtins::LanguageItem>,
     pub locals: Vec<LocalData>,
     /// Definition-site identity for local bindings. Source ranges are keyed by
     /// file/start/length so shadowed names remain distinct backend inputs.
@@ -191,6 +196,29 @@ impl ResolvedHir {
 
     pub fn module(&self, id: ModuleId) -> &ModuleData {
         &self.modules[id.index()]
+    }
+
+    pub(crate) fn language_item(&self, definition: DefId) -> Option<crate::builtins::LanguageItem> {
+        self.language_items.get(&definition).copied()
+    }
+
+    pub(crate) fn standard_runtime(
+        &self,
+        definition: DefId,
+    ) -> Option<&crate::builtins::RuntimeModule> {
+        let file = self.definition_files.get(&definition)?;
+        self.standard_library.as_ref()?.runtime_module(*file)
+    }
+
+    pub(crate) fn standard_runtime_named(
+        &self,
+        name: &str,
+    ) -> Option<&crate::builtins::RuntimeModule> {
+        self.standard_library.as_ref()?.named_runtime_module(name)
+    }
+
+    pub(crate) fn runtime_helper(&self, name: &str) -> Option<&crate::builtins::RuntimeModule> {
+        self.standard_library.as_ref()?.runtime_helper(name)
     }
 
     pub fn type_is_builtin(&self, ty: &Type, builtin: BuiltinId) -> bool {
@@ -301,7 +329,29 @@ impl ResolvedHir {
             }
             let scope = &self.modules[prelude.index()].scope;
             match namespace {
-                Namespace::Value => scope.values.get(name).copied().map(|id| self.target(id)),
+                Namespace::Value => scope
+                    .values
+                    .get(name)
+                    .copied()
+                    .map(|id| self.target(id))
+                    .or_else(|| {
+                        self.language_items
+                            .keys()
+                            .find(|definition| {
+                                self.definition(**definition).name == name
+                                    && matches!(
+                                        self.language_item(**definition),
+                                        Some(
+                                            crate::builtins::LanguageItem::OptionSome
+                                                | crate::builtins::LanguageItem::OptionNone
+                                                | crate::builtins::LanguageItem::ResultOk
+                                                | crate::builtins::LanguageItem::ResultErr
+                                        )
+                                    )
+                            })
+                            .copied()
+                            .map(ResolvedTarget::Item)
+                    }),
                 Namespace::Type => scope.types.get(name).copied().map(ResolvedTarget::Item),
                 Namespace::Module => None,
             }
@@ -319,30 +369,11 @@ impl ResolvedHir {
         let ResolvedTarget::Item(definition_id) = target else {
             return target;
         };
-        let definition = self.definition(definition_id);
-        let owner = match definition.kind {
-            DefKind::EnumVariant { owner, .. } | DefKind::Method { owner } => owner,
-            _ => return target,
-        };
-        let Some(prelude) = self.modules[self.root.index()]
-            .scope
-            .modules
-            .get("__rua_builtin")
-            .copied()
-        else {
-            return target;
-        };
-        let owner = self.definition(owner);
-        if owner.module != prelude {
-            return target;
-        }
-        let builtin = match (owner.name.as_str(), definition.name.as_str()) {
-            ("Option", "Some") => BuiltinId::VariantOptionSome,
-            ("Option", "None") => BuiltinId::VariantOptionNone,
-            ("Result", "Ok") => BuiltinId::VariantResultOk,
-            ("Result", "Err") => BuiltinId::VariantResultErr,
-            ("Vec", "new") => BuiltinId::AssociatedVecNew,
-            ("HashMap", "new") => BuiltinId::AssociatedHashMapNew,
+        let builtin = match self.language_item(definition_id) {
+            Some(crate::builtins::LanguageItem::OptionSome) => BuiltinId::VariantOptionSome,
+            Some(crate::builtins::LanguageItem::OptionNone) => BuiltinId::VariantOptionNone,
+            Some(crate::builtins::LanguageItem::ResultOk) => BuiltinId::VariantResultOk,
+            Some(crate::builtins::LanguageItem::ResultErr) => BuiltinId::VariantResultErr,
             _ => return target,
         };
         ResolvedTarget::Builtin(builtin)
@@ -423,6 +454,9 @@ pub fn collect_declarations(program: &Program) -> ResolvedHir {
             scope: ModuleScope::default(),
         }],
         definitions: Vec::new(),
+        definition_files: BTreeMap::new(),
+        standard_library: program.standard_library.clone(),
+        language_items: BTreeMap::new(),
         locals: Vec::new(),
         binding_targets: BTreeMap::new(),
         item_targets: BTreeMap::new(),
@@ -450,6 +484,7 @@ pub fn collect_declarations(program: &Program) -> ResolvedHir {
     collect_trait_items(&mut hir, root, &program.items);
     collect_impl_items(&mut hir, root, &program.items);
     collect_inherited_methods(&mut hir);
+    install_language_items(&mut hir);
     hir
 }
 
@@ -756,14 +791,21 @@ fn resolve_type(
 }
 
 fn canonical_type_target(hir: &ResolvedHir, definition: DefId) -> TypeTarget {
-    let data = hir.definition(definition);
-    let prelude = hir.module(hir.root).scope.modules.get("__rua_builtin");
-    if prelude == Some(&data.module)
-        && let Some(builtin) = builtin_type(&data.name)
-    {
-        return TypeTarget::Builtin(builtin);
+    match hir.language_item(definition) {
+        Some(crate::builtins::LanguageItem::Option) => TypeTarget::Builtin(BuiltinId::TypeOption),
+        Some(crate::builtins::LanguageItem::Result) => TypeTarget::Builtin(BuiltinId::TypeResult),
+        _ => {
+            let data = hir.definition(definition);
+            let prelude = hir.module(hir.root).scope.modules.get("__rua_builtin");
+            if prelude == Some(&data.module)
+                && let Some(builtin) = builtin_type(&data.name)
+            {
+                TypeTarget::Builtin(builtin)
+            } else {
+                TypeTarget::Item(definition)
+            }
+        }
     }
-    TypeTarget::Item(definition)
 }
 
 fn primitive_type(name: &str) -> Option<PrimitiveType> {
@@ -1317,30 +1359,23 @@ impl<'a> BodyResolver<'a> {
     }
 
     fn resolve_pattern_path(&mut self, id: PatternId, path: &[String]) {
-        let target = if path.len() == 1 {
-            builtin_value(&path[0]).map(ResolvedTarget::Builtin)
-        } else {
-            None
-        }
-        .or_else(|| self.resolve_path(Namespace::Value, path))
-        .or_else(|| self.resolve_path(Namespace::Type, path))
-        .map(|target| self.hir.canonical_value_target(target))
-        .map(|target| self.check_access(target, None))
-        .unwrap_or_else(|| {
-            self.report_unresolved_path(None, path);
-            ResolvedTarget::Error
-        });
+        let target = self
+            .resolve_path(Namespace::Value, path)
+            .or_else(|| self.resolve_path(Namespace::Type, path))
+            .map(|target| self.hir.canonical_value_target(target))
+            .map(|target| self.check_access(target, None))
+            .unwrap_or_else(|| {
+                self.report_unresolved_path(None, path);
+                ResolvedTarget::Error
+            });
         self.hir.pattern_targets.insert(id, target);
     }
 
     fn value_path(&mut self, path: &[String], expression: Option<&Expr>) -> Option<ResolvedTarget> {
-        if path.len() == 1 {
-            if let Some(local) = self.local(&path[0]) {
-                return Some(ResolvedTarget::Local(local));
-            }
-            if let Some(builtin) = builtin_value(&path[0]) {
-                return Some(ResolvedTarget::Builtin(builtin));
-            }
+        if path.len() == 1
+            && let Some(local) = self.local(&path[0])
+        {
+            return Some(ResolvedTarget::Local(local));
         }
         self.resolve_path(Namespace::Value, path)
             .map(|target| self.hir.canonical_value_target(target))
@@ -1506,6 +1541,7 @@ fn collect_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
                     DefKind::Function,
                     function.is_pub,
                 );
+                hir.definition_files.insert(id, function.name_span.file);
                 insert(hir, module, Namespace::Value, &function.name, id);
                 hir.item_targets
                     .insert((module, item_index), ResolvedTarget::Item(id));
@@ -1591,6 +1627,7 @@ fn collect_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
                         DefKind::ExternFunction { extern_id },
                         true,
                     );
+                    hir.definition_files.insert(id, function.name_span.file);
                     insert(hir, module, Namespace::Value, &function.name, id);
                     hir.extern_function_targets
                         .insert((module, item_index, function_index), id);
@@ -1646,6 +1683,8 @@ fn collect_trait_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) 
                         DefKind::TraitMethod { owner },
                         trait_decl.is_pub,
                     );
+                    hir.definition_files
+                        .insert(definition, method.name_span.file);
                     if hir
                         .trait_items
                         .insert((owner, method.name.clone()), definition)
@@ -1729,6 +1768,8 @@ fn collect_impl_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
                         DefKind::Method { owner },
                         method.is_pub,
                     );
+                    hir.definition_files
+                        .insert(definition, method.name_span.file);
                     if hir
                         .associated_items
                         .insert((owner, method.name.clone()), definition)
@@ -1763,6 +1804,58 @@ fn collect_impl_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
             | Item::Trait(_)
             | Item::Extern(_)
             | Item::Use(_) => {}
+        }
+    }
+}
+
+fn install_language_items(hir: &mut ResolvedHir) {
+    let Some(metadata) = hir.standard_library.as_ref() else {
+        return;
+    };
+    let configured = metadata
+        .language_items()
+        .map(|(path, item)| (path.to_string(), item))
+        .collect::<Vec<_>>();
+    let Some(prelude) = hir
+        .module(hir.root)
+        .scope
+        .modules
+        .get("__rua_builtin")
+        .copied()
+    else {
+        return;
+    };
+    for (path, item) in configured {
+        let segments = path.split("::").collect::<Vec<_>>();
+        let definition = match segments.as_slice() {
+            [name] => hir
+                .module(prelude)
+                .scope
+                .types
+                .get(*name)
+                .or_else(|| hir.module(prelude).scope.values.get(*name))
+                .copied(),
+            [owner, member] => hir
+                .module(prelude)
+                .scope
+                .types
+                .get(*owner)
+                .and_then(|owner| {
+                    hir.enum_variants
+                        .get(&(*owner, (*member).to_string()))
+                        .or_else(|| hir.associated_items.get(&(*owner, (*member).to_string())))
+                        .or_else(|| hir.trait_items.get(&(*owner, (*member).to_string())))
+                })
+                .copied(),
+            _ => None,
+        };
+        if let Some(definition) = definition {
+            hir.language_items.insert(definition, item);
+        } else {
+            hir.diagnostics.push(
+                StructuredDiagnostic::new(DiagnosticCode::HostBuiltinInvalid, None, None)
+                    .with_argument("path", path),
+            );
         }
     }
 }
@@ -2070,7 +2163,7 @@ mod tests {
     }
 
     #[test]
-    fn qualified_sysroot_values_resolve_to_builtin_identity() {
+    fn qualified_sysroot_values_resolve_to_language_and_standard_identity() {
         let mut program = crate::parser::parse(
             "fn run() { Option::Some(1); Result::Err(\"no\"); Vec::new(); HashMap::new(); }",
         )
@@ -2081,23 +2174,29 @@ mod tests {
         let Item::Fn(run) = &program.items[1] else {
             panic!("expected run function after builtin module");
         };
-        let expected = [
-            BuiltinId::VariantOptionSome,
-            BuiltinId::VariantResultErr,
-            BuiltinId::AssociatedVecNew,
-            BuiltinId::AssociatedHashMapNew,
-        ];
-        for (statement, expected) in run.body.stmts.iter().zip(expected) {
+        for (index, statement) in run.body.stmts.iter().enumerate() {
             let Stmt::Expr(call) = statement else {
                 panic!("expected call statement");
             };
             let ExprKind::Call { callee, .. } = &call.kind else {
                 panic!("expected call expression");
             };
-            assert_eq!(
-                hir.expression_targets[&callee.id],
-                ResolvedTarget::Builtin(expected)
-            );
+            let target = hir.expression_targets[&callee.id];
+            if index < 2 {
+                let expected = [BuiltinId::VariantOptionSome, BuiltinId::VariantResultErr][index];
+                assert_eq!(target, ResolvedTarget::Builtin(expected));
+            } else {
+                let ResolvedTarget::Item(definition) = target else {
+                    panic!("standard constructor must retain declaration identity");
+                };
+                assert!(
+                    hir.standard_runtime(definition).is_some(),
+                    "definition={:?} file={:?} std={:?}",
+                    hir.definition(definition),
+                    hir.definition_files.get(&definition),
+                    hir.standard_library
+                );
+            }
         }
     }
 

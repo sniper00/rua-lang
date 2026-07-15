@@ -16,9 +16,10 @@ Provided by the `rua-lsp` server (see `crates/rua-lsp`):
 Plus TextMate syntax highlighting and basic editing config (comments, brackets,
 auto-close) from this extension.
 
-## Prerequisites: build the server
+## Prerequisites: build the tools
 
-The extension launches the `rua-lsp` binary; build it first:
+The extension launches `rua-lsp` for editor features and `ruac` for **Rua:
+Build File**. Build both first:
 
 The `rua-lsp` binary is behind the `lsp` feature, so pass `--features lsp`:
 
@@ -26,15 +27,20 @@ The `rua-lsp` binary is behind the `lsp` feature, so pass `--features lsp`:
 # from the rua workspace root
 cargo build -p rua-lsp --bin rua-lsp --features lsp             # debug   -> target/debug/rua-lsp
 cargo build -p rua-lsp --bin rua-lsp --features lsp --release   # release -> target/release/rua-lsp
+cargo build -p ruac                                             # debug   -> target/debug/ruac
+cargo build -p ruac --release                                   # release -> target/release/ruac
 ```
 
-Then point the extension at it via the `rua.server.path` setting, e.g.:
+Then point the extension at them, e.g.:
 
 ```json
-{ "rua.server.path": "${workspaceFolder}/target/debug/rua-lsp" }
+{
+  "rua.server.path": "${workspaceFolder}/target/debug/rua-lsp",
+  "rua.compiler.path": "${workspaceFolder}/target/debug/ruac"
+}
 ```
 
-If `rua-lsp` is on your `PATH`, the default (`rua-lsp`) just works.
+If both tools are on `PATH`, the defaults work without configuration.
 
 ## Develop / debug
 
@@ -60,13 +66,34 @@ npm run package      # produces rua-lang-<version>.vsix
 |---|---|---|
 | `rua.server.path` | `rua-lsp` | Path to the server (absolute, `${workspaceFolder}`-relative, or on PATH). |
 | `rua.server.args` | `[]` | Extra args passed to the server. |
+| `rua.compiler.path` | `ruac` | Path to the compiler used by **Rua: Build File**. |
+| `rua.compiler.args` | `[]` | Extra args appended to `ruac build <file>`. |
 | `rua.trace.server` | `off` | Trace JSON-RPC traffic (`off`/`messages`/`verbose`). |
-| `rua.library` | `[]` | Additional `.ruai` files or directories. |
-| `rua.libraryMounts` | `{}` | Logical module name to `.ruai` file/directory mapping. |
-| `rua.sysroot` | empty | Optional Rua sysroot path. |
 
-`rua.library`, `rua.libraryMounts`, and `rua.sysroot` are resource-scoped, so each workspace folder can provide independent values. `${workspaceFolder}` is expanded against that folder before initialization and dynamic configuration notifications. One client serves all workspace folders. Restart waits for the server child process `close` event before disposing its output channel and watcher; the Extension Host test covers initial settings, live changes, restart disposal, and a two-root workspace.
+Restart waits for the server child process `close` event before disposing its
+output channel and watcher.
+
+Project libraries should normally be stored in `.ruarc.toml` at the workspace
+root so `ruac` and `rua-lsp` consume the same inputs:
+
+```toml
+[workspace]
+library = ["./types"]
+
+[workspace.library_mounts]
+host = "../host/host.ruai"
+
+[runtime]
+std_path = "./std"
+```
+
+All project fields use snake_case. Library and standard-library inputs are
+configured only in `.ruarc.toml`; VS Code settings only control the compiler
+and language-server processes plus protocol tracing. The extension watches
+`.ruarc.toml` and asks the server to reload it after changes.
 
 ## Commands
 
+- **Rua: Build File** (`rua.buildFile`): saves and builds the selected `.rua`
+  file. Available from Explorer and editor context menus.
 - **Rua: Restart Language Server** (`rua.restartServer`)

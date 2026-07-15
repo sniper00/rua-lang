@@ -735,6 +735,7 @@ impl ModDecl {
 ast_node!(PathType = PathType);
 ast_node!(RefType = RefType);
 ast_node!(TupleType = TupleType);
+ast_node!(CallableType = CallableType);
 ast_node!(TypeArgs = TypeArgs);
 
 /// A type: `Path<..>`, `&T`, or `()`.
@@ -743,17 +744,22 @@ pub enum Type {
     Path(PathType),
     Ref(RefType),
     Tuple(TupleType),
+    Callable(CallableType),
 }
 
 impl AstNode for Type {
     fn can_cast(kind: SyntaxKind) -> bool {
-        matches!(kind, K::PathType | K::RefType | K::TupleType)
+        matches!(
+            kind,
+            K::PathType | K::RefType | K::TupleType | K::CallableType
+        )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
         Some(match node.kind() {
             K::PathType => Type::Path(PathType { syntax: node }),
             K::RefType => Type::Ref(RefType { syntax: node }),
             K::TupleType => Type::Tuple(TupleType { syntax: node }),
+            K::CallableType => Type::Callable(CallableType { syntax: node }),
             _ => return None,
         })
     }
@@ -762,6 +768,7 @@ impl AstNode for Type {
             Type::Path(n) => n.syntax(),
             Type::Ref(n) => n.syntax(),
             Type::Tuple(n) => n.syntax(),
+            Type::Callable(n) => n.syntax(),
         }
     }
 }

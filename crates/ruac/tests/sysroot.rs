@@ -48,19 +48,19 @@ fn embedded_sysroot_is_cwd_independent_and_not_emitted() {
 fn explicit_sysroot_failures_do_not_fall_back() {
     let root = TestDir::new("invalid");
     let missing = root.path().join("missing");
-    let error = ruac::compile_str_with_builtins("fn main() {}", &missing).unwrap_err();
-    assert!(error.contains("reading builtins dir"), "{error}");
+    let error = ruac::compile_str_with_std("fn main() {}", &missing).unwrap_err();
+    assert!(error.contains("std.toml"), "{error}");
 
     let empty = root.path().join("empty");
     fs::create_dir(&empty).unwrap();
-    let error = ruac::compile_str_with_builtins("fn main() {}", &empty).unwrap_err();
-    assert!(error.contains("contains no .ruai declarations"), "{error}");
+    let error = ruac::compile_str_with_std("fn main() {}", &empty).unwrap_err();
+    assert!(error.contains("std.toml"), "{error}");
 
     let invalid = root.path().join("invalid");
     fs::create_dir(&invalid).unwrap();
-    fs::write(invalid.join("broken.ruai"), "pub enum Broken {").unwrap();
-    let error = ruac::compile_str_with_builtins("fn main() {}", &invalid).unwrap_err();
-    assert!(error.contains("broken.ruai"), "{error}");
+    fs::write(invalid.join("std.toml"), "version =").unwrap();
+    let error = ruac::compile_str_with_std("fn main() {}", &invalid).unwrap_err();
+    assert!(error.contains("parsing std.toml"), "{error}");
 }
 
 #[test]
@@ -70,14 +70,15 @@ fn cli_loads_explicit_sysroot_outside_repository_cwd() {
     let output = root.path().join("output.lua");
     fs::write(&input, "pub fn answer() -> i64 { 42 }").unwrap();
 
-    let builtins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rua-core/builtins");
+    let standard_library =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rua-resources/resources/std");
     let result = Command::new(env!("CARGO_BIN_EXE_ruac"))
         .arg("build")
         .arg(&input)
         .arg("-o")
         .arg(&output)
-        .arg("--builtins-dir")
-        .arg(&builtins)
+        .arg("--std-path")
+        .arg(&standard_library)
         .current_dir(root.path())
         .output()
         .unwrap();
@@ -93,6 +94,46 @@ fn cli_loads_explicit_sysroot_outside_repository_cwd() {
             .unwrap()
             .contains("function answer()")
     );
+}
+
+#[test]
+fn cli_discovers_ruarc_toml_and_builds_with_external_library() {
+    let root = TestDir::new("external-library-config");
+    let workspace = root.path().join("workspace");
+    let library = root.path().join("library");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&library).unwrap();
+    fs::write(
+        workspace.join("main.rua"),
+        "mod moon;\nlet actor: i64 = moon::query(\"bootstrap\");\n",
+    )
+    .unwrap();
+    fs::write(
+        library.join("moon.ruai"),
+        "extern \"lua\" { pub fn query(name: String) -> i64; }\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.join(rua_project::PROJECT_CONFIG_FILE),
+        "[workspace]\nlibrary = [\"../library/moon.ruai\"]\n",
+    )
+    .unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_ruac"))
+        .arg("build")
+        .arg("main.rua")
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let lua = fs::read_to_string(workspace.join("main.lua")).unwrap();
+    assert!(lua.contains("local moon = require(\"moon\")"), "{lua}");
+    assert!(lua.contains("moon.query(\"bootstrap\")"), "{lua}");
 }
 
 #[derive(Default)]

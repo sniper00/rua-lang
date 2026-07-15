@@ -85,6 +85,33 @@ fn demo_hover_and_goto_cover_items_members_variants_and_locals() {
             "missing definition for {symbol}"
         );
     }
+
+    for (fragment, symbol) in [
+        (
+            "fn load_config(path: String) -> Result<String, String>",
+            "Result",
+        ),
+        (
+            "Result::Ok(value) => println!(\"result value={}\"",
+            "Result",
+        ),
+        ("Result::Ok(value) => println!(\"result value={}\"", "Ok"),
+        ("Result::Err(error) => println!(\"result error={}\"", "Err"),
+    ] {
+        let fragment_start = source.rfind(fragment).unwrap();
+        let symbol_offset = fragment.find(symbol).unwrap();
+        let position = srv
+            .pp_at_offset(&demo_uri, fragment_start + symbol_offset + 1)
+            .unwrap();
+        assert!(
+            analysis.hover(position).is_some(),
+            "missing builtin hover for {symbol}"
+        );
+        let target = analysis
+            .goto_builtin_definition(position)
+            .unwrap_or_else(|| panic!("missing builtin definition for {symbol}"));
+        assert_eq!(target.source_name(), "result.ruai");
+    }
 }
 
 #[test]
@@ -170,11 +197,127 @@ fn builtin_members_hover_and_resolve_to_shared_declarations() {
             .goto_builtin_definition(position)
             .expect("builtin declaration target");
         assert_eq!(target.source_name(), "option.ruai");
-        let builtin = include_str!("../../../crates/rua-core/builtins/option.ruai");
+        let builtin = include_str!("../../../crates/rua-resources/resources/std/option.ruai");
         let range = target.range();
         assert_eq!(
             &builtin[range.start() as usize..range.end() as usize],
             expected_name
+        );
+    }
+}
+
+#[test]
+fn result_type_and_variants_hover_and_resolve_in_expressions_and_patterns() {
+    let source = concat!(
+        "fn load() -> Result<String, String> { Result::Ok(\"ready\") }\n",
+        "fn inspect(value: Result<String, String>) {\n",
+        "    match value {\n",
+        "        Result::Ok(item) => println!(\"{}\", item),\n",
+        "        Result::Err(error) => println!(\"{}\", error),\n",
+        "    }\n",
+        "}\n",
+    );
+    let uri = uri("/test/builtin_result_navigation.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, source);
+    let analysis = srv.snapshot();
+    let declaration = include_str!("../../../crates/rua-resources/resources/std/result.ruai");
+
+    for (offset, expected_name, expected_documentation) in [
+        (
+            source.find("Result<String").unwrap() + 1,
+            "Result",
+            "Represents either a successful value or an error.",
+        ),
+        (
+            source.find("Result::Ok(\"ready\")").unwrap() + 9,
+            "Ok",
+            "Contains the successful value.",
+        ),
+        (
+            source.rfind("Result::Ok(item)").unwrap() + 1,
+            "Result",
+            "Represents either a successful value or an error.",
+        ),
+        (
+            source.rfind("Result::Ok(item)").unwrap() + 9,
+            "Ok",
+            "Contains the successful value.",
+        ),
+        (
+            source.rfind("Result::Err(error)").unwrap() + 9,
+            "Err",
+            "Contains the error value.",
+        ),
+    ] {
+        let position = srv.pp_at_offset(&uri, offset).unwrap();
+        let hover = analysis.hover(position).unwrap_or_else(|| {
+            panic!("Result builtin hover for `{expected_name}` at byte {offset}")
+        });
+        assert!(hover.signature().contains(expected_name), "{hover:?}");
+        assert_eq!(hover.documentation(), Some(expected_documentation));
+
+        let target = analysis
+            .goto_builtin_definition(position)
+            .expect("Result builtin declaration target");
+        assert_eq!(target.source_name(), "result.ruai");
+        let range = target.range();
+        assert_eq!(
+            &declaration[range.start() as usize..range.end() as usize],
+            expected_name
+        );
+    }
+}
+
+#[test]
+fn all_standard_types_hover_and_resolve_to_their_ruai_declarations() {
+    let source = concat!(
+        "fn inspect(\n",
+        "    vector: Vec<i64>, map: HashMap<String, i64>, iterator: Iter<i64>,\n",
+        "    text: String, optional: Option<i64>, result: Result<i64, String>,\n",
+        ") {}\n",
+    );
+    let uri = uri("/test/standard_type_navigation.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, source);
+    let analysis = srv.snapshot();
+
+    for (name, source_name) in [
+        ("Vec", "vec.ruai"),
+        ("HashMap", "hashmap.ruai"),
+        ("Iter", "iter.ruai"),
+        ("String", "string.ruai"),
+        ("Option", "option.ruai"),
+        ("Result", "result.ruai"),
+    ] {
+        let offset = source.find(name).unwrap() + 1;
+        let position = srv.pp_at_offset(&uri, offset).unwrap();
+        let hover = analysis.hover(position).expect("standard type hover");
+        assert!(hover.signature().contains(name), "{hover:?}");
+        let target = analysis
+            .goto_builtin_definition(position)
+            .expect("standard type declaration target");
+        assert_eq!(target.source_name(), source_name);
+    }
+}
+
+#[test]
+fn user_result_type_and_variants_shadow_standard_navigation() {
+    let source = "enum Result { Ok(i64), Err(i64) }\nfn use_result(value: Result) { match value { Result::Ok(item) => item, Result::Err(error) => error } }";
+    let uri = uri("/test/user_result_navigation.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, source);
+    let analysis = srv.snapshot();
+
+    for (fragment, symbol) in [("value: Result", "Result"), ("Result::Ok(item)", "Ok")] {
+        let start = source.find(fragment).unwrap();
+        let offset = start + fragment.find(symbol).unwrap() + 1;
+        let position = srv.pp_at_offset(&uri, offset).unwrap();
+        let hover = analysis.hover(position).expect("user Result hover");
+        assert!(hover.signature().contains(symbol), "{hover:?}");
+        assert!(
+            analysis.goto_definition(position).is_some(),
+            "missing user Result definition for {symbol}"
         );
     }
 }

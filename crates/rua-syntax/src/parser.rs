@@ -722,9 +722,40 @@ impl<'a> Parser<'a> {
             self.wrap(cp, K::RefType);
             return;
         }
+        if self.at(K::KwFn) {
+            let cp = self.builder.checkpoint();
+            self.bump();
+            self.expect(K::LParen);
+            while !self.at(K::RParen) && !self.at(K::Eof) {
+                let before = self.pos;
+                self.ty();
+                if !self.accept(K::Comma) {
+                    break;
+                }
+                if self.pos == before {
+                    self.error_bump();
+                }
+            }
+            self.expect(K::RParen);
+            if self.accept(K::Arrow) {
+                self.ty();
+            }
+            self.wrap(cp, K::CallableType);
+            return;
+        }
         if self.at(K::LParen) {
             let cp = self.builder.checkpoint();
             self.bump();
+            while !self.at(K::RParen) && !self.at(K::Eof) {
+                let before = self.pos;
+                self.ty();
+                if !self.accept(K::Comma) {
+                    break;
+                }
+                if self.pos == before {
+                    self.error_bump();
+                }
+            }
             self.expect(K::RParen);
             self.wrap(cp, K::TupleType);
             return;
@@ -1297,53 +1328,6 @@ fn user_str(k: SyntaxKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The conformance corpus: every example the semantic compiler accepts must
-    /// parse into a lossless, error-free CST here (keeps the two grammars in sync).
-    const CORPUS: &[&str] = &[
-        "example_rua.rua",
-        "example_rua_p2.rua",
-        "example_rua_p3.rua",
-        "example_rua_p4.rua",
-        "example_rua_p4b.rua",
-        "example_rua_p4c.rua",
-        "example_rua_p4c_mod.rua",
-        "example_rua_p4c_types.rua",
-        "example_rua_p5.rua",
-        "example_rua_std.rua",
-        "rua_multi/main.rua",
-        "rua_multi/math.rua",
-        "rua_multi/util.rua",
-        "rua_multi/math/trig.rua",
-        "rua_moon/main.rua",
-    ];
-
-    fn example(rel: &str) -> String {
-        let path = format!(
-            "{}/../../tests/fixtures/examples/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            rel
-        );
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
-    }
-
-    #[test]
-    fn corpus_round_trips_without_errors() {
-        for rel in CORPUS {
-            let src = example(rel);
-            let parsed = parse_source_file(&src);
-            assert_eq!(
-                parsed.syntax_node().text().to_string(),
-                src,
-                "CST must round-trip for {rel}"
-            );
-            assert!(
-                parsed.errors.is_empty(),
-                "CST parse of {rel} had errors: {:?}",
-                parsed.errors
-            );
-        }
-    }
 
     fn tree(src: &str) -> String {
         let parsed = parse_source_file(src);

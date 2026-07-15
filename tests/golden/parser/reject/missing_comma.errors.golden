@@ -1,0 +1,7 @@
+tolerant:
+E0005 @30: expected `}`
+E0001 @31: expected expression
+E0001 @36: expected expression
+E0001 @38: expected expression
+strict:
+E0001 30..31: expected `}`, found `<ident>`

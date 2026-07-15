@@ -9,123 +9,13 @@ use std::{
     sync::Arc,
 };
 
+use rua_core::StdSymbolId;
+
 use super::{
     CallableSignature, CallableTy, DefId, DefKind, DefMap, GenericParamId, ItemSignature,
-    ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, Substitution, Ty, TypeLoweringContext,
-    TypeRef, VariantKind,
+    ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, StdLibraryIndex, StdMember,
+    StdMemberKind, Substitution, Ty, TypeLoweringContext, TypeRef, VariantKind, standard_library,
 };
-
-/// Analysis-owned identifiers for members supplied by the language runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BuiltinMemberId {
-    VecNew,
-    VecGet,
-    VecLen,
-    VecPop,
-    VecPush,
-    VecSet,
-    HashMapNew,
-    HashMapContainsKey,
-    HashMapGet,
-    HashMapInsert,
-    HashMapLen,
-    HashMapRemove,
-    StringChars,
-    StringClone,
-    StringContains,
-    StringEndsWith,
-    StringIsEmpty,
-    StringLen,
-    StringRepeat,
-    StringReplace,
-    StringSplit,
-    StringStartsWith,
-    StringToLowercase,
-    StringToOwned,
-    StringToString,
-    StringToUppercase,
-    StringTrim,
-    StringTrimEnd,
-    StringTrimStart,
-    OptionMap,
-    OptionSome,
-    OptionNone,
-    ResultOk,
-    ResultErr,
-}
-
-impl BuiltinMemberId {
-    pub const fn source_name(self) -> &'static str {
-        match self {
-            Self::VecNew
-            | Self::VecGet
-            | Self::VecLen
-            | Self::VecPop
-            | Self::VecPush
-            | Self::VecSet => "vec.ruai",
-            Self::HashMapNew
-            | Self::HashMapContainsKey
-            | Self::HashMapGet
-            | Self::HashMapInsert
-            | Self::HashMapLen
-            | Self::HashMapRemove => "hashmap.ruai",
-            Self::StringChars
-            | Self::StringClone
-            | Self::StringContains
-            | Self::StringEndsWith
-            | Self::StringIsEmpty
-            | Self::StringLen
-            | Self::StringRepeat
-            | Self::StringReplace
-            | Self::StringSplit
-            | Self::StringStartsWith
-            | Self::StringToLowercase
-            | Self::StringToOwned
-            | Self::StringToString
-            | Self::StringToUppercase
-            | Self::StringTrim
-            | Self::StringTrimEnd
-            | Self::StringTrimStart => "string.ruai",
-            Self::OptionMap | Self::OptionSome | Self::OptionNone => "option.ruai",
-            Self::ResultOk | Self::ResultErr => "result.ruai",
-        }
-    }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::VecNew | Self::HashMapNew => "new",
-            Self::VecGet | Self::HashMapGet => "get",
-            Self::VecLen | Self::HashMapLen | Self::StringLen => "len",
-            Self::VecPop => "pop",
-            Self::VecPush => "push",
-            Self::VecSet => "set",
-            Self::HashMapContainsKey => "contains_key",
-            Self::HashMapInsert => "insert",
-            Self::HashMapRemove => "remove",
-            Self::StringChars => "chars",
-            Self::StringClone => "clone",
-            Self::StringContains => "contains",
-            Self::StringEndsWith => "ends_with",
-            Self::StringIsEmpty => "is_empty",
-            Self::StringRepeat => "repeat",
-            Self::StringReplace => "replace",
-            Self::StringSplit => "split",
-            Self::StringStartsWith => "starts_with",
-            Self::StringToLowercase => "to_lowercase",
-            Self::StringToOwned => "to_owned",
-            Self::StringToString => "to_string",
-            Self::StringToUppercase => "to_uppercase",
-            Self::StringTrim => "trim",
-            Self::StringTrimEnd => "trim_end",
-            Self::StringTrimStart => "trim_start",
-            Self::OptionMap => "map",
-            Self::OptionSome => "Some",
-            Self::OptionNone => "None",
-            Self::ResultOk => "Ok",
-            Self::ResultErr => "Err",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BuiltinType {
@@ -134,6 +24,7 @@ pub enum BuiltinType {
     String,
     Option,
     Result,
+    Iter,
 }
 
 impl BuiltinType {
@@ -144,6 +35,7 @@ impl BuiltinType {
             Ty::Primitive(super::PrimitiveTy::String) => Some(Self::String),
             Ty::Option(_) => Some(Self::Option),
             Ty::Result(_, _) => Some(Self::Result),
+            Ty::Iterator(_) => Some(Self::Iter),
             _ => None,
         }
     }
@@ -152,7 +44,7 @@ impl BuiltinType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemberTarget {
     Definition(DefId),
-    Builtin(BuiltinMemberId),
+    Builtin(StdSymbolId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -372,6 +264,7 @@ impl ImplementationData {
 #[derive(Clone, Debug)]
 pub struct MemberIndex {
     def_map: Arc<DefMap>,
+    standard_library: Arc<StdLibraryIndex>,
     generic_params: BTreeMap<DefId, Vec<GenericParamDecl>>,
     bounds: BTreeMap<GenericParamId, Vec<TraitBound>>,
     scoped_bounds: BTreeMap<DefId, BTreeMap<GenericParamId, Vec<TraitBound>>>,
@@ -382,8 +275,8 @@ pub struct MemberIndex {
     variants: BTreeMap<DefId, Vec<VariantTemplate>>,
     traits: BTreeMap<DefId, TraitData>,
     implementations: Vec<ImplementationData>,
-    builtin_callables: BTreeMap<BuiltinMemberId, CallableTy>,
-    builtin_receivers: BTreeMap<BuiltinMemberId, Ty>,
+    builtin_callables: BTreeMap<StdSymbolId, CallableTy>,
+    builtin_receivers: BTreeMap<StdSymbolId, Ty>,
 }
 
 impl MemberIndex {
@@ -398,12 +291,23 @@ impl MemberIndex {
     }
 
     pub fn build(def_map: &DefMap) -> Self {
-        Self::build_shared(Arc::new(def_map.clone()))
+        Self::build_shared(
+            Arc::new(def_map.clone()),
+            Arc::new(
+                standard_library()
+                    .expect("embedded standard library must be valid")
+                    .clone(),
+            ),
+        )
     }
 
-    pub(crate) fn build_shared(def_map: Arc<DefMap>) -> Self {
+    pub(crate) fn build_shared(
+        def_map: Arc<DefMap>,
+        standard_library: Arc<StdLibraryIndex>,
+    ) -> Self {
         let mut index = Self {
             def_map,
+            standard_library,
             generic_params: BTreeMap::new(),
             bounds: BTreeMap::new(),
             scoped_bounds: BTreeMap::new(),
@@ -460,7 +364,7 @@ impl MemberIndex {
             .map_or(&[], |callable| callable.requirements.as_slice())
     }
 
-    pub fn builtin_callable(&self, builtin: BuiltinMemberId) -> Option<CallableTy> {
+    pub fn builtin_callable(&self, builtin: StdSymbolId) -> Option<CallableTy> {
         self.builtin_callables.get(&builtin).cloned()
     }
 
@@ -472,8 +376,20 @@ impl MemberIndex {
             .and_then(|template| template.receiver_ty.clone())
     }
 
-    pub fn builtin_receiver_type(&self, builtin: BuiltinMemberId) -> Option<Ty> {
+    pub fn builtin_receiver_type(&self, builtin: StdSymbolId) -> Option<Ty> {
         self.builtin_receivers.get(&builtin).cloned()
+    }
+
+    pub fn standard_member(&self, id: StdSymbolId) -> Option<&StdMember> {
+        self.standard_library.member(id)
+    }
+
+    pub fn standard_types(&self) -> impl ExactSizeIterator<Item = &super::StdType> {
+        self.standard_library.types()
+    }
+
+    pub fn standard_type(&self, name: &str) -> Option<&super::StdType> {
+        self.standard_library.type_named(name)
     }
 
     pub const fn builtin_type(ty: &Ty) -> Option<BuiltinType> {
@@ -621,7 +537,7 @@ impl MemberIndex {
             return self.bound_method_candidates(param.id(), scope);
         }
 
-        let mut candidates = self.builtin_method_candidates(receiver);
+        let mut candidates = self.std_method_candidates(receiver);
         candidates.extend(self.trait_definition_candidates(receiver, true));
         for implementation in &self.implementations {
             let Some(substitution) = self.match_implementation(implementation, receiver) else {
@@ -646,7 +562,7 @@ impl MemberIndex {
         if owner_ty.is_unknown() {
             return Vec::new();
         }
-        let mut candidates = self.builtin_associated_candidates(owner_ty);
+        let mut candidates = self.std_associated_candidates(owner_ty);
         if let Ty::Named(named) = owner_ty {
             let Some(template) = self.type_templates.get(&named.definition()) else {
                 return candidates;
@@ -1462,151 +1378,62 @@ impl MemberIndex {
     }
 
     fn install_builtins(&mut self) {
-        for (id, receiver, callable) in builtin_templates() {
-            self.builtin_receivers.insert(id, receiver);
-            self.builtin_callables.insert(id, callable);
+        let unknown = Ty::Unknown;
+        let receivers = [
+            Ty::Vec(Box::new(unknown.clone())),
+            Ty::HashMap(Box::new(unknown.clone()), Box::new(unknown.clone())),
+            Ty::STRING,
+            Ty::Option(Box::new(unknown.clone())),
+            Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
+            Ty::Iterator(Box::new(unknown)),
+        ];
+        for receiver in receivers {
+            for member in self.standard_library.members_for(&receiver) {
+                let Some(Ty::Function(callable)) = member.instantiate(&receiver) else {
+                    continue;
+                };
+                self.builtin_receivers.insert(member.id(), receiver.clone());
+                self.builtin_callables.insert(member.id(), callable);
+            }
         }
     }
 
-    fn builtin_method_candidates(&self, receiver: &Ty) -> Vec<MemberCandidate> {
-        match receiver {
-            Ty::Vec(item) => vec![
-                builtin_method(
-                    BuiltinMemberId::VecGet,
-                    "get",
-                    vec![Ty::I64],
-                    Ty::Option(item.clone()),
-                    ReceiverKind::SharedRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::VecLen,
-                    "len",
-                    vec![],
-                    Ty::I64,
-                    ReceiverKind::SharedRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::VecPop,
-                    "pop",
-                    vec![],
-                    Ty::Option(item.clone()),
-                    ReceiverKind::MutRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::VecPush,
-                    "push",
-                    vec![(**item).clone()],
-                    Ty::UNIT,
-                    ReceiverKind::MutRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::VecSet,
-                    "set",
-                    vec![Ty::I64, (**item).clone()],
-                    Ty::UNIT,
-                    ReceiverKind::MutRef,
-                ),
-            ],
-            Ty::HashMap(key, value) => vec![
-                builtin_method(
-                    BuiltinMemberId::HashMapContainsKey,
-                    "contains_key",
-                    vec![(**key).clone()],
-                    Ty::BOOL,
-                    ReceiverKind::SharedRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::HashMapGet,
-                    "get",
-                    vec![(**key).clone()],
-                    Ty::Option(value.clone()),
-                    ReceiverKind::SharedRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::HashMapInsert,
-                    "insert",
-                    vec![(**key).clone(), (**value).clone()],
-                    Ty::UNIT,
-                    ReceiverKind::MutRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::HashMapLen,
-                    "len",
-                    vec![],
-                    Ty::I64,
-                    ReceiverKind::SharedRef,
-                ),
-                builtin_method(
-                    BuiltinMemberId::HashMapRemove,
-                    "remove",
-                    vec![(**key).clone()],
-                    Ty::Option(value.clone()),
-                    ReceiverKind::MutRef,
-                ),
-            ],
-            Ty::Primitive(super::PrimitiveTy::String) => builtin_string_methods(),
-            Ty::Option(item) => vec![builtin_method(
-                BuiltinMemberId::OptionMap,
-                "map",
-                vec![Ty::Closure(CallableTy::new(
-                    vec![(**item).clone()],
-                    Ty::Unknown,
-                ))],
-                Ty::Option(Box::new(Ty::Unknown)),
-                ReceiverKind::Value,
-            )],
-            _ => Vec::new(),
-        }
+    fn std_method_candidates(&self, receiver: &Ty) -> Vec<MemberCandidate> {
+        self.standard_library
+            .members_for(receiver)
+            .filter(|member| member.kind() == StdMemberKind::Method)
+            .filter_map(|member| std_candidate(member, receiver))
+            .collect()
     }
 
-    fn builtin_associated_candidates(&self, owner_ty: &Ty) -> Vec<MemberCandidate> {
-        match owner_ty {
-            Ty::Vec(item) => vec![builtin_associated(
-                BuiltinMemberId::VecNew,
-                "new",
-                MemberKind::AssociatedFunction,
-                CallableTy::new(vec![], Ty::Vec(item.clone())),
-            )],
-            Ty::HashMap(key, value) => vec![builtin_associated(
-                BuiltinMemberId::HashMapNew,
-                "new",
-                MemberKind::AssociatedFunction,
-                CallableTy::new(vec![], Ty::HashMap(key.clone(), value.clone())),
-            )],
-            Ty::Option(item) => vec![
-                builtin_value(
-                    BuiltinMemberId::OptionNone,
-                    "None",
-                    MemberKind::Variant,
-                    Ty::Option(item.clone()),
-                ),
-                builtin_associated(
-                    BuiltinMemberId::OptionSome,
-                    "Some",
-                    MemberKind::Variant,
-                    CallableTy::new(vec![(**item).clone()], Ty::Option(item.clone())),
-                ),
-            ],
-            Ty::Result(ok, error) => vec![
-                builtin_associated(
-                    BuiltinMemberId::ResultErr,
-                    "Err",
-                    MemberKind::Variant,
-                    CallableTy::new(
-                        vec![(**error).clone()],
-                        Ty::Result(ok.clone(), error.clone()),
-                    ),
-                ),
-                builtin_associated(
-                    BuiltinMemberId::ResultOk,
-                    "Ok",
-                    MemberKind::Variant,
-                    CallableTy::new(vec![(**ok).clone()], Ty::Result(ok.clone(), error.clone())),
-                ),
-            ],
-            _ => Vec::new(),
-        }
+    fn std_associated_candidates(&self, owner_ty: &Ty) -> Vec<MemberCandidate> {
+        self.standard_library
+            .members_for(owner_ty)
+            .filter(|member| member.kind() != StdMemberKind::Method)
+            .filter_map(|member| std_candidate(member, owner_ty))
+            .collect()
     }
+}
+
+fn std_candidate(member: &StdMember, owner_ty: &Ty) -> Option<MemberCandidate> {
+    let kind = match member.kind() {
+        StdMemberKind::Method => MemberKind::Method,
+        StdMemberKind::AssociatedFunction => MemberKind::AssociatedFunction,
+        StdMemberKind::Variant => MemberKind::Variant,
+    };
+    Some(MemberCandidate {
+        name: member.name().to_string(),
+        origin: MemberOrigin::Builtin,
+        resolution: MemberResolution {
+            target: MemberTarget::Builtin(member.id()),
+            kind,
+            ty: member.instantiate(owner_ty)?,
+            receiver: member.receiver(),
+            substitution: Substitution::new(),
+            generic_params: Vec::new(),
+            requirements: Vec::new(),
+        },
+    })
 }
 
 fn generic_ty(param: &GenericParamDecl) -> Ty {
@@ -1751,295 +1578,4 @@ const fn member_kind_rank(kind: MemberKind) -> u8 {
         MemberKind::AssociatedFunction => 2,
         MemberKind::Variant => 3,
     }
-}
-
-fn builtin_method(
-    id: BuiltinMemberId,
-    name: &str,
-    params: Vec<Ty>,
-    return_ty: Ty,
-    receiver: ReceiverKind,
-) -> MemberCandidate {
-    MemberCandidate {
-        name: name.to_string(),
-        origin: MemberOrigin::Builtin,
-        resolution: MemberResolution {
-            target: MemberTarget::Builtin(id),
-            kind: MemberKind::Method,
-            ty: Ty::Function(CallableTy::new(params, return_ty)),
-            receiver: Some(receiver),
-            substitution: Substitution::new(),
-            generic_params: Vec::new(),
-            requirements: Vec::new(),
-        },
-    }
-}
-
-fn builtin_associated(
-    id: BuiltinMemberId,
-    name: &str,
-    kind: MemberKind,
-    callable: CallableTy,
-) -> MemberCandidate {
-    MemberCandidate {
-        name: name.to_string(),
-        origin: MemberOrigin::Builtin,
-        resolution: MemberResolution {
-            target: MemberTarget::Builtin(id),
-            kind,
-            ty: Ty::Function(callable),
-            receiver: None,
-            substitution: Substitution::new(),
-            generic_params: Vec::new(),
-            requirements: Vec::new(),
-        },
-    }
-}
-
-fn builtin_value(id: BuiltinMemberId, name: &str, kind: MemberKind, ty: Ty) -> MemberCandidate {
-    MemberCandidate {
-        name: name.to_string(),
-        origin: MemberOrigin::Builtin,
-        resolution: MemberResolution {
-            target: MemberTarget::Builtin(id),
-            kind,
-            ty,
-            receiver: None,
-            substitution: Substitution::new(),
-            generic_params: Vec::new(),
-            requirements: Vec::new(),
-        },
-    }
-}
-
-fn builtin_string_methods() -> Vec<MemberCandidate> {
-    use BuiltinMemberId as B;
-    vec![
-        builtin_method(
-            B::StringChars,
-            "chars",
-            vec![],
-            Ty::Vec(Box::new(Ty::STRING)),
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringClone,
-            "clone",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringContains,
-            "contains",
-            vec![Ty::STRING],
-            Ty::BOOL,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringEndsWith,
-            "ends_with",
-            vec![Ty::STRING],
-            Ty::BOOL,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringIsEmpty,
-            "is_empty",
-            vec![],
-            Ty::BOOL,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringLen,
-            "len",
-            vec![],
-            Ty::I64,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringRepeat,
-            "repeat",
-            vec![Ty::I64],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringReplace,
-            "replace",
-            vec![Ty::STRING, Ty::STRING],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringSplit,
-            "split",
-            vec![Ty::STRING],
-            Ty::Vec(Box::new(Ty::STRING)),
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringStartsWith,
-            "starts_with",
-            vec![Ty::STRING],
-            Ty::BOOL,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringToLowercase,
-            "to_lowercase",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringToOwned,
-            "to_owned",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringToString,
-            "to_string",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringToUppercase,
-            "to_uppercase",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringTrim,
-            "trim",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringTrimEnd,
-            "trim_end",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-        builtin_method(
-            B::StringTrimStart,
-            "trim_start",
-            vec![],
-            Ty::STRING,
-            ReceiverKind::SharedRef,
-        ),
-    ]
-}
-
-fn builtin_templates() -> Vec<(BuiltinMemberId, Ty, CallableTy)> {
-    use BuiltinMemberId as B;
-    let unknown = Ty::Unknown;
-    let vec_ty = Ty::Vec(Box::new(unknown.clone()));
-    let map_ty = Ty::HashMap(Box::new(unknown.clone()), Box::new(unknown.clone()));
-    let option_ty = Ty::Option(Box::new(unknown.clone()));
-    let mut templates = vec![
-        (
-            B::VecNew,
-            vec_ty.clone(),
-            CallableTy::new(vec![], vec_ty.clone()),
-        ),
-        (
-            B::VecGet,
-            vec_ty.clone(),
-            CallableTy::new(vec![Ty::I64], Ty::Option(Box::new(unknown.clone()))),
-        ),
-        (B::VecLen, vec_ty.clone(), CallableTy::new(vec![], Ty::I64)),
-        (
-            B::VecPop,
-            vec_ty.clone(),
-            CallableTy::new(vec![], Ty::Option(Box::new(unknown.clone()))),
-        ),
-        (
-            B::VecPush,
-            vec_ty.clone(),
-            CallableTy::new(vec![unknown.clone()], Ty::UNIT),
-        ),
-        (
-            B::VecSet,
-            vec_ty,
-            CallableTy::new(vec![Ty::I64, unknown.clone()], Ty::UNIT),
-        ),
-        (
-            B::HashMapNew,
-            map_ty.clone(),
-            CallableTy::new(vec![], map_ty.clone()),
-        ),
-        (
-            B::HashMapContainsKey,
-            map_ty.clone(),
-            CallableTy::new(vec![unknown.clone()], Ty::BOOL),
-        ),
-        (
-            B::HashMapGet,
-            map_ty.clone(),
-            CallableTy::new(vec![unknown.clone()], Ty::Option(Box::new(unknown.clone()))),
-        ),
-        (
-            B::HashMapInsert,
-            map_ty.clone(),
-            CallableTy::new(vec![unknown.clone(), unknown.clone()], Ty::UNIT),
-        ),
-        (
-            B::HashMapLen,
-            map_ty.clone(),
-            CallableTy::new(vec![], Ty::I64),
-        ),
-        (
-            B::HashMapRemove,
-            map_ty,
-            CallableTy::new(vec![unknown.clone()], Ty::Option(Box::new(unknown.clone()))),
-        ),
-        (
-            B::OptionMap,
-            option_ty.clone(),
-            CallableTy::new(
-                vec![Ty::Closure(CallableTy::new(
-                    vec![unknown.clone()],
-                    unknown.clone(),
-                ))],
-                option_ty.clone(),
-            ),
-        ),
-        (
-            B::OptionSome,
-            option_ty.clone(),
-            CallableTy::new(vec![unknown.clone()], option_ty),
-        ),
-        (
-            B::ResultOk,
-            Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
-            CallableTy::new(
-                vec![unknown.clone()],
-                Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
-            ),
-        ),
-        (
-            B::ResultErr,
-            Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
-            CallableTy::new(
-                vec![unknown.clone()],
-                Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
-            ),
-        ),
-    ];
-    for candidate in builtin_string_methods() {
-        let MemberTarget::Builtin(id) = candidate.target() else {
-            continue;
-        };
-        if let Some(callable) = candidate.resolution.callable().cloned() {
-            templates.push((id, Ty::STRING, callable));
-        }
-    }
-    templates
 }

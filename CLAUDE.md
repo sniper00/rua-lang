@@ -53,7 +53,7 @@ cargo clippy -p rua-analysis -p rua-lsp --all-targets -- -D warnings
 cargo fmt --all
 
 # Regenerate golden format snapshots
-cargo test -p rua-syntax --test goldens regenerate_goldens -- --ignored
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test formatter_goldens update_formatter_goldens -- --ignored --exact
 ```
 
 **Note**: `cargo clippy --all-targets` will also check `ruac`. To keep cycle times short when only touching IDE crates, scope clippy to `-p rua-analysis -p rua-lsp --features lsp`.

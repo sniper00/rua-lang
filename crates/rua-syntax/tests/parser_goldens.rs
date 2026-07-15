@@ -10,7 +10,7 @@ use rua_syntax::{Parse, SyntaxElement, SyntaxNode, ast::SourceFile, parse_source
 
 const UPDATE_ENV: &str = "RUA_UPDATE_GOLDENS";
 const UPDATE_COMMAND: &str = "RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test \
-                              parser_goldens update_parser_range_snapshots -- --ignored --exact";
+                              parser_goldens update_parser_goldens -- --ignored --exact";
 const MIN_ACCEPT_CASES: usize = 15;
 const MIN_REJECT_CASES: usize = 6;
 const MIN_RANGE_CASES: usize = 15;
@@ -109,7 +109,40 @@ fn assert_lossless(path: &Path, source: &str, parsed: &Parse<SourceFile>) -> Res
     Ok(())
 }
 
-fn run_parser_conformance() -> Result<(), String> {
+fn rejection_snapshot(parsed: &Parse<SourceFile>, strict: &ruac::parser::ParseError) -> String {
+    let mut output = String::from("tolerant:\n");
+    for error in parsed.errors() {
+        writeln!(
+            output,
+            "{} @{}: {}",
+            error.code.error_code(),
+            error.offset,
+            error.message
+        )
+        .expect("write to String");
+    }
+    let diagnostic = strict.diagnostic();
+    let range = diagnostic
+        .range
+        .expect("strict parser errors carry a range");
+    writeln!(output, "strict:").expect("write to String");
+    writeln!(
+        output,
+        "{} {}..{}: {}",
+        diagnostic.code.error_code(),
+        range.start(),
+        range.end(),
+        strict.message()
+    )
+    .expect("write to String");
+    output
+}
+
+fn expected_rejection_path(source: &Path) -> PathBuf {
+    source.with_extension("errors.golden")
+}
+
+fn run_parser_conformance(update: bool) -> Result<(), String> {
     let ParserCases { accept, reject, .. } = parser_cases()?;
 
     for path in accept {
@@ -131,8 +164,8 @@ fn run_parser_conformance() -> Result<(), String> {
     for path in reject {
         let source = read_source(&path)?;
         let parsed = parse_source_file(&source);
-        // Recovery details intentionally need not match the compiler parser:
-        // the IDE parser must retain every byte and report at least one error.
+        // The parsers intentionally recover differently, but both outcomes are
+        // explicit and snapshot-tested so diagnostics cannot drift silently.
         assert_lossless(&path, &source, &parsed)?;
         if parsed.errors.is_empty() {
             return Err(format!(
@@ -140,12 +173,20 @@ fn run_parser_conformance() -> Result<(), String> {
                 fixture_label(&path)
             ));
         }
-        if ruac::parser::parse(&source).is_ok() {
-            return Err(format!(
+        let strict = ruac::parser::parse(&source)
+            .map(|_| ())
+            .expect_err(&format!(
                 "compiler parser accepted reject case {}",
                 fixture_label(&path)
             ));
-        }
+        let actual = rejection_snapshot(&parsed, &strict);
+        assert_or_update_snapshot(
+            &path,
+            &expected_rejection_path(&path),
+            "parser rejection",
+            &actual,
+            update,
+        )?;
     }
 
     Ok(())
@@ -214,7 +255,7 @@ fn expected_range_path(source: &Path) -> PathBuf {
     source.with_extension("range.golden")
 }
 
-fn mismatch_message(source: &Path, expected: &str, actual: &str) -> String {
+fn mismatch_message(kind: &str, source: &Path, expected: &str, actual: &str) -> String {
     let offset = expected
         .as_bytes()
         .iter()
@@ -229,39 +270,44 @@ fn mismatch_message(source: &Path, expected: &str, actual: &str) -> String {
     let expected_line = expected.split('\n').nth(line - 1).unwrap_or("<eof>");
     let actual_line = actual.split('\n').nth(line - 1).unwrap_or("<eof>");
     format!(
-        "range golden mismatch for {} at line {line}\nexpected: {expected_line:?}\n  actual: \
+        "{kind} golden mismatch for {} at line {line}\nexpected: {expected_line:?}\n  actual: \
          {actual_line:?}\nto update, run: {UPDATE_COMMAND}",
         fixture_label(source)
     )
 }
 
-fn assert_or_update_range(source: &Path, actual: &str, update: bool) -> Result<(), String> {
-    let expected_path = expected_range_path(source);
+fn assert_or_update_snapshot(
+    source: &Path,
+    expected_path: &Path,
+    kind: &str,
+    actual: &str,
+    update: bool,
+) -> Result<(), String> {
     if update {
-        fs::write(&expected_path, actual)
+        fs::write(expected_path, actual)
             .map_err(|error| format!("cannot write {}: {error}", expected_path.display()))?;
-        println!("updated {}", fixture_label(&expected_path));
+        println!("updated {}", fixture_label(expected_path));
         return Ok(());
     }
 
-    let expected = match fs::read_to_string(&expected_path) {
+    let expected = match fs::read_to_string(expected_path) {
         Ok(expected) => expected,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Err(format!(
-                "missing range golden for {}: {}\nto update, run: {UPDATE_COMMAND}",
+                "missing {kind} golden for {}: {}\nto update, run: {UPDATE_COMMAND}",
                 fixture_label(source),
-                fixture_label(&expected_path)
+                fixture_label(expected_path)
             ));
         }
         Err(error) => {
             return Err(format!(
-                "cannot read range golden {}: {error}",
+                "cannot read {kind} golden {}: {error}",
                 expected_path.display()
             ));
         }
     };
     if expected != actual {
-        return Err(mismatch_message(source, &expected, actual));
+        return Err(mismatch_message(kind, source, &expected, actual));
     }
     Ok(())
 }
@@ -270,7 +316,13 @@ fn run_range_goldens(update: bool) -> Result<(), String> {
     let ParserCases { ranges, .. } = parser_cases()?;
     for source in ranges {
         let actual = range_snapshot(&source)?;
-        assert_or_update_range(&source, &actual, update)?;
+        assert_or_update_snapshot(
+            &source,
+            &expected_range_path(&source),
+            "parser range",
+            &actual,
+            update,
+        )?;
     }
     Ok(())
 }
@@ -281,7 +333,7 @@ fn run(result: Result<(), String>) {
 
 #[test]
 fn parser_conformance() {
-    run(run_parser_conformance());
+    run(run_parser_conformance(false));
 }
 
 #[test]
@@ -290,13 +342,13 @@ fn range_golden() {
 }
 
 #[test]
-#[ignore = "updates repository range snapshots; run the documented explicit command"]
-fn update_parser_range_snapshots() {
+#[ignore = "updates repository parser snapshots; run the documented explicit command"]
+fn update_parser_goldens() {
     assert_eq!(
         std::env::var(UPDATE_ENV).as_deref(),
         Ok("1"),
         "refusing to update without {UPDATE_ENV}=1"
     );
-    run(run_parser_conformance());
+    run(run_parser_conformance(true));
     run(run_range_goldens(true));
 }

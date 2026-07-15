@@ -43,7 +43,7 @@ fn lua_program() -> String {
 }
 
 fn run_lua(script: &Path) -> Output {
-    let runtime_pattern = workspace_root().join("lualib/?.lua");
+    let runtime_pattern = workspace_root().join("crates/rua-resources/resources/std/?.lua");
     Command::new(lua_program())
         .arg(script)
         .env("LUA_PATH", format!("{};;", runtime_pattern.display()))
@@ -69,7 +69,7 @@ fn compile_and_run(label: &str, source: &str) -> (String, Output) {
 
 fn compile_and_run_with_prelude(label: &str, prelude: &str, source: &str) -> (String, Output) {
     let root = workspace_root();
-    let lua = ruac::compile_str_with_builtins(source, &root.join("crates/rua-core/builtins"))
+    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-resources/resources/std"))
         .unwrap_or_else(|error| panic!("compile {label}: {error}"));
     let temp = TempDir::new(label);
     let script = temp.path().join("main.lua");
@@ -90,7 +90,37 @@ fn runtime_harness_executes_lua() {
 #[test]
 fn generated_artifact_checks_runtime_abi() {
     let lua = ruac::compile_str("println!(\"abi\");").unwrap();
-    assert!(lua.contains("assert(rt.ABI_VERSION == 1"), "{lua}");
+    assert!(
+        lua.contains("assert(rua_std.ABI_VERSION == 1, \"incompatible rua_std ABI\")"),
+        "{lua}"
+    );
+}
+
+#[test]
+fn first_class_iterators_execute_without_fusion() {
+    let source = r#"
+let mut pending = vec![1, 2, 3].iter().map(|value| value * 2).skip(1);
+println!("{}", pending.next().unwrap());
+println!("{}", pending.next().unwrap());
+
+let mut characters = "你a".chars();
+println!("{}", characters.next().unwrap());
+
+let range = (1..4).map(|value| value + 1);
+for value in range {
+    println!("{}", value);
+}
+"#;
+    let (lua, output) = compile_and_run("first-class-iterator", source);
+    assert_success(&output, "4\n6\n你\n2\n3\n4\n", &lua);
+    assert!(
+        lua.contains(":map("),
+        "stored adapter was unexpectedly fused: {lua}"
+    );
+    assert!(
+        lua.contains(":next()"),
+        "runtime iterator protocol was not used: {lua}"
+    );
 }
 
 #[test]
@@ -499,7 +529,7 @@ fn exact_size_collect_uses_lua_table_capacity_without_changing_vec_layout() {
         lua.contains("local __rua_table_create = table.create"),
         "{lua}"
     );
-    assert!(lua.contains("rt.vec(__rua_table_create("), "{lua}");
+    assert!(lua.contains("vec.from_table(__rua_table_create("), "{lua}");
 }
 
 #[test]
@@ -653,7 +683,7 @@ fn require_returns_public_exports_after_initialization() {
     let source = r#"
         pub fn answer() -> i64 { 42 }
     "#;
-    let lua = ruac::compile_str_with_builtins(source, &root.join("crates/rua-core/builtins"))
+    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-resources/resources/std"))
         .expect("compile export module");
     let temp = TempDir::new("exports");
     let module = temp.path().join("module.lua");

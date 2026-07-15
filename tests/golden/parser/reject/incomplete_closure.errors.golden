@@ -1,0 +1,4 @@
+tolerant:
+E0001 @36: expected `token`
+strict:
+E0001 36..41: expected `|`, found `<ident>`

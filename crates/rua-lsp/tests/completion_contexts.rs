@@ -197,6 +197,27 @@ fn completions_in_module_path() {
 }
 
 #[test]
+fn completions_from_declaration_module_at_line_end() {
+    let (source, offset) = extract_marker("mod moon;\nfn main() {\n    moon::$0\n}");
+    let main_uri = uri("/workspace/main.rua");
+    let declaration_uri = uri("/workspace/moon.ruai");
+    let mut srv = TestServer::new();
+    srv.open(&main_uri, &source);
+    srv.open(
+        &declaration_uri,
+        "extern \"lua\" { pub fn query(name: String) -> i64; }",
+    );
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&main_uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "query"),
+        "declaration module completion should work directly after `::`: {items:?}"
+    );
+}
+
+#[test]
 fn completions_nested_module_path() {
     let (source, offset) = extract_marker(
         "mod a { pub mod b { pub fn func() -> i64 { 1 } } }\nfn main() { a::b::$0 }",

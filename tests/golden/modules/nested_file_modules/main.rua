@@ -1,0 +1,29 @@
+mod math;
+mod util;
+
+use math::add;
+
+let direct = math::add(2, 3);
+if direct != 5 {
+    panic!("direct module call failed");
+}
+
+let nested = math::trig::triple(4);
+if nested != 12 {
+    panic!("nested module call failed");
+}
+
+let imported = add(10, 20);
+if imported != 30 {
+    panic!("imported module call failed");
+}
+
+let composed = math::add_then_triple(2, 3);
+if composed != 15 {
+    panic!("module-local import failed");
+}
+
+let greeting = util::greet();
+if greeting != "hello" {
+    panic!("sibling module call failed");
+}

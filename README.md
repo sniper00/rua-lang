@@ -7,7 +7,7 @@ cargo build --release -p ruac -p rua-lsp --features lsp
 target/release/ruac build app.rua
 ```
 
-生成物面向 Lua 5.5，并在使用运行时能力时依赖 [rua_rt.lua](lualib/rua_rt.lua)。
+生成物面向 Lua 5.5。标准运行时集中在单个 [rua_std.lua](crates/rua-resources/resources/std/rua_std.lua)；codegen 最多生成一次 `require("rua_std")`，并只为实际使用的子表创建局部别名。
 
 ## 语言语义
 
@@ -72,14 +72,34 @@ CLI：
 ruac build src/main.rua                         # 写入 src/main.lua
 ruac build src/main.rua -o dist/app.lua
 ruac check src/main.rua
-ruac build src/main.rua --builtins-dir ./sysroot
+ruac build src/main.rua --std-path ./path/to/standard-library
+ruac build src/main.rua -c ./path/to/.ruarc.toml
 ```
+
+`ruac` 默认从输入文件目录向上查找最近的 `.ruarc.toml`。项目配置与 LSP
+共享，字段使用 snake_case：
+
+```toml
+[workspace]
+library = ["./types", "../host/moon.ruai"]
+
+[workspace.library_mounts]
+host = "../host/actual-name.ruai"
+
+[runtime]
+std_path = "./std"
+```
+
+`workspace.library` 按声明文件名解析 module；只有物理文件名与逻辑 module
+名不同时才需要 `workspace.library_mounts`。命令行 `--library`、
+`--library-mount name=path` 和 `--std-path` 覆盖项目配置。
 
 库 API：
 
 ```rust
 let lua = ruac::compile_str("let value = 42;")?;
 let lua = ruac::compile_path(path)?;
+let lua = ruac::compile_path_with_std(path, std_root)?;
 let lua = ruac::compile_project(&project_spec, &source_provider)?;
 let artifact = ruac::compile_project_with_diagnostics(
     &project_spec,
@@ -87,7 +107,9 @@ let artifact = ruac::compile_project_with_diagnostics(
 )?;
 ```
 
-`compile_project_with_diagnostics` 是完整 host 集成入口，成功值包含 Lua 与 generated-to-Rua source map，失败值 `CompileFailure` 包含 diagnostic code、文件和 byte range。`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 同样返回结构化失败；只有 CLI 负责渲染展示文字。`compile_path_artifact` 为文件系统 host 保留 generated-to-Rua source map。`ProjectSpec` 提供稳定 `FileId`、逻辑路径、source root 和 library mount；`SourceProvider` 提供源码。project API 使用内嵌 sysroot，不读取磁盘、不依赖 CWD；`compile_path` 才是文件系统 adapter。
+`compile_project_with_diagnostics` 是完整 host 集成入口，成功值包含 Lua 与 generated-to-Rua source map，失败值 `CompileFailure` 包含 diagnostic code、文件和 byte range。`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 同样返回结构化失败；只有 CLI 负责渲染展示文字。默认入口使用内嵌标准库；`compile_*_with_std` 和 `--std-path` 显式加载包含 `std.toml` 的目录。`compile_path_artifact` 为文件系统 host 保留 generated-to-Rua source map。`ProjectSpec` 提供稳定 `FileId`、逻辑路径、source root 和 library mount；`SourceProvider` 提供源码。
+
+标准库的 `.ruai` 签名、文档、成员、Lua 包、导出子表、局部别名和可选 ABI 由 `std.toml` 统一描述。声明文件与 `rua_std.lua` 放在同一资源目录；`Vec`、`HashMap`、`Iter`、`String`、`Result`、格式化和整数运算是同一 Lua 包的独立导出。编译器只对 manifest 指定的 `Option` 与 `Result` language item 保留特殊表示。同名用户类型仍是普通 `struct`/`enum`，不会误入标准库 lowering。部署时只需提供一个 `rua_std.lua`。
 
 编译器主链：
 
@@ -114,24 +136,27 @@ Rua 长期保留两套 parser：
 
 VS Code 设置：
 
-- `rua.library`: `.ruai` 文件或目录列表。
-- `rua.libraryMounts`: logical module name 到 `.ruai` 文件/目录的映射。
-- `rua.sysroot`: 可选 sysroot 路径。
-- `rua.server.path`, `rua.server.args`, `rua.trace.server`。
+- `rua.server.path`, `rua.server.args`, `rua.compiler.path`,
+  `rua.compiler.args`, `rua.trace.server`。
+
+library、module mount 和标准库路径只写入 workspace 根目录的 `.ruarc.toml`，
+让 `ruac` 与 `rua-lsp` 使用同一份项目输入。VS Code 设置只控制 compiler、
+language server 进程与协议 trace。Explorer 或编辑器中右键 `.rua` 文件可执行
+**Rua: Build File**。
 
 workspace/library 扫描支持 `.gitignore`、`.ignore` 和 `.ruaignore`，默认排除 `.git`、`target`、`node_modules`。
 
 ## Workspace
 
 ```text
-crates/rua-core      stable IDs, diagnostic and builtin contracts
+crates/rua-core      stable IDs, diagnostics and language contracts
 crates/rua-lex       shared lossless token stream
 crates/rua-project   IO-free project/source-provider model
+crates/rua-resources versioned standard-library manifest, declarations and Lua runtime
 crates/ruac          strict compiler and Lua backend
 crates/rua-syntax    Rowan CST parser and formatter
 crates/rua-analysis  incremental semantic database and IDE queries
 crates/rua-lsp       stdio LSP adapter and formatter CLI
-lualib/rua_rt.lua    versioned runtime ABI
 ```
 
 ## 验证

@@ -11,3 +11,5 @@ doctest = false
 
 [dependencies]
 rua-core.workspace = true
+serde.workspace = true
+toml.workspace = true

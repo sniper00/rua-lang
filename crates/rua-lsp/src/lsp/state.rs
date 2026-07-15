@@ -85,7 +85,7 @@ pub(super) enum BackgroundResult {
     },
     LibraryScan {
         generation: u64,
-        result: Result<crate::filesystem::LibraryConfig, String>,
+        result: Box<Result<crate::filesystem::LibraryConfig, String>>,
     },
 }
 
@@ -100,6 +100,7 @@ pub(super) struct Server {
     pub(super) next_file_id: u32,
     pub(super) next_root_id: u32,
     pub(super) projects: BTreeMap<ProjectId, WorkspaceProject>,
+    pub(super) workspace_folders: Vec<PathBuf>,
     pub(super) file_projects: HashMap<FileId, ProjectId>,
     pub(super) project_dependency_roots: BTreeMap<ProjectId, Vec<ProjectRoot>>,
     pub(super) library_roots: Vec<PathBuf>,
@@ -108,6 +109,8 @@ pub(super) struct Server {
     pub(super) library_project_bases: BTreeMap<u32, Vec<PathBuf>>,
     pub(super) library_source_root: Option<SourceRootId>,
     pub(super) library_file_ids: HashSet<FileId>,
+    pub(super) standard_library_root: Option<PathBuf>,
+    pub(super) standard_library_navigation_root: Option<PathBuf>,
     pub(super) watched_paths: Vec<PathBuf>,
     pub(super) watch_registration_id: Option<String>,
     pub(super) watch_registrations: HashMap<String, WatchRegistrationState>,
@@ -143,6 +146,7 @@ impl Server {
             next_file_id: 0,
             next_root_id: 1,
             projects: BTreeMap::new(),
+            workspace_folders: Vec::new(),
             file_projects: HashMap::new(),
             project_dependency_roots: BTreeMap::new(),
             library_roots: Vec::new(),
@@ -151,6 +155,10 @@ impl Server {
             library_project_bases: BTreeMap::new(),
             library_source_root: None,
             library_file_ids: HashSet::new(),
+            standard_library_root: None,
+            standard_library_navigation_root: rua_resources::materialized_embedded_std()
+                .ok()
+                .map(Path::to_path_buf),
             watched_paths: Vec::new(),
             watch_registration_id: None,
             watch_registrations: HashMap::new(),

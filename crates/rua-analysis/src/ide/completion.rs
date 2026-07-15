@@ -129,7 +129,8 @@ pub(crate) fn completions(db: &Arc<BaseDb>, position: ProjectPosition) -> Vec<Co
     let mut items = if after_dot {
         member_completions(&ctx)
     } else if let Some(ref tok) = ctx.token
-        && previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon)
+        && (tok.kind() == SyntaxKind::ColonColon
+            || previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon))
     {
         path_completions(&ctx)
     } else {
@@ -242,20 +243,11 @@ const DECLARATION_KEYWORDS: &[&str] = &[
     "fn", "struct", "enum", "trait", "impl", "mod", "pub", "extern", "use", "type",
 ];
 
-const BUILTIN_TYPES: &[(&str, &str, Option<&str>)] = &[
+const PRIMITIVE_TYPES: &[(&str, &str, Option<&str>)] = &[
     ("i64", "i64", None),
     ("f64", "f64", None),
     ("bool", "bool", None),
-    ("String", "String", None),
     ("str", "str", None),
-    ("Vec", "Vec<T>", Some("Vec<${1:T}>$0")),
-    (
-        "HashMap",
-        "HashMap<K, V>",
-        Some("HashMap<${1:K}, ${2:V}>$0"),
-    ),
-    ("Option", "Option<T>", Some("Option<${1:T}>$0")),
-    ("Result", "Result<T, E>", Some("Result<${1:T}, ${2:E}>$0")),
     ("Box", "Box<T>", Some("Box<${1:T}>$0")),
 ];
 
@@ -346,7 +338,7 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
         &mut items,
         &mut seen,
     );
-    complete_builtin_types(token, &mut items, &mut seen, in_type_pos);
+    complete_builtin_types(member_index, token, &mut items, &mut seen, in_type_pos);
     complete_builtin_constructors(&mut items, &mut seen, in_type_pos);
     complete_builtin_macros(&mut items, &mut seen, in_type_pos);
 
@@ -631,6 +623,7 @@ fn complete_cross_module_defs(
 }
 
 fn complete_builtin_types(
+    member_index: &MemberIndex,
     token: Option<&SyntaxToken>,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
@@ -645,7 +638,7 @@ fn complete_builtin_types(
         })
     });
     let numeric_types: &[&str] = &["i64", "f64"];
-    for (name, signature, snippet) in BUILTIN_TYPES {
+    for (name, signature, snippet) in PRIMITIVE_TYPES {
         if seen.insert((*name).to_string()) {
             let relevance = if in_arithmetic && numeric_types.contains(name) {
                 CompletionRelevance::arithmetic_num()
@@ -662,6 +655,38 @@ fn complete_builtin_types(
             }
             items.push(item);
         }
+    }
+    for standard_type in member_index.standard_types() {
+        let name = standard_type.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let generic_params = standard_type.generic_params();
+        let signature = if generic_params.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}<{}>", generic_params.join(", "))
+        };
+        let relevance = if in_type_pos {
+            CompletionRelevance::builtin_type_pos()
+        } else {
+            CompletionRelevance::builtin_type()
+        };
+        let mut item = CompletionItem::new(name, CompletionKind::BuiltinType)
+            .with_detail(format!("{signature} (standard type)"))
+            .with_relevance(relevance);
+        if !generic_params.is_empty() {
+            let placeholders = generic_params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            item = item.with_insert(CompletionInsert::Snippet(format!(
+                "{name}<{placeholders}>$0"
+            )));
+        }
+        items.push(item);
     }
 }
 
@@ -1099,13 +1124,19 @@ fn path_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
 
 /// Collect path segments leading up to the `::` before `token`.
 ///
-/// The caller has already verified that `previous_significant(token)` is `::`,
-/// so we skip past it and walk left to collect the qualifying path segments
-/// (e.g. for `std::collections::|` this returns `["std", "collections"]`).
+/// The caller has already verified that the cursor follows `::`. Walk left to
+/// collect the qualifying path segments (e.g. `std::collections::|` returns
+/// `["std", "collections"]`).
 fn path_segments_before(token: &SyntaxToken) -> Vec<String> {
-    // Step past the `::` that the caller already found.
-    let Some(colon) = previous_significant(token) else {
-        return vec![];
+    // At a line end Rowan can select the `::` token itself; with trailing
+    // trivia it selects the token to its right. Support both cursor shapes.
+    let colon = if token.kind() == SyntaxKind::ColonColon {
+        token.clone()
+    } else {
+        let Some(colon) = previous_significant(token) else {
+            return vec![];
+        };
+        colon
     };
     debug_assert_eq!(colon.kind(), SyntaxKind::ColonColon);
 

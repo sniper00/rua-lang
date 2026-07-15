@@ -1,5 +1,0 @@
-// mod util — a sibling file module.
-
-pub fn greet() -> String {
-    "hello"
-}

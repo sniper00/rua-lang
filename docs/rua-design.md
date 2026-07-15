@@ -60,6 +60,8 @@ let add = |x: i64| -> i64 { x + offset };
 
 iterator 是惰性、可组合的运行时协议。range、`Vec` 和 adapter 可以进入 `for`，并支持 `map`、`filter`、`fold`、`find`、`any`、`all`、`count` 和 `collect`。compiler 可以融合已知 adapter 链，但优化前后必须保持相同的可观察语义。
 
+标准 iterator 同时是一等 runtime value：它可以赋值、返回、传参和分阶段组合。`String::chars` 按 UTF-8 Unicode scalar 迭代，不按字节拆分。
+
 ## 4. 模块与接口文件
 
 Rua 支持 inline module、文件 module、`use`、可见性和只读 library mount。文件 module 的候选顺序固定为：
@@ -78,6 +80,12 @@ Rua 支持 inline module、文件 module、`use`、可见性和只读 library mo
 - inline module 中的 executable statement。
 
 compiler module loader、IO-free project API 和 native analysis 对该规则保持一致。
+
+### 4.1 标准库配置
+
+默认标准库随 `rua-resources` 内嵌。自定义标准库目录必须包含 `std.toml`，其中显式列出 declaration 文件、runtime source、language item、Lua 包、导出子表、局部别名和可选 ABI。`.ruai` 是类型签名、文档、completion、hover 和 goto definition 的唯一来源；runtime binding 只决定已解析标准定义如何连接到 Lua 导出。
+
+`Option` 的 nullable 表示和 `Result` 的 tagged 表示需要 compiler 参与，因此由 `[lang_items]` 指定。`Vec`、`HashMap`、`Iter` 与 `String` 没有专用构造器表或成员表，它们通过 declaration 和单个 `rua_std` Lua 包的普通导出实现；Result 的 tagged 构造也由 `result` 导出提供。codegen 对该包只执行一次 `require` 和 ABI 检查，并按实际引用生成 `vec`、`map` 等局部别名。用户类型不需要修改 `std.toml`：直接声明 `struct`、`enum`、`trait` 和 `impl` 即可；名称恰好相同也不会获得 language item 语义。
 
 ## 5. Extern 与宿主边界
 
@@ -99,7 +107,7 @@ extern "lua-result" {
 
 adapter 在边界把 multi-return 转成 Rua tagged Result，并把 Result 参数反向展开。该 ABI 要求 function 非 variadic，且返回类型解析到 builtin `Result<T, E>` identity。普通 `extern "lua"` 不会根据类型名称猜测转换方式。
 
-`rua_rt.ABI_VERSION` 是 compiler 与 runtime 的硬契约。使用运行时能力的生成物会检查版本，不兼容时立即失败。
+`std.toml` 中 runtime module 的可选 `abi` 是 compiler 与该 Lua 模块的硬契约。生成物只 require 实际使用的模块，并逐模块检查 `ABI_VERSION`；自定义库未声明 `abi` 时只生成 require。
 
 ## 6. Compiler API
 
@@ -114,7 +122,7 @@ let artifact = ruac::compile_project_with_diagnostics(
 
 `ProjectSpec` 提供 root、source root、library mount、stable `FileId` 和 logical path；`SourceProvider` 提供源码。成功 artifact 包含 Lua source 和 generated-to-Rua source map，失败 `CompileFailure` 包含稳定 diagnostic code、文件、byte range 和命名参数。
 
-`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 使用同一结构化失败类型。只有 CLI adapter 把诊断渲染为终端文字；`compile_path` 和 `--builtins-dir` 是显式文件系统入口。
+`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 使用同一结构化失败类型。只有 CLI adapter 把诊断渲染为终端文字；`compile_path_with_std` 和 `--std-path` 是显式标准库文件系统入口，未指定时使用内嵌标准库。
 
 ## 7. 稳定契约
 

@@ -268,6 +268,10 @@ impl<'a> Parser<'a> {
         render_leading_documentation(self.lexer.current_leading_trivia(), true)
     }
 
+    fn blank_line_before_current(&self) -> bool {
+        leading_trivia_has_blank_line(self.lexer.current_leading_trivia())
+    }
+
     /// Wrap an expression kind with the span running from `start` (captured
     /// before parsing began) through the last consumed token.
     fn mk(&mut self, kind: ExprKind, start: SourceRange) -> Expr {
@@ -456,6 +460,7 @@ impl<'a> Parser<'a> {
             chunk,
             source_order,
             is_decl: false,
+            standard_library: None,
         })
     }
 
@@ -465,12 +470,14 @@ impl<'a> Parser<'a> {
     ) -> Result<(Vec<Item>, Block, Vec<ChunkEntry>), ParseError> {
         let mut items = Vec::new();
         let mut statements = Vec::new();
+        let mut statement_blank_before = Vec::new();
         let mut source_order = Vec::new();
         while self.cur() != terminator && self.cur() != T::Eof {
             if self.at_item_start() {
                 source_order.push(ChunkEntry::Item(items.len()));
                 items.push(self.parse_item()?);
             } else {
+                statement_blank_before.push(self.blank_line_before_current());
                 source_order.push(ChunkEntry::Statement(statements.len()));
                 statements.push(self.parse_chunk_stmt(terminator)?);
             }
@@ -479,7 +486,9 @@ impl<'a> Parser<'a> {
             items,
             Block {
                 stmts: statements,
+                statement_blank_before,
                 tail: None,
+                tail_blank_before: false,
             },
             source_order,
         ))
@@ -591,7 +600,9 @@ impl<'a> Parser<'a> {
                 items: Vec::new(),
                 chunk: Block {
                     stmts: Vec::new(),
+                    statement_blank_before: Vec::new(),
                     tail: None,
+                    tail_blank_before: false,
                 },
                 source_order: Vec::new(),
                 is_pub,
@@ -1052,8 +1063,12 @@ impl<'a> Parser<'a> {
         let saved = self.no_struct;
         self.no_struct = false;
         let mut stmts = Vec::new();
+        let mut statement_blank_before = Vec::new();
         let mut tail = None;
+        let mut tail_blank_before = false;
         while self.cur() != T::RBrace && self.cur() != T::Eof {
+            let blank_before = self.blank_line_before_current();
+            let statement_count = stmts.len();
             match self.cur() {
                 T::KwLet => stmts.push(self.parse_let()?),
                 T::KwReturn => stmts.push(self.parse_return()?),
@@ -1076,6 +1091,7 @@ impl<'a> Parser<'a> {
                         stmts.push(Stmt::Expr(e));
                     } else if self.cur() == T::RBrace {
                         tail = Some(Box::new(e));
+                        tail_blank_before = blank_before;
                     } else if is_block_like(&e) {
                         stmts.push(Stmt::Expr(e));
                     } else {
@@ -1087,10 +1103,18 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            if stmts.len() > statement_count {
+                statement_blank_before.push(blank_before);
+            }
         }
         self.expect(T::RBrace)?;
         self.no_struct = saved;
-        Ok(Block { stmts, tail })
+        Ok(Block {
+            stmts,
+            statement_blank_before,
+            tail,
+            tail_blank_before,
+        })
     }
 
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
@@ -1759,6 +1783,20 @@ impl<'a> Parser<'a> {
             ))),
         }
     }
+}
+
+fn leading_trivia_has_blank_line(trivia: &str) -> bool {
+    rua_lex::lex(trivia).into_iter().any(|token| {
+        if token.kind != T::Whitespace {
+            return false;
+        }
+        let raw = &trivia[token.range.start() as usize..token.range.end() as usize];
+        raw.replace("\r\n", "\n")
+            .bytes()
+            .filter(|byte| matches!(byte, b'\n' | b'\r'))
+            .count()
+            >= 2
+    })
 }
 
 fn render_leading_documentation(trivia: &str, inner: bool) -> Option<String> {

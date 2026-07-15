@@ -1,0 +1,21 @@
+# Paths are resolved relative to this workspace directory. `${workspaceFolder}`
+# is also supported for paths that need to be explicit.
+[workspace]
+
+# Add one or more `.ruai` files or directories. A directory is scanned for
+# declaration modules; a file is exposed under its file stem (`moon.ruai` -> `moon`).
+library = ["../../../moon_rs/lualib/moon.ruai"]
+
+# More examples:
+# library = ["./types", "../shared/api.ruai"]
+# library = ["${workspaceFolder}/types"]
+
+# Use a logical mount only when the module name differs from the physical file
+# or directory name. Rua code would import this example as `host_api::...`.
+# [workspace.library_mounts]
+# host_api = "../shared/generated-declarations.ruai"
+
+# Override the embedded standard library with a directory containing `std.toml`.
+# Normally this section should remain disabled.
+# [runtime]
+# std_path = "../../custom-std"

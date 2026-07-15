@@ -1,0 +1,62 @@
+// Traits, default methods, and operator overloading.
+
+struct V2 {
+    x: f64,
+    y: f64,
+}
+
+// Operator overloading: `impl Add`/`impl Mul` become Lua metamethods, so `a + b`
+// and `a * s` work directly on V2 values.
+impl Add for V2 {
+    fn add(self, o: V2) -> V2 {
+        V2 { x: self.x + o.x, y: self.y + o.y }
+    }
+}
+
+impl Mul for V2 {
+    fn mul(self, s: f64) -> V2 {
+        V2 { x: self.x * s, y: self.y * s }
+    }
+}
+
+// A trait with a default method. Types implementing it only need `value`,
+// and inherit `describe` for free.
+trait Valued {
+    fn value(&self) -> f64;
+    fn describe(&self) -> f64 {
+        self.value() * 2.0
+    }
+}
+
+impl Valued for V2 {
+    fn value(&self) -> f64 {
+        self.x + self.y
+    }
+}
+
+fn main() {
+    let a = V2 { x: 1.0, y: 2.0 };
+    let b = V2 { x: 10.0, y: 20.0 };
+
+    let c = a + b;          // uses __add
+    print("c = (");
+    print(c.x);
+    print(", ");
+    print(c.y);
+    print(")\n");
+
+    let d = a * 3.0;        // uses __mul
+    print("d = (");
+    print(d.x);
+    print(", ");
+    print(d.y);
+    print(")\n");
+
+    print("b.value() = ");
+    print(b.value());
+    print("\n");
+
+    print("b.describe() = ");   // default method: value() * 2
+    print(b.describe());
+    print("\n");
+}

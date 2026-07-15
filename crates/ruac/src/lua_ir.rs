@@ -77,6 +77,14 @@ impl Expr {
         }
     }
 
+    pub(crate) fn member(self, name: &str) -> Self {
+        if is_lua_identifier(name) {
+            self.field(name)
+        } else {
+            self.index(Self::string(name))
+        }
+    }
+
     pub(crate) fn index(self, index: Expr) -> Self {
         Self::Index {
             base: Box::new(self),
@@ -449,7 +457,10 @@ impl Builder {
     }
 
     pub(crate) fn blank(&mut self) {
-        self.current_block_mut().entries.push(Entry::Blank);
+        let block = self.current_block_mut();
+        if !matches!(block.entries.last(), Some(Entry::Blank)) {
+            block.entries.push(Entry::Blank);
+        }
     }
 
     pub(crate) fn begin_do(&mut self) {
@@ -949,7 +960,7 @@ impl Printer {
     }
 }
 
-fn lua_string(value: &str) -> String {
+pub(crate) fn lua_string(value: &str) -> String {
     format!(
         "\"{}\"",
         value
@@ -958,6 +969,15 @@ fn lua_string(value: &str) -> String {
             .replace('\n', "\\n")
             .replace('\r', "\\r")
     )
+}
+
+pub(crate) fn lua_member(base: &str, member: &str) -> String {
+    assert!(is_lua_identifier(base), "invalid Lua identifier `{base}`");
+    if is_lua_identifier(member) {
+        format!("{base}.{member}")
+    } else {
+        format!("{base}[{}]", lua_string(member))
+    }
 }
 
 fn is_lua_identifier(value: &str) -> bool {

@@ -20,7 +20,8 @@
     "lua"
   ],
   "activationEvents": [
-    "onLanguage:rua"
+    "onLanguage:rua",
+    "onCommand:rua.buildFile"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -62,6 +63,21 @@
           "default": [],
           "description": "Extra command-line arguments passed to the language server."
         },
+        "rua.compiler.path": {
+          "type": "string",
+          "scope": "resource",
+          "default": "ruac",
+          "markdownDescription": "Path to the `ruac` executable used by **Rua: Build File**. Use an absolute path, or leave as `ruac` to find it on `PATH`. Supports `${workspaceFolder}`."
+        },
+        "rua.compiler.args": {
+          "type": "array",
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments appended to `ruac build <file>`."
+        },
         "rua.trace.server": {
           "type": "string",
           "enum": [
@@ -71,43 +87,42 @@
           ],
           "default": "off",
           "description": "Trace the JSON-RPC communication between VS Code and the Rua language server."
-        },
-        "rua.library": {
-          "type": "array",
-          "scope": "resource",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Directories or files containing `.ruai` type declarations. The language server watches these paths and reloads declarations on change."
-        },
-        "rua.libraryMounts": {
-          "type": "object",
-          "scope": "resource",
-          "default": {},
-          "markdownDescription": "Named module path → file/directory mapping for `.ruai` declarations (e.g. `\"clock\": \"/lib/clock.ruai\"`)."
-        },
-        "rua.sysroot": {
-          "type": "string",
-          "scope": "resource",
-          "default": "",
-          "markdownDescription": "Optional Rua sysroot path passed to the language server. Supports `${workspaceFolder}`."
         }
       }
     },
     "commands": [
       {
+        "command": "rua.buildFile",
+        "title": "Rua: Build File"
+      },
+      {
         "command": "rua.restartServer",
         "title": "Rua: Restart Language Server"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "rua.buildFile",
+          "when": "resourceExtname == .rua",
+          "group": "navigation@10"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "rua.buildFile",
+          "when": "editorLangId == rua && resourceExtname == .rua",
+          "group": "navigation@10"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run check-types && node esbuild.js --production",
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
-    "test-extension": "npm run check-types && tsc && npm run compile && cargo build --manifest-path ../../Cargo.toml -p rua-lsp --features lsp && node dist/test/runTest.js",
+    "test-extension": "npm run check-types && tsc && npm run compile && cargo build --manifest-path ../../Cargo.toml -p ruac -p rua-lsp --features rua-lsp/lsp && node dist/test/runTest.js",
     "package": "vsce package"
   },
   "devDependencies": {

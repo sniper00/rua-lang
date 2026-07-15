@@ -1,0 +1,41 @@
+// Open this directory as a VS Code workspace. Its `.ruarc.toml` loads the
+// sibling moon_rs declaration file as the `moon` module.
+
+mod moon;
+
+struct ServiceConfig {
+    source: String,
+    name: String,
+    unique: bool,
+}
+
+fn on_moon_timer(timer_id: i64) {
+    moon::debug("timer", timer_id);
+}
+
+fn background_task() {
+    moon::sleep(1);
+}
+
+let arr = vec![1, 2, 3];
+let filtered_arr = arr.iter().filter(| x | x> 0).collect();
+println!("Filtered array: {:?}", filtered_arr);
+moon::info("Rua external library loaded");
+let bootstrap: i64 = moon::query("bootstrap");
+let timestamp: i64 = moon::time();
+let elapsed: f64 = moon::clock();
+let debug_enabled: bool = moon::DEBUG();
+let config = ServiceConfig { source: "worker.lua", name: "rua-worker", unique: true };
+let service_id: i64 = moon::new_service(config);
+let timer_id: i64 = moon::timeout(10, on_moon_timer);
+let coroutine = moon::async(background_task);
+moon::debug(
+    "runtime",
+    bootstrap,
+    timestamp,
+    elapsed,
+    debug_enabled,
+    service_id,
+    timer_id,
+    coroutine,
+);

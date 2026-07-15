@@ -6,7 +6,7 @@
 
 | 能力 | 当前行为 |
 |---|---|
-| Hover | 显示 item、local、field、method、enum variant 和 builtin macro 的签名、类型与 API 文档 |
+| Hover | 显示 item、local、field、method、enum variant、标准库声明和 inline macro 的签名、类型与 API 文档 |
 | Definition | 导航到 local、module item、member、associated item、`.ruai` declaration 和 enum variant |
 | Implementation | 从 trait / trait method 定位具体 impl |
 | References | 基于 resolved identity 跨文件查找，不按同名文本匹配 |
@@ -15,11 +15,11 @@
 | Symbols | document symbol tree 与 workspace symbol search |
 | Highlight | 区分当前符号的 read/write occurrence |
 
-enum variant 在 declaration、constructor、qualified path、alias 和 match pattern 中使用同一 identity。function、method、trait item、extern、`.ruai` 和 `vec!` / `print!` / `println!` / `format!` / `panic!` 的文档来自统一 semantic record。
+enum variant 在 declaration、constructor、qualified path、alias 和 match pattern 中使用同一 identity。function、method、trait item、extern、`.ruai` 和 `vec!` / `print!` / `println!` / `format!` / `panic!` 的文档来自统一 semantic record。标准类型、成员和 associated function 直接从 `std.toml` 列出的 `.ruai` 构建，因此 completion、hover 和 definition 使用同一个声明 identity。
 
 ## 2. Completion 与签名
 
-- lexical local、module item、keyword、builtin、field、method、associated item 和 enum variant completion。
+- lexical local、module item、keyword、标准类型、field、method、associated item 和 enum variant completion。
 - `.` member、`::` path、match/pattern、postfix 和关键字 snippet 上下文。
 - expected type 与作用域相关性排序、前缀 text edit、function 参数占位和 `self` 过滤。
 - completion item resolve 按需提供文档。
@@ -61,6 +61,10 @@ formatter 写文件时使用临时文件与原子替换；LSP formatting 返回 
 - scan 识别 `.gitignore`、`.ignore`、`.ruaignore`，默认跳过 `.git`、`target` 和 `node_modules`。
 - references、workspace symbol 和扫描任务可取消；stale generation 返回 `ContentModified`。
 - 所有 LSP position 使用 UTF-16，语义引擎内部保持 UTF-8 byte range。
+- 未在 `.ruarc.toml` 配置 `runtime.std_path` 时使用内嵌标准库；definition 会指向按版本物化的只读 `.ruai` 文件。
+- `runtime.std_path` 指向包含 `std.toml` 的目录。manifest 和 declaration 全部校验成功后才替换当前标准索引，编辑 `.ruai` 或 `std.toml` 会触发 watcher reload。
+- 一个 server 实例中的 workspace folder 必须使用相同标准库根；`workspace.library` 与 `workspace.library_mounts` 按 project 隔离。
+- workspace 根目录的 `.ruarc.toml` 与 `ruac` 共享全部项目输入；VS Code 设置只负责 language server 进程与协议 trace。
 
 VS Code 配置和启动方式见[扩展说明](../editors/vscode/README.md)。
 

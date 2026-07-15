@@ -6,6 +6,9 @@ import {
   commands,
   Disposable,
   ExtensionContext,
+  OutputChannel,
+  ProgressLocation,
+  Uri,
   WorkspaceFolder,
 } from "vscode";
 import {
@@ -19,9 +22,6 @@ let clientResources: Disposable[] = [];
 let serverProcessClosed: Promise<void> | undefined;
 
 interface RuaInitializationSettings {
-  library: string[];
-  libraryMounts: Record<string, string>;
-  sysroot: string | undefined;
   trace: string;
   workspaceSettings: RuaWorkspaceSettings[];
 }
@@ -29,9 +29,6 @@ interface RuaInitializationSettings {
 interface RuaWorkspaceSettings {
   projectIndex: number;
   workspaceFolder: string;
-  library: string[];
-  libraryMounts: Record<string, string>;
-  sysroot: string | undefined;
 }
 
 interface ExtensionTestState {
@@ -59,25 +56,32 @@ const testState: ExtensionTestState = {
 export async function activate(ctx: ExtensionContext): Promise<void> {
   await startClient(ctx);
 
+  const buildOutput = window.createOutputChannel("Rua Build");
+  const projectConfigWatcher = workspace.createFileSystemWatcher("**/.ruarc.toml");
+  const reloadProjectConfig = async (): Promise<void> => {
+    await sendConfigurationChange();
+  };
+
   ctx.subscriptions.push(
     commands.registerCommand("rua.restartServer", async () => {
       await stopClient();
       await startClient(ctx);
       window.showInformationMessage("Rua language server restarted.");
     }),
+    commands.registerCommand("rua.buildFile", (resource?: Uri) =>
+      buildFile(resource, buildOutput),
+    ),
     workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("rua")) {
         return;
       }
-      const running = client;
-      if (!running) {
-        return;
-      }
-      await running.sendNotification("workspace/didChangeConfiguration", {
-        settings: { rua: readInitializationSettings() },
-      });
-      testState.configurationNotifications += 1;
+      await sendConfigurationChange();
     }),
+    projectConfigWatcher,
+    projectConfigWatcher.onDidCreate(reloadProjectConfig),
+    projectConfigWatcher.onDidChange(reloadProjectConfig),
+    projectConfigWatcher.onDidDelete(reloadProjectConfig),
+    buildOutput,
   );
 
   if (process.env.RUA_EXTENSION_TEST === "1") {
@@ -88,6 +92,17 @@ export async function activate(ctx: ExtensionContext): Promise<void> {
       commands.registerCommand("rua.__testDeactivate", () => stopClient()),
     );
   }
+}
+
+async function sendConfigurationChange(): Promise<void> {
+  const running = client;
+  if (!running) {
+    return;
+  }
+  await running.sendNotification("workspace/didChangeConfiguration", {
+    settings: { rua: readInitializationSettings() },
+  });
+  testState.configurationNotifications += 1;
 }
 
 export function deactivate(): Thenable<void> | undefined {
@@ -187,79 +202,104 @@ function disposeClientResources(): void {
 function readInitializationSettings(): RuaInitializationSettings {
   const config = workspace.getConfiguration("rua");
   const folders = workspace.workspaceFolders ?? [];
-  const workspaceSettings = folders.map((folder, projectIndex) =>
-    readWorkspaceSettings(folder, projectIndex),
-  );
-  const library = folders.length === 0
-    ? config
-        .get<string[]>("library", [])
-        .map((configuredPath) => resolveWorkspacePath(configuredPath))
-    : [];
-  const libraryMounts = folders.length === 0
-    ? Object.fromEntries(
-        Object.entries(config.get<Record<string, string>>("libraryMounts", {})).map(
-          ([name, configuredPath]) => [name, resolveWorkspacePath(configuredPath)],
-        ),
-      )
-    : {};
-  const configuredSysroot = config.get<string>("sysroot", "");
   return {
-    library,
-    libraryMounts,
-    sysroot: folders.length === 0 && configuredSysroot
-      ? resolveWorkspacePath(configuredSysroot)
-      : undefined,
     trace: config.get<string>("trace.server", "off"),
-    workspaceSettings,
+    workspaceSettings: folders.map((folder, projectIndex) => ({
+      projectIndex,
+      workspaceFolder: folder.uri.toString(),
+    })),
   };
 }
 
-function readWorkspaceSettings(
-  folder: WorkspaceFolder,
-  projectIndex: number,
-): RuaWorkspaceSettings {
-  const config = workspace.getConfiguration("rua", folder.uri);
-  const library = config
-    .get<string[]>("library", [])
-    .map((configuredPath) => resolveWorkspacePath(configuredPath, true, folder));
-  const libraryMounts = Object.fromEntries(
-    Object.entries(config.get<Record<string, string>>("libraryMounts", {})).map(
-      ([name, configuredPath]) => [
-        name,
-        resolveWorkspacePath(configuredPath, true, folder),
-      ],
-    ),
+async function buildFile(
+  resource: Uri | undefined,
+  output: OutputChannel,
+): Promise<boolean> {
+  const uri = resource ?? window.activeTextEditor?.document.uri;
+  if (!uri || uri.scheme !== "file" || path.extname(uri.fsPath) !== ".rua") {
+    window.showErrorMessage("Select a .rua file to build.");
+    return false;
+  }
+
+  const openDocument = workspace.textDocuments.find(
+    (document) => document.uri.toString() === uri.toString(),
   );
-  const configuredSysroot = config.get<string>("sysroot", "");
-  return {
-    projectIndex,
-    workspaceFolder: folder.uri.toString(),
-    library,
-    libraryMounts,
-    sysroot: configuredSysroot
-      ? resolveWorkspacePath(configuredSysroot, true, folder)
-      : undefined,
-  };
+  if (openDocument?.isDirty && !(await openDocument.save())) {
+    window.showErrorMessage(`Could not save ${path.basename(uri.fsPath)}.`);
+    return false;
+  }
+
+  const folder = workspace.getWorkspaceFolder(uri);
+  const config = workspace.getConfiguration("rua", uri);
+  const command = resolveToolPath(
+    config.get<string>("compiler.path", "ruac"),
+    folder,
+  );
+  const extraArgs = config.get<string[]>("compiler.args", []);
+  const args = ["build", uri.fsPath, ...extraArgs];
+  const cwd = folder?.uri.fsPath ?? path.dirname(uri.fsPath);
+
+  output.appendLine(`> ${[command, ...args].map(quoteArgument).join(" ")}`);
+  const exitCode = await window.withProgress(
+    {
+      location: ProgressLocation.Notification,
+      title: `Building ${path.basename(uri.fsPath)}`,
+    },
+    () => runCompiler(command, args, cwd, output),
+  );
+  output.appendLine(`ruac exited with code ${exitCode}\n`);
+
+  if (exitCode !== 0) {
+    output.show(true);
+    window.showErrorMessage(
+      `Rua build failed for ${path.basename(uri.fsPath)}. See the Rua Build output.`,
+    );
+    return false;
+  }
+
+  window.showInformationMessage(`Built ${path.basename(uri.fsPath)}.`);
+  return true;
+}
+
+function runCompiler(
+  command: string,
+  args: string[],
+  cwd: string,
+  output: OutputChannel,
+): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, stdio: "pipe" });
+    child.stdout.on("data", (chunk: Buffer) => output.append(chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => output.append(chunk.toString()));
+    child.once("error", (error) => {
+      output.appendLine(`Failed to start ${command}: ${String(error)}`);
+      resolve(-1);
+    });
+    child.once("close", (code) => resolve(code ?? -1));
+  });
+}
+
+function quoteArgument(value: string): string {
+  return /\s/.test(value) ? JSON.stringify(value) : value;
 }
 
 /**
  * Expand `${workspaceFolder}` and make a workspace-relative path absolute so a
- * locally-built server (e.g. `${workspaceFolder}/target/debug/rua-lsp`) works
- * out of the box. Bare names like `rua-lsp` are left untouched for PATH lookup.
+ * a locally-built tool (e.g. `${workspaceFolder}/target/debug/ruac`) works out
+ * of the box. Bare executable names are left untouched for PATH lookup.
  */
 function resolveServerPath(raw: string): string {
-  return resolveWorkspacePath(raw, false);
+  return resolveToolPath(raw, workspace.workspaceFolders?.[0]);
 }
 
-function resolveWorkspacePath(
+function resolveToolPath(
   raw: string,
-  resolveBare = true,
-  folder: WorkspaceFolder | undefined = workspace.workspaceFolders?.[0],
+  folder: WorkspaceFolder | undefined,
 ): string {
   const root = folder?.uri.fsPath ?? "";
   let p = raw.replace(/\$\{workspaceFolder\}/g, root);
   if (
-    (resolveBare || p.includes("/") || p.includes("\\")) &&
+    (p.includes("/") || p.includes("\\")) &&
     !path.isAbsolute(p) &&
     root
   ) {

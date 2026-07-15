@@ -1,0 +1,61 @@
+//! Standard `String` - a UTF-8 string.
+//!
+//! Runtime behavior is provided by the module configured in `std.toml`.
+
+pub struct String {}
+
+impl String {
+    /// Create a new empty string.
+    pub fn new() -> String {}
+
+    /// Return the length in bytes.
+    pub fn len(&self) -> i64 {}
+
+    /// Returns true if the string is empty.
+    pub fn is_empty(&self) -> bool {}
+
+    /// Returns true if the string contains `needle`.
+    pub fn contains(&self, needle: &str) -> bool {}
+
+    /// Returns true if the string starts with `prefix`.
+    pub fn starts_with(&self, prefix: &str) -> bool {}
+
+    /// Returns true if the string ends with `suffix`.
+    pub fn ends_with(&self, suffix: &str) -> bool {}
+
+    /// Return a copy of the string.
+    pub fn to_string(&self) -> String {}
+
+    /// Return a copy of the string.
+    pub fn to_owned(&self) -> String {}
+
+    /// Return a copy of the string.
+    pub fn clone(&self) -> String {}
+
+    /// Return the string with leading and trailing whitespace removed.
+    pub fn trim(&self) -> String {}
+
+    /// Return the string with leading whitespace removed.
+    pub fn trim_start(&self) -> String {}
+
+    /// Return the string with trailing whitespace removed.
+    pub fn trim_end(&self) -> String {}
+
+    /// Replace every occurrence of `from` with `to`.
+    pub fn replace(&self, from: &str, to: &str) -> String {}
+
+    /// Convert the string to uppercase.
+    pub fn to_uppercase(&self) -> String {}
+
+    /// Convert the string to lowercase.
+    pub fn to_lowercase(&self) -> String {}
+
+    /// Repeat the string `n` times.
+    pub fn repeat(&self, n: i64) -> String {}
+
+    /// Iterate over the characters.
+    pub fn chars(&self) -> Iter<String> {}
+
+    /// Split the string by `sep`.
+    pub fn split(&self, sep: &str) -> Iter<String> {}
+}

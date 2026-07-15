@@ -17,3 +17,4 @@ doctest = false
 rua-core.workspace = true
 rua-lex.workspace = true
 rua-project.workspace = true
+rua-resources.workspace = true

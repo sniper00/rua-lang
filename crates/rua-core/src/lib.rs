@@ -346,8 +346,6 @@ pub enum BuiltinId {
     VariantOptionNone,
     VariantResultOk,
     VariantResultErr,
-    AssociatedVecNew,
-    AssociatedHashMapNew,
     MacroPrintln,
     MacroPrint,
     MacroFormat,
@@ -362,6 +360,28 @@ pub enum BuiltinId {
     MacroDbg,
     MacroIncludeStr,
     MacroIncludeBytes,
+}
+
+/// Stable identity of a declaration loaded from `std.toml`.
+///
+/// The hash is derived from the declaration's canonical resource path and
+/// symbol path. Resource loaders reject collisions before semantic use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StdSymbolId(u64);
+
+impl StdSymbolId {
+    pub fn new(canonical_path: &str) -> Self {
+        let mut value = 0xcbf29ce484222325_u64;
+        for byte in canonical_path.bytes() {
+            value ^= u64::from(byte);
+            value = value.wrapping_mul(0x100000001b3);
+        }
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -488,49 +508,36 @@ pub struct BuiltinMacroSpec {
 /// Version of the shared builtin manifest schema.
 pub const BUILTIN_MANIFEST_VERSION: u32 = 1;
 
-/// Semantic version of the builtin declaration set shipped with this toolchain.
-pub const BUILTIN_LIBRARY_VERSION: &str = "0.1.0";
-
-/// Runtime ABI expected by generated Lua artifacts.
-pub const RUNTIME_ABI_VERSION: u32 = 1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuiltinTypeSpec {
     pub id: BuiltinId,
     pub name: &'static str,
-    pub source: &'static str,
 }
 
 pub const BUILTIN_TYPES: &[BuiltinTypeSpec] = &[
     BuiltinTypeSpec {
         id: BuiltinId::TypeString,
         name: "String",
-        source: "string.ruai",
     },
     BuiltinTypeSpec {
         id: BuiltinId::TypeOption,
         name: "Option",
-        source: "option.ruai",
     },
     BuiltinTypeSpec {
         id: BuiltinId::TypeResult,
         name: "Result",
-        source: "result.ruai",
     },
     BuiltinTypeSpec {
         id: BuiltinId::TypeVec,
         name: "Vec",
-        source: "vec.ruai",
     },
     BuiltinTypeSpec {
         id: BuiltinId::TypeHashMap,
         name: "HashMap",
-        source: "hashmap.ruai",
     },
     BuiltinTypeSpec {
         id: BuiltinId::TypeIter,
         name: "Iter",
-        source: "iter.ruai",
     },
 ];
 
@@ -540,40 +547,6 @@ pub fn builtin_type(name: &str) -> Option<BuiltinId> {
         .find(|specification| specification.name == name)
         .map(|specification| specification.id)
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BuiltinSource {
-    pub name: &'static str,
-    pub text: &'static str,
-}
-
-/// The one physical builtin declaration set consumed by compiler and analysis.
-pub const BUILTIN_SOURCES: &[BuiltinSource] = &[
-    BuiltinSource {
-        name: "hashmap.ruai",
-        text: include_str!("../builtins/hashmap.ruai"),
-    },
-    BuiltinSource {
-        name: "iter.ruai",
-        text: include_str!("../builtins/iter.ruai"),
-    },
-    BuiltinSource {
-        name: "option.ruai",
-        text: include_str!("../builtins/option.ruai"),
-    },
-    BuiltinSource {
-        name: "result.ruai",
-        text: include_str!("../builtins/result.ruai"),
-    },
-    BuiltinSource {
-        name: "string.ruai",
-        text: include_str!("../builtins/string.ruai"),
-    },
-    BuiltinSource {
-        name: "vec.ruai",
-        text: include_str!("../builtins/vec.ruai"),
-    },
-];
 
 pub const BUILTIN_MACROS: &[BuiltinMacroSpec] = &[
     BuiltinMacroSpec {
@@ -733,13 +706,6 @@ mod tests {
     #[test]
     fn builtin_manifest_is_complete_and_stable() {
         assert_eq!(BUILTIN_MANIFEST_VERSION, 1);
-        assert_eq!(BUILTIN_TYPES.len(), BUILTIN_SOURCES.len());
-        for builtin in BUILTIN_TYPES {
-            assert!(
-                BUILTIN_SOURCES
-                    .iter()
-                    .any(|source| source.name == builtin.source)
-            );
-        }
+        assert_eq!(BUILTIN_TYPES.len(), 6);
     }
 }

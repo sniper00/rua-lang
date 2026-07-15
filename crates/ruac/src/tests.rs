@@ -21,6 +21,40 @@ fn parser_preserves_top_level_chunk_order() {
 }
 
 #[test]
+fn parser_records_blank_lines_without_treating_comment_lines_as_blank() {
+    let program = crate::parser::parse(
+        "let first = 1;\n\
+         // adjacent comment\n\
+         let second = 2;\n\
+         \n\
+         let third = 3;",
+    )
+    .expect("parse blank-line layout");
+    assert_eq!(program.chunk.statement_blank_before, [false, false, true]);
+}
+
+#[test]
+fn codegen_preserves_blank_lines_in_chunks_and_function_bodies() {
+    let lua = compile_str(
+        "fn total() -> i64 {\n\
+             let left = 1;\n\
+             \n\
+             let right = 2;\n\
+             \n\
+             left + right\n\
+         }\n\
+         \n\
+         let value = total();\n\
+         println!(\"{}\", value);",
+    )
+    .expect("compile blank-line layout");
+
+    assert!(lua.contains("    local left = 1\n\n    local right = 2\n\n    return left + right"));
+    assert!(lua.contains("end\n\nlocal value = total()"));
+    assert!(lua.contains("local value = total()\nfmt.println"));
+}
+
+#[test]
 fn strict_parser_preserves_normalized_api_documentation() {
     let program = crate::parser::parse(
         r#"
@@ -353,6 +387,7 @@ fn closure_typeck_reports_unknown_mutable_capture_and_escape() {
 
 fn iterator_type_info(source: &str) -> crate::typeck::TypeInfo {
     let mut program = crate::parser::parse(source).expect("parse iterator source");
+    crate::load_builtins(&mut program, None).expect("load standard declarations");
     let mut files = vec![String::new()];
     crate::resolve::resolve_modules(&mut program.items, None, &mut files)
         .expect("resolve iterator source");
@@ -439,19 +474,19 @@ fn main() {
 }
 
 #[test]
-fn iterator_plan_escape_stays_lazy_and_is_rejected() {
+fn iterator_plan_escape_stays_lazy_as_runtime_value() {
     let source = r#"
 fn main() {
     let values = vec![1, 2, 3];
     let pending = values.iter().map(|value| value + 1).skip(1);
 }
 "#;
-    let (diagnostics, _) = crate::check_diags(source);
+    let lua = crate::compile_str(source).expect("compile stored iterator");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet")
+        lua.contains(":iter():map("),
+        "missing runtime iterator chain: {lua}"
     );
+    assert!(lua.contains(":skip(1)"), "missing lazy skip adapter: {lua}");
 }
 
 #[test]
@@ -517,7 +552,7 @@ fn main() -> Vec<i64> {
         "per-item closure emitted: {lua}"
     );
     assert_eq!(
-        lua.matches("rt.vec(").count(),
+        lua.matches("vec.from_table(").count(),
         2,
         "expected source Vec plus one collected Vec: {lua}"
     );
@@ -534,7 +569,7 @@ fn iterator_collect_preallocates_only_when_length_is_exact() {
         "missing Lua 5.5 capacity helper: {exact}"
     );
     assert!(
-        exact.contains("rt.vec(__rua_table_create(") && exact.contains(".n, 2)"),
+        exact.contains("vec.from_table(__rua_table_create(") && exact.contains(".n, 2)"),
         "exact-size collect was not preallocated: {exact}"
     );
 
@@ -559,14 +594,14 @@ fn unused_pure_iterator_pipeline_is_eliminated_but_trapping_expression_is_kept()
         "unused loop survived: {iterator}"
     );
     assert!(
-        !iterator.contains("rua_rt"),
+        !iterator.contains("require(\"rua_std\")"),
         "unused Vec survived: {iterator}"
     );
 
     let division = crate::compile_str("fn main() { let unused = 1 / 0; }")
         .expect("compile potentially trapping division");
     assert!(
-        division.contains("local unused = rt.idiv(1, 0)"),
+        division.contains("local unused = number.idiv(1, 0)"),
         "potential division-by-zero was removed: {division}"
     );
 }
@@ -665,7 +700,7 @@ fn main() {
 }
 
 #[test]
-fn iterator_escape_reports_stored_passed_returned_and_assigned_plans() {
+fn iterator_values_can_be_stored_passed_and_returned() {
     let cases = [
         "fn main() { let pending = (0..4).map(|value| value + 1); }",
         concat!(
@@ -673,21 +708,13 @@ fn iterator_escape_reports_stored_passed_returned_and_assigned_plans() {
             "fn main() { consume((0..4).map(|value| value + 1)); }\n",
         ),
         "fn escaped() { return (0..4).map(|value| value + 1); }",
-        concat!(
-            "fn main() {\n",
-            "  let mut slot = 0;\n",
-            "  slot = (0..4).map(|value| value + 1);\n",
-            "}\n",
-        ),
     ];
 
     for source in cases {
         let (diagnostics, _) = crate::check_diags(source);
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.msg == "iterator escape is not supported yet"),
-            "missing iterator escape diagnostic in {diagnostics:?}"
+            diagnostics.is_empty(),
+            "first-class iterator produced diagnostics: {diagnostics:?}"
         );
     }
 }
@@ -933,7 +960,7 @@ fn result_and_try() {
         }
     "#,
     );
-    assert!(lua.contains("rt.result_ok(3)"), "got: {lua}");
+    assert!(lua.contains("result.ok(3)"), "got: {lua}");
     assert!(lua.contains(".tag == \"err\" then return"), "got: {lua}");
 }
 
@@ -1170,11 +1197,12 @@ fn for_over_vec() {
 fn vec_macro_zero_based() {
     let lua = compile("fn f() -> i64 { let v = vec![10, 20]; v[0] }");
     assert!(
-        lua.contains("rt.vec({ [0] = 10, 20, n = 2 })"),
+        lua.contains("vec.from_table({ [0] = 10, 20, n = 2 })"),
         "got: {lua}"
     );
     assert!(
-        lua.contains("local rt = require(\"rua_rt\")"),
+        lua.contains("local rua_std = require(\"rua_std\")")
+            && lua.contains("local vec = rua_std.vec"),
         "emits require; got: {lua}"
     );
 }
@@ -1188,21 +1216,24 @@ fn index_expr() {
 #[test]
 fn macro_println_format() {
     let lua = compile(r#"fn main() { println!("x = {}", 42); }"#);
-    assert!(lua.contains(r#"rt.println("x = {}", 42)"#), "got: {lua}");
+    assert!(lua.contains(r#"fmt.println("x = {}", 42)"#), "got: {lua}");
 }
 
 #[test]
 fn macro_panic() {
     let lua = compile(r#"fn f() { panic!("boom"); }"#);
-    assert!(lua.contains("rt.panic(rt.format(\"boom\"))"), "got: {lua}");
+    assert!(
+        lua.contains("fmt.panic(fmt.format(\"boom\"))"),
+        "got: {lua}"
+    );
 }
 
 #[test]
-fn no_require_when_rt_unused() {
+fn no_require_when_runtime_is_unused() {
     let lua = compile("fn main() { let x = 1; }");
     assert!(
-        !lua.contains("require(\"rua_rt\")"),
-        "no require without rt; got: {lua}"
+        !lua.contains("require("),
+        "no require without runtime use; got: {lua}"
     );
 }
 
@@ -1277,17 +1308,79 @@ fn hashmap_new_and_methods() {
         }
     "#,
     );
-    assert!(lua.contains("local m = rt.map()"), "got: {lua}");
+    assert!(
+        lua.contains("local rua_std = require(\"rua_std\")")
+            && lua.contains("local map = rua_std.map")
+            && lua.contains("local m = map.new()"),
+        "got: {lua}"
+    );
     assert!(lua.contains("m:insert(\"a\", 1)"), "got: {lua}");
     assert!(lua.contains("m:get(\"a\")"), "got: {lua}");
     assert!(lua.contains("m:contains_key(\"a\")"), "got: {lua}");
-    assert!(lua.contains("local rt = require(\"rua_rt\")"), "got: {lua}");
+    assert_eq!(lua.matches("require(\"rua_std\")").count(), 1);
 }
 
 #[test]
-fn vec_new_intrinsic() {
+fn vec_new_uses_standard_runtime_module() {
     let lua = compile("fn f() { let v = Vec::new(); v.push(1); }");
-    assert!(lua.contains("local v = rt.vec({ n = 0 })"), "got: {lua}");
+    assert!(
+        lua.contains("local rua_std = require(\"rua_std\")")
+            && lua.contains("local vec = rua_std.vec")
+            && lua.contains("local v = vec.new()"),
+        "got: {lua}"
+    );
+}
+
+#[test]
+fn standard_runtime_require_is_deduplicated() {
+    let lua = compile("fn f() { let first = HashMap::new(); let second = HashMap::new(); }");
+    assert_eq!(lua.matches("require(\"rua_std\")").count(), 1, "{lua}");
+    assert_eq!(lua.matches("map.new()").count(), 2, "{lua}");
+    assert!(lua.contains("local map = rua_std.map"), "{lua}");
+}
+
+#[test]
+fn standard_runtime_exports_share_one_package_import() {
+    let lua = compile(
+        r#"fn f() {
+            let values = Vec::new();
+            let entries = HashMap::new();
+            println!("{} {}", values.len(), entries.len());
+        }"#,
+    );
+    assert_eq!(lua.matches("require(\"rua_std\")").count(), 1, "{lua}");
+    assert!(lua.contains("local fmt = rua_std.fmt"), "{lua}");
+    assert!(lua.contains("local map = rua_std.map"), "{lua}");
+    assert!(lua.contains("local vec = rua_std.vec"), "{lua}");
+}
+
+#[test]
+fn standard_runtime_alias_does_not_shadow_user_definition() {
+    let lua = compile("fn map() -> i64 { 1 } fn f() -> i64 { let values = HashMap::new(); map() }");
+    assert!(
+        lua.contains("local rua_std = require(\"rua_std\")")
+            && lua.contains("local map__runtime = rua_std.map"),
+        "{lua}"
+    );
+    assert!(lua.contains("map__runtime.new()"), "{lua}");
+    assert!(lua.contains("return map()"), "{lua}");
+}
+
+#[test]
+fn standard_runtime_package_alias_does_not_shadow_user_definition() {
+    let lua = compile(
+        "fn rua_std() -> i64 { 1 } fn f() -> i64 { let values = HashMap::new(); rua_std() }",
+    );
+    assert!(
+        lua.contains("local rua_std__runtime = require(\"rua_std\")")
+            && lua.contains("local map = rua_std__runtime.map"),
+        "{lua}"
+    );
+    assert!(
+        lua.contains("assert(rua_std__runtime.ABI_VERSION == 1, \"incompatible rua_std ABI\")"),
+        "{lua}"
+    );
+    assert!(lua.contains("return rua_std()"), "{lua}");
 }
 
 // --- P5: AST spans -> line-accurate diagnostics ---------------------------
@@ -1528,8 +1621,8 @@ fn typeck_option_result_return_ok() {
         fn c() -> Result<i64, String> { Err("x") }
     "#,
     );
-    assert!(lua.contains("rt.result_ok(2)"), "got: {lua}");
-    assert!(lua.contains("rt.result_err(\"x\")"), "got: {lua}");
+    assert!(lua.contains("result.ok(2)"), "got: {lua}");
+    assert!(lua.contains("result.err(\"x\")"), "got: {lua}");
 }
 
 #[test]
@@ -1537,7 +1630,7 @@ fn codegen_integer_division() {
     // Constant i64 division is folded without loading the runtime helper.
     let lua = compile("fn f() -> i64 { 7 / 2 }");
     assert!(lua.contains("return 3"), "got: {lua}");
-    assert!(!lua.contains("rt.idiv"), "got: {lua}");
+    assert!(!lua.contains("number.idiv"), "got: {lua}");
 }
 
 #[test]
@@ -1572,7 +1665,7 @@ fn codegen_int_division_via_params() {
     // `i64 / i64` lowers to the truncating helper (matches Rust for negatives),
     // not Lua's floored `//`.
     let lua = compile("fn f(a: i64, b: i64) -> i64 { a / b }");
-    assert!(lua.contains("rt.idiv(a, b)"), "got: {lua}");
+    assert!(lua.contains("number.idiv(a, b)"), "got: {lua}");
     assert!(!lua.contains("//"), "got: {lua}");
 }
 
@@ -1580,7 +1673,7 @@ fn codegen_int_division_via_params() {
 fn codegen_int_remainder_via_params() {
     // `i64 % i64` lowers to the truncating remainder helper.
     let lua = compile("fn f(a: i64, b: i64) -> i64 { a % b }");
-    assert!(lua.contains("rt.irem(a, b)"), "got: {lua}");
+    assert!(lua.contains("number.irem(a, b)"), "got: {lua}");
 }
 
 #[test]
@@ -1589,7 +1682,7 @@ fn codegen_nonnegative_range_remainder_uses_lua_operator() {
         "fn f() -> i64 { let mut total = 0; for i in 0..10 { total = total + i % 2; } total }",
     );
     assert!(lua.contains("i % 2"), "got: {lua}");
-    assert!(!lua.contains("rt.irem"), "got: {lua}");
+    assert!(!lua.contains("number.irem"), "got: {lua}");
 }
 
 #[test]
@@ -1597,15 +1690,20 @@ fn codegen_mixed_remainder_stays_percent() {
     // A non-integer remainder keeps the plain Lua `%`.
     let lua = compile("fn f(a: f64, b: f64) -> f64 { a % b }");
     assert!(lua.contains("a % b"), "got: {lua}");
-    assert!(!lua.contains("rt.irem"), "got: {lua}");
+    assert!(!lua.contains("number.irem"), "got: {lua}");
 }
 
 // --- std shims: String methods + concatenation ------------------------------
 
 #[test]
-fn codegen_string_method_routes_through_rt_str() {
+fn codegen_string_method_routes_through_standard_module() {
     let lua = compile(r#"fn f(s: String) -> String { s.to_uppercase() }"#);
-    assert!(lua.contains("rt.str[\"to_uppercase\"](s)"), "got: {lua}");
+    assert!(
+        lua.contains("local rua_std = require(\"rua_std\")")
+            && lua.contains("local string = rua_std.string")
+            && lua.contains("string.to_uppercase(s)"),
+        "got: {lua}"
+    );
 }
 
 #[test]
@@ -1613,7 +1711,7 @@ fn codegen_string_method_on_literal_uses_call_form() {
     // Method on a string literal must not use the `literal:method()` form.
     let lua = compile(r#"fn f() -> bool { "abc".contains("b") }"#);
     assert!(
-        lua.contains("rt.str[\"contains\"](\"abc\", \"b\")"),
+        lua.contains("string.contains(\"abc\", \"b\")"),
         "got: {lua}"
     );
 }
@@ -1636,9 +1734,11 @@ fn typeck_string_len_is_i64() {
 
 #[test]
 fn typeck_string_split_returns_vec_of_string() {
-    // `split` yields `Vec<String>`; indexing gives `String`, so `if el { }` fails.
-    let err =
-        compile_str(r#"fn f(s: String) { let v = s.split(","); if v.get(0) { } }"#).unwrap_err();
+    // `split` is lazy; collecting yields `Vec<String>`, whose element is not bool.
+    let err = compile_str(
+        r#"fn f(s: String) { let v = s.split(",").collect::<Vec<String>>(); if v.get(0) { } }"#,
+    )
+    .unwrap_err();
     assert!(err.contains("must be `bool`"), "got: {err}");
 }
 
@@ -1647,7 +1747,7 @@ fn codegen_unknown_string_method_stays_colon_form() {
     // An unrecognized method on a String is left as a plain method call.
     let lua = compile(r#"fn f(s: String) { s.frobnicate(); }"#);
     assert!(lua.contains("s:frobnicate()"), "got: {lua}");
-    assert!(!lua.contains("rt.str"), "got: {lua}");
+    assert!(!lua.contains("rua_rt"), "got: {lua}");
 }
 
 #[test]
@@ -1700,7 +1800,7 @@ fn if_let_some_binds_and_tests_nil() {
     );
     assert!(lua.contains("~= nil then"), "got: {lua}");
     assert!(!lua.contains("local x ="), "got: {lua}");
-    assert!(lua.contains("rt.println(\"{}\", opt)"), "got: {lua}");
+    assert!(lua.contains("fmt.println(\"{}\", opt)"), "got: {lua}");
 }
 
 #[test]
@@ -2175,7 +2275,7 @@ fn use_scope_does_not_leak_to_root() {
     "#,
     );
     // Root `helper()` stays bare (not rewritten to the module alias target).
-    assert!(lua.contains("rt.println(\"{}\", helper())"), "got: {lua}");
+    assert!(lua.contains("fmt.println(\"{}\", helper())"), "got: {lua}");
 }
 
 #[test]
@@ -2192,7 +2292,7 @@ fn use_alias_shadowed_by_local_not_rewritten() {
     "#,
     );
     // The shadowed reference stays bare rather than becoming `m.f`.
-    assert!(lua.contains("rt.println(\"{}\", f)"), "got: {lua}");
+    assert!(lua.contains("fmt.println(\"{}\", f)"), "got: {lua}");
 }
 
 #[test]
@@ -3042,6 +3142,44 @@ fn ruai_module_omitted_from_codegen() {
 }
 
 #[test]
+fn external_library_file_resolves_and_local_module_takes_precedence() {
+    let root = tmp_dir("external_library");
+    let workspace = root.join("workspace");
+    let library = root.join("library");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&library).unwrap();
+    let input = workspace.join("main.rua");
+    let declaration = library.join("moon.ruai");
+    std::fs::write(
+        &input,
+        "mod moon;\nlet actor: i64 = moon::query(\"bootstrap\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &declaration,
+        "extern \"lua\" { pub fn query(name: String) -> i64; }\n",
+    )
+    .unwrap();
+    let options = crate::CompileOptions {
+        library: vec![declaration],
+        ..crate::CompileOptions::default()
+    };
+    let lua = crate::compile_path_with_options(&input, &options).unwrap();
+    assert!(lua.contains("local moon = require(\"moon\")"), "{lua}");
+    assert!(lua.contains("moon.query(\"bootstrap\")"), "{lua}");
+
+    std::fs::write(
+        workspace.join("moon.ruai"),
+        "extern \"lua\" { pub fn local_api() -> i64; }\n",
+    )
+    .unwrap();
+    std::fs::write(&input, "mod moon;\nlet value = moon::local_api();\n").unwrap();
+    let lua = crate::compile_path_with_options(&input, &options).unwrap();
+    assert!(lua.contains("moon.local_api()"), "{lua}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
     let dir = tmp_dir("ruai_root_declaration");
     let root = dir.join("api.ruai");
@@ -3281,9 +3419,7 @@ fn hashmap_insert_value_type_mismatch_is_reported() {
     assert!(
         diags
             .iter()
-            .any(|d| d.msg.contains("HashMap value type mismatch")
-                && d.msg.contains("expected `i64`")
-                && d.msg.contains("found `String`")),
+            .any(|d| d.msg.contains("argument 2 of `HashMap::insert`")),
         "expected a HashMap value mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );
@@ -3307,7 +3443,7 @@ fn hashmap_key_type_mismatch_is_reported() {
     assert!(
         diags
             .iter()
-            .any(|d| d.msg.contains("HashMap key type mismatch")),
+            .any(|d| d.msg.contains("argument 1 of `HashMap::insert`")),
         "expected a HashMap key mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );
@@ -3321,9 +3457,7 @@ fn vec_push_type_mismatch_is_reported() {
     assert!(
         diags
             .iter()
-            .any(|d| d.msg.contains("Vec element type mismatch")
-                && d.msg.contains("expected `i64`")
-                && d.msg.contains("found `String`")),
+            .any(|d| d.msg.contains("argument 1 of `Vec::push`")),
         "expected a Vec element mismatch, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
     );

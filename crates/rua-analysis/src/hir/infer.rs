@@ -572,9 +572,10 @@ impl<'a> InferenceContext<'a> {
                     TypeMismatchContext::Branch,
                 );
             }
-            Pat::Path(_path) => {
+            Pat::Path(path) => {
                 // For unit-variant patterns like `None`, `Ok`, `Err` — no bindings to
                 // narrow, but the pattern type is validated against the scrutinee.
+                let _ = self.resolve_pattern_variant(path, expected);
             }
             Pat::TupleVariant { path, subpatterns } => {
                 let narrowed = self.resolve_variant_payload(path, expected);
@@ -609,17 +610,8 @@ impl<'a> InferenceContext<'a> {
 
     /// Given a variant path like `["Some"]` and a scrutinee type like `Option<i64>`,
     /// resolve the variant and return its payload field types.
-    fn resolve_variant_payload(&self, path: &[NameRefId], scrutinee: &Ty) -> Option<Vec<Ty>> {
-        let name = self
-            .body
-            .name_ref(*path.last()?)
-            .and_then(|name_ref| name_ref.name())?;
-        // Use resolve_associated_ty which works for both user-defined enums (via
-        // DefId) and builtin types like Option/Result.
-        let resolution = self.member_index.resolve_associated_ty(scrutinee, name)?;
-        if resolution.kind() != MemberKind::Variant {
-            return None;
-        }
+    fn resolve_variant_payload(&mut self, path: &[NameRefId], scrutinee: &Ty) -> Option<Vec<Ty>> {
+        let resolution = self.resolve_pattern_variant(path, scrutinee)?;
         let result_ty = resolution.ty().clone();
         let substitution = resolution.substitution();
         let payload = substitution.instantiate(&result_ty);
@@ -659,19 +651,30 @@ impl<'a> InferenceContext<'a> {
 
     /// Resolve the variant DefId from a pattern path like `["Rect"]` against a
     /// scrutinee type. Returns the variant's DefId for subsequent field lookup.
-    fn resolve_variant_def(&self, path: &[NameRefId], scrutinee: &Ty) -> Option<DefId> {
+    fn resolve_variant_def(&mut self, path: &[NameRefId], scrutinee: &Ty) -> Option<DefId> {
+        let resolution = self.resolve_pattern_variant(path, scrutinee)?;
+        match resolution.target() {
+            MemberTarget::Definition(def) => Some(def),
+            _ => None,
+        }
+    }
+
+    fn resolve_pattern_variant(
+        &mut self,
+        path: &[NameRefId],
+        scrutinee: &Ty,
+    ) -> Option<MemberResolution> {
+        let member_ref = *path.last()?;
         let name = self
             .body
-            .name_ref(*path.last()?)
+            .name_ref(member_ref)
             .and_then(|name_ref| name_ref.name())?;
         let resolution = self.member_index.resolve_associated_ty(scrutinee, name)?;
         if resolution.kind() != MemberKind::Variant {
             return None;
         }
-        match resolution.target() {
-            MemberTarget::Definition(def) => Some(def),
-            _ => None,
-        }
+        self.set_member(member_ref, resolution.clone());
+        Some(resolution)
     }
 
     fn infer_unary(&mut self, expr_id: ExprId, op: UnaryOp, operand: ExprId) -> Ty {
@@ -945,7 +948,35 @@ impl<'a> InferenceContext<'a> {
             return Ty::Unknown;
         };
         let Some(owner) = self.resolve_definition_path(owner_path) else {
-            return Ty::Unknown;
+            let [owner_ref] = owner_path else {
+                return Ty::Unknown;
+            };
+            let Some(owner_name) = self.body.name_ref(*owner_ref).and_then(|name| name.name())
+            else {
+                return Ty::Unknown;
+            };
+            let Some(owner_ty) = standard_owner_type(owner_name, expected) else {
+                return Ty::Unknown;
+            };
+            let Some(name) = self
+                .body
+                .name_ref(*member_ref)
+                .and_then(|name_ref| name_ref.name())
+            else {
+                return Ty::Unknown;
+            };
+            let Some(resolution) = self.member_index.resolve_associated_ty(&owner_ty, name) else {
+                return Ty::Unknown;
+            };
+            let mut ty = resolution.ty().clone();
+            if let Some(expected) = expected {
+                let mut substitution = resolution.substitution().clone();
+                if unify(&ty, expected, &mut substitution).is_match() {
+                    ty = substitution.instantiate(&ty);
+                }
+            }
+            self.set_member(*member_ref, resolution);
+            return ty;
         };
         if !matches!(owner.kind(), DefKind::Struct | DefKind::Enum) {
             return Ty::Unknown;
@@ -1192,6 +1223,29 @@ impl<'a> InferenceContext<'a> {
             }
             return self.infer_option_map(call, item, *closure, expected);
         }
+        if let Ty::Result(ok, error) = &receiver_ty
+            && name == "map"
+            && let [closure] = args
+        {
+            if let Some(resolution) =
+                self.member_index
+                    .resolve_method_in(&receiver_ty, name, self.owner.id())
+            {
+                self.set_member(method, resolution);
+            }
+            return self.infer_result_map(call, ok, error, *closure, expected);
+        }
+        if let Ty::Iterator(item) = &receiver_ty
+            && let Some(result) = self.infer_iterator_adapter(call, item, name, args, expected)
+        {
+            if let Some(resolution) =
+                self.member_index
+                    .resolve_method_in(&receiver_ty, name, self.owner.id())
+            {
+                self.set_member(method, resolution);
+            }
+            return result;
+        }
         let resolution = self
             .member_index
             .resolve_method_in(&receiver_ty, name, self.owner.id());
@@ -1251,6 +1305,34 @@ impl<'a> InferenceContext<'a> {
             _ => Ty::Unknown,
         };
         let result = Ty::Option(Box::new(output));
+        self.calls[call.index() as usize] = Some(CallInfo {
+            target: CallTarget::Builtin,
+            parameters: vec![expected_closure],
+            return_type: result.clone(),
+            substitution: Substitution::new(),
+        });
+        result
+    }
+
+    fn infer_result_map(
+        &mut self,
+        call: ExprId,
+        ok: &Ty,
+        error: &Ty,
+        closure: ExprId,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let expected_output = match expected {
+            Some(Ty::Result(output, _)) => (**output).clone(),
+            _ => Ty::Unknown,
+        };
+        let expected_closure = Ty::Closure(CallableTy::new(vec![ok.clone()], expected_output));
+        let closure_ty = self.infer_expr(closure, Some(&expected_closure));
+        let output = match closure_ty {
+            Ty::Closure(callable) | Ty::Function(callable) => callable.return_ty().clone(),
+            _ => Ty::Unknown,
+        };
+        let result = Ty::Result(Box::new(output), Box::new(error.clone()));
         self.calls[call.index() as usize] = Some(CallInfo {
             target: CallTarget::Builtin,
             parameters: vec![expected_closure],
@@ -1332,6 +1414,7 @@ impl<'a> InferenceContext<'a> {
                 }
                 Ty::Option(Box::new(item.clone()))
             }
+            "next" if args.is_empty() => Ty::Option(Box::new(item.clone())),
             "fold" => match args {
                 [init, closure] => {
                     let init_ty = self.infer_expr(*init, None);
@@ -1437,6 +1520,9 @@ impl<'a> InferenceContext<'a> {
         if let Some(info) = self.infer_builtin_call(call, callee, args, expected) {
             let result = info.return_type.clone();
             self.calls[call.index() as usize] = Some(info);
+            return result;
+        }
+        if let Some(result) = self.infer_standard_associated_call(call, callee, args, expected) {
             return result;
         }
 
@@ -1645,7 +1731,6 @@ impl<'a> InferenceContext<'a> {
             BuiltinId::VariantOptionSome
             | BuiltinId::VariantResultOk
             | BuiltinId::VariantResultErr => 1,
-            BuiltinId::AssociatedVecNew | BuiltinId::AssociatedHashMapNew => 0,
             _ => return None,
         };
         if args.len() != expected_arity {
@@ -1685,11 +1770,6 @@ impl<'a> InferenceContext<'a> {
             (BuiltinId::VariantResultErr, [argument]) => {
                 self.infer_result_constructor(false, *argument, expected)
             }
-            (BuiltinId::AssociatedVecNew, []) => (Vec::new(), Ty::Vec(Box::new(Ty::Unknown))),
-            (BuiltinId::AssociatedHashMapNew, []) => (
-                Vec::new(),
-                Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
-            ),
             _ => return None,
         };
         let return_type = if parameters.iter().any(Ty::is_never) {
@@ -1705,6 +1785,51 @@ impl<'a> InferenceContext<'a> {
             return_type,
             substitution: Substitution::new(),
         })
+    }
+
+    fn infer_standard_associated_call(
+        &mut self,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Option<Ty> {
+        let path = match self.body.expr(callee)? {
+            Expr::Path(path) => path.clone(),
+            _ => return None,
+        };
+        let [owner_ref, member_ref] = path.as_slice() else {
+            return None;
+        };
+        if self.resolve_definition_path(&path).is_some() || self.path_starts_with_definition(&path)
+        {
+            return None;
+        }
+        let owner_name = self.body.name_ref(*owner_ref)?.name()?;
+        let member_name = self.body.name_ref(*member_ref)?.name()?;
+        let owner_ty = standard_owner_type(owner_name, expected)?;
+        let resolution = self
+            .member_index
+            .resolve_associated_ty(&owner_ty, member_name)?;
+        if resolution.kind() != MemberKind::AssociatedFunction {
+            return None;
+        }
+        let Ty::Function(callable) = resolution.ty().clone() else {
+            return None;
+        };
+        let substitution = resolution.substitution().clone();
+        self.set_member(*member_ref, resolution);
+        self.set_expr(callee, Ty::Function(callable.clone()));
+        Some(self.infer_callable_call(&mut CallContext {
+            call,
+            target: CallTarget::Builtin,
+            callable: &callable,
+            args,
+            expected,
+            substitution,
+            variadic: false,
+            requirements: &[],
+        }))
     }
 
     /// Shared implementation for `Ok(expr)` and `Err(expr)` built-in
@@ -1753,7 +1878,6 @@ impl<'a> InferenceContext<'a> {
             BuiltinId::VariantOptionNone => "None",
             BuiltinId::VariantResultOk => "Ok",
             BuiltinId::VariantResultErr => "Err",
-            BuiltinId::AssociatedVecNew | BuiltinId::AssociatedHashMapNew => "new",
             _ => return,
         };
         let Some(resolution) = self
@@ -2080,8 +2204,6 @@ fn builtin_constructor_id(body: &Body, path: &[NameRefId]) -> Option<BuiltinId> 
             (Some(BuiltinId::TypeOption), "None") => Some(BuiltinId::VariantOptionNone),
             (Some(BuiltinId::TypeResult), "Ok") => Some(BuiltinId::VariantResultOk),
             (Some(BuiltinId::TypeResult), "Err") => Some(BuiltinId::VariantResultErr),
-            (Some(BuiltinId::TypeVec), "new") => Some(BuiltinId::AssociatedVecNew),
-            (Some(BuiltinId::TypeHashMap), "new") => Some(BuiltinId::AssociatedHashMapNew),
             _ => None,
         },
         _ => None,
@@ -2098,12 +2220,35 @@ fn builtin_constructor_owner(builtin: BuiltinId, expected: Option<&Ty>) -> Ty {
             Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
             _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
         },
-        BuiltinId::AssociatedVecNew => Ty::Vec(Box::new(Ty::Unknown)),
-        BuiltinId::AssociatedHashMapNew => {
-            Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown))
-        }
         _ => Ty::Unknown,
     }
+}
+
+fn standard_owner_type(name: &str, expected: Option<&Ty>) -> Option<Ty> {
+    Some(match builtin_type(name)? {
+        BuiltinId::TypeString => Ty::STRING,
+        BuiltinId::TypeVec => match expected {
+            Some(Ty::Vec(_)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Vec(Box::new(Ty::Unknown)),
+        },
+        BuiltinId::TypeHashMap => match expected {
+            Some(Ty::HashMap(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+        },
+        BuiltinId::TypeIter => match expected {
+            Some(Ty::Iterator(_)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Iterator(Box::new(Ty::Unknown)),
+        },
+        BuiltinId::TypeOption => match expected {
+            Some(Ty::Option(_)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Option(Box::new(Ty::Unknown)),
+        },
+        BuiltinId::TypeResult => match expected {
+            Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
+            _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+        },
+        _ => return None,
+    })
 }
 
 fn literal_ty(kind: LiteralKind) -> Ty {
