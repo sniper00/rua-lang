@@ -15,8 +15,8 @@
 use rowan::TextSize;
 
 use crate::ast::{
-    AstNode, EnumDecl, ExternBlock, ExternFn, FieldDecl, FnDecl, ImplDecl, Item, ModDecl, Named,
-    SourceFile, StructDecl, TraitDecl, TraitMethod,
+    AstNode, EnumDecl, ExternBlock, ExternFn, FieldDecl, FnDecl, ImplDecl, Item, Named, SourceFile,
+    StructDecl, TraitDecl, TraitMethod,
 };
 use crate::kind::SyntaxKind;
 use crate::{SyntaxElement, SyntaxNode};
@@ -127,7 +127,6 @@ fn collect_items(
             Item::Trait(t) => collect_trait(&t, container, symbols),
             Item::Impl(i) => collect_impl(&i, container, symbols),
             Item::Extern(eb) => collect_extern(&eb, container, symbols),
-            Item::Mod(m) => collect_mod(&m, container, symbols),
             Item::Use(_) => { /* use declarations are not definition symbols */ }
         }
     }
@@ -302,32 +301,6 @@ fn collect_extern(eb: &ExternBlock, container: &[String], symbols: &mut Vec<Symb
             detail,
             doc: documentation(ef.syntax()).unwrap_or_default(),
         });
-    }
-}
-
-fn collect_mod(m: &ModDecl, container: &mut Vec<String>, symbols: &mut Vec<Symbol>) {
-    let name = m.name_text().unwrap_or_default();
-    if name.is_empty() {
-        return;
-    }
-    symbols.push(Symbol {
-        name: name.clone(),
-        kind: SymbolKind::Module,
-        name_range: token_byte_range(m.name()),
-        full_range: node_byte_range(m.syntax()),
-        container: container.clone(),
-        detail: format!("mod {}", name),
-        doc: module_documentation(m.syntax())
-            .or_else(|| documentation(m.syntax()))
-            .unwrap_or_default(),
-    });
-
-    // Only recurse into inline modules; file modules have their body
-    // in a different file and won't be in this tree.
-    if !m.is_file() {
-        container.push(name);
-        collect_items(&mut m.items(), container, symbols);
-        container.pop();
     }
 }
 
@@ -706,30 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_modules() {
-        let s = syms("mod a { mod b { fn f(){} } }");
-        let ma = find(&s, "a");
-        assert_eq!(ma.kind, SymbolKind::Module);
-        assert!(ma.container.is_empty());
-        let mb = find(&s, "b");
-        assert_eq!(mb.kind, SymbolKind::Module);
-        assert_eq!(mb.container, vec!["a"]);
-        let f = find(&s, "f");
-        assert_eq!(f.kind, SymbolKind::Function);
-        assert_eq!(f.container, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn file_module_is_not_recursed() {
-        // `mod name;` — file module: is_file() == true, no body in tree.
-        let s = syms("mod other;\nfn main() {}");
-        let mo = find(&s, "other");
-        assert_eq!(mo.kind, SymbolKind::Module);
-        // No items from `other` should appear.
-        assert_eq!(s.len(), 2); // mod + main
-    }
-
-    #[test]
     fn extern_block_fns() {
         let s = syms("extern \"lua\" { fn printf(fmt: &str, ...); }");
         let ef = find(&s, "printf");
@@ -861,37 +810,5 @@ mod tests {
     fn ident_at_offset_past_end() {
         let f = file("fn a() {}");
         assert!(ident_at_offset(&f, 999).is_none());
-    }
-
-    // --- integration: example file ------------------------------------------
-
-    #[test]
-    fn module_types_fixture_symbols() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/golden/format/module_types_methods.rua"
-        );
-        let src = std::fs::read_to_string(path).expect("read example file");
-        let s = syms(&src);
-        assert!(s.len() > 5, "should have multiple symbols");
-        assert!(
-            s.iter()
-                .any(|x| x.name == "main" && x.kind == SymbolKind::Function)
-        );
-        assert!(
-            s.iter()
-                .any(|x| x.name == "Point" && x.kind == SymbolKind::Struct)
-        );
-        assert!(
-            s.iter()
-                .any(|x| x.name == "geo" && x.kind == SymbolKind::Module)
-        );
-        assert!(
-            s.iter()
-                .any(|x| x.name == "norm_sq" && x.kind == SymbolKind::Method)
-        );
-        assert!(s.iter().any(|x| x.name == "area"
-            && x.kind == SymbolKind::Function
-            && x.container == vec!["geo"]));
     }
 }

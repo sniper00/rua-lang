@@ -31,7 +31,6 @@ struct LoopTargets {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LoopRecord {
-    statement: StatementId,
     body: ExprId,
     body_entry: usize,
     exit: usize,
@@ -89,11 +88,11 @@ impl ControlFlowGraph {
             .filter_map(move |(statement, node)| (!reachable.contains(node)).then_some(*statement))
     }
 
-    pub fn infinite_loops(&self) -> impl Iterator<Item = (StatementId, ExprId)> + '_ {
+    pub fn infinite_loops(&self) -> impl Iterator<Item = ExprId> + '_ {
         self.loops.iter().filter_map(|record| {
             let reaches_exit = self.path_exists(record.body_entry, record.exit)
                 || self.path_exists(record.body_entry, self.exit);
-            (!reaches_exit).then_some((record.statement, record.body))
+            (!reaches_exit).then_some(record.body)
         })
     }
 
@@ -152,7 +151,25 @@ impl Builder<'_> {
                 let rhs = self.expr(*rhs, next, loop_targets);
                 self.expr(*lhs, rhs, loop_targets)
             }
-            Some(Expr::Assign { target, value }) => {
+            Some(Expr::Loop { body }) => {
+                let head = self.node();
+                let body_entry = self.expr(
+                    *body,
+                    head,
+                    Some(LoopTargets {
+                        break_target: next,
+                        continue_target: head,
+                    }),
+                );
+                self.edge(head, body_entry);
+                self.graph.loops.push(LoopRecord {
+                    body: *body,
+                    body_entry,
+                    exit: next,
+                });
+                head
+            }
+            Some(Expr::Assign { target, value, .. }) => {
                 let value = self.expr(*value, next, loop_targets);
                 self.expr(*target, value, loop_targets)
             }
@@ -167,6 +184,14 @@ impl Builder<'_> {
             Some(Expr::Index { base, index }) => {
                 let index = self.expr(*index, next, loop_targets);
                 self.expr(*base, index, loop_targets)
+            }
+            Some(Expr::MapLiteral { entries }) => {
+                let mut continuation = next;
+                for entry in entries.iter().rev() {
+                    continuation = self.expr(entry.value(), continuation, loop_targets);
+                    continuation = self.expr(entry.key(), continuation, loop_targets);
+                }
+                continuation
             }
             Some(Expr::If {
                 condition,
@@ -277,13 +302,14 @@ impl Builder<'_> {
                         .unwrap_or(self.graph.exit);
                     self.edge(node, expression);
                 }
-                Statement::Break => {
-                    self.edge(
-                        node,
-                        loop_targets
-                            .map(|targets| targets.break_target)
-                            .unwrap_or(self.graph.exit),
-                    );
+                Statement::Break { value } => {
+                    let target = loop_targets
+                        .map(|targets| targets.break_target)
+                        .unwrap_or(self.graph.exit);
+                    let entry = value
+                        .map(|value| self.expr(value, target, loop_targets))
+                        .unwrap_or(target);
+                    self.edge(node, entry);
                 }
                 Statement::Continue => {
                     self.edge(
@@ -319,7 +345,6 @@ impl Builder<'_> {
                     );
                     self.edge(node, body_entry);
                     self.graph.loops.push(LoopRecord {
-                        statement: statement_id,
                         body: *body,
                         body_entry,
                         exit: continuation,

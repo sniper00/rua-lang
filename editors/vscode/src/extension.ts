@@ -8,6 +8,7 @@ import {
   ExtensionContext,
   OutputChannel,
   ProgressLocation,
+  Range,
   Uri,
   WorkspaceFolder,
 } from "vscode";
@@ -29,6 +30,14 @@ interface RuaInitializationSettings {
 interface RuaWorkspaceSettings {
   projectIndex: number;
   workspaceFolder: string;
+}
+
+interface RuaLocationArgument {
+  uri: string;
+  range: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
 }
 
 interface ExtensionTestState {
@@ -71,6 +80,10 @@ export async function activate(ctx: ExtensionContext): Promise<void> {
     commands.registerCommand("rua.buildFile", (resource?: Uri) =>
       buildFile(resource, buildOutput),
     ),
+    commands.registerCommand(
+      "rua.openLocation",
+      (target: RuaLocationArgument | undefined) => openLocation(target),
+    ),
     workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("rua")) {
         return;
@@ -92,6 +105,22 @@ export async function activate(ctx: ExtensionContext): Promise<void> {
       commands.registerCommand("rua.__testDeactivate", () => stopClient()),
     );
   }
+}
+
+async function openLocation(
+  target: RuaLocationArgument | undefined,
+): Promise<void> {
+  if (!target?.uri || !target.range) {
+    return;
+  }
+  const range = new Range(
+    target.range.start.line,
+    target.range.start.character,
+    target.range.end.line,
+    target.range.end.character,
+  );
+  const document = await workspace.openTextDocument(Uri.parse(target.uri));
+  await window.showTextDocument(document, { selection: range });
 }
 
 async function sendConfigurationChange(): Promise<void> {

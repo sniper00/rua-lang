@@ -1,0 +1,5 @@
+fn invalid() {
+    while true {
+        break 1;
+    }
+}

@@ -264,10 +264,6 @@ impl<'a> Parser<'a> {
         render_leading_documentation(self.lexer.current_leading_trivia(), false)
     }
 
-    fn inner_module_documentation(&self) -> Option<String> {
-        render_leading_documentation(self.lexer.current_leading_trivia(), true)
-    }
-
     fn blank_line_before_current(&self) -> bool {
         leading_trivia_has_blank_line(self.lexer.current_leading_trivia())
     }
@@ -495,7 +491,7 @@ impl<'a> Parser<'a> {
     }
 
     fn at_item_start(&self) -> bool {
-        matches!(
+        let is_item = matches!(
             self.cur(),
             T::KwPub
                 | T::KwFn
@@ -504,9 +500,16 @@ impl<'a> Parser<'a> {
                 | T::KwImpl
                 | T::KwTrait
                 | T::KwExtern
-                | T::KwMod
                 | T::KwUse
-        )
+        );
+        #[cfg(test)]
+        {
+            is_item || self.cur() == T::KwMod
+        }
+        #[cfg(not(test))]
+        {
+            is_item
+        }
     }
 
     fn parse_chunk_stmt(&mut self, terminator: T) -> Result<Stmt, ParseError> {
@@ -514,12 +517,17 @@ impl<'a> Parser<'a> {
             T::KwLet => self.parse_let(),
             T::KwReturn => self.parse_return(),
             T::KwWhile => self.parse_while(),
-            T::KwLoop => self.parse_loop(),
             T::KwFor => self.parse_for(),
             T::KwBreak => {
                 self.bump()?;
-                self.expect(T::Semi)?;
-                Ok(Stmt::Break)
+                let value = if self.accept(T::Semi)? {
+                    None
+                } else {
+                    let value = self.parse_expr()?;
+                    self.expect(T::Semi)?;
+                    Some(value)
+                };
+                Ok(Stmt::Break(value))
             }
             T::KwContinue => {
                 self.bump()?;
@@ -575,22 +583,24 @@ impl<'a> Parser<'a> {
                 block.documentation = documentation;
                 Ok(Item::Extern(block))
             }
+            #[cfg(test)]
             T::KwMod => {
-                let mut module = self.parse_mod(is_pub)?;
+                let mut module = self.parse_test_module(is_pub)?;
                 module.documentation = module.documentation.or(documentation);
                 Ok(Item::Mod(module))
             }
             T::KwUse => Ok(Item::Use(self.parse_use()?)),
             other => Err(self.err(&format!(
-                "expected item (`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`mod`/`use`), found `{}`",
+                "expected item (`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`use`), found `{}`",
                 other.user_string()
             ))),
         }
     }
 
-    /// `mod name { <items> }` (inline) or `mod name;` (file module — its items
-    /// are loaded from a sibling `.rua` file during resolution).
-    fn parse_mod(&mut self, is_pub: bool) -> Result<ModDecl, ParseError> {
+    /// Unit tests use compact inline fixtures to exercise the compiler-internal
+    /// module IR. Production parsers never compile this source syntax.
+    #[cfg(test)]
+    fn parse_test_module(&mut self, is_pub: bool) -> Result<ModDecl, ParseError> {
         self.expect(T::KwMod)?;
         let name = self.expect_ident()?;
         if self.accept(T::Semi)? {
@@ -611,7 +621,7 @@ impl<'a> Parser<'a> {
             });
         }
         self.expect(T::LBrace)?;
-        let documentation = self.inner_module_documentation();
+        let documentation = render_leading_documentation(self.lexer.current_leading_trivia(), true);
         let (items, chunk, source_order) = self.parse_chunk_contents(T::RBrace)?;
         self.expect(T::RBrace)?;
         Ok(ModDecl {
@@ -1073,12 +1083,17 @@ impl<'a> Parser<'a> {
                 T::KwLet => stmts.push(self.parse_let()?),
                 T::KwReturn => stmts.push(self.parse_return()?),
                 T::KwWhile => stmts.push(self.parse_while()?),
-                T::KwLoop => stmts.push(self.parse_loop()?),
                 T::KwFor => stmts.push(self.parse_for()?),
                 T::KwBreak => {
                     self.bump()?;
-                    self.expect(T::Semi)?;
-                    stmts.push(Stmt::Break);
+                    let value = if self.accept(T::Semi)? {
+                        None
+                    } else {
+                        let value = self.parse_expr()?;
+                        self.expect(T::Semi)?;
+                        Some(value)
+                    };
+                    stmts.push(Stmt::Break(value));
                 }
                 T::KwContinue => {
                     self.bump()?;
@@ -1168,12 +1183,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While { cond, body })
     }
 
-    fn parse_loop(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(T::KwLoop)?;
-        let body = self.parse_block()?;
-        Ok(Stmt::Loop { body })
-    }
-
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         self.expect(T::KwFor)?;
         let var_span = self.lexer.current_range();
@@ -1218,25 +1227,12 @@ impl<'a> Parser<'a> {
     fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
         let start = self.lexer.current_range();
         let lhs = self.parse_bin(0)?;
-        // range `a..b` / `a..=b` (low precedence, above assignment)
-        if self.cur() == T::DotDot || self.cur() == T::DotDotEq {
-            let inclusive = self.cur() == T::DotDotEq;
-            self.bump()?;
-            let end = self.parse_bin(0)?;
-            return Ok(self.mk(
-                ExprKind::Range {
-                    start: Box::new(lhs),
-                    end: Box::new(end),
-                    inclusive,
-                },
-                start,
-            ));
-        }
-        if self.cur() == T::Eq {
+        if let Some(op) = assignop(self.cur()) {
             self.bump()?;
             let value = self.parse_expr()?;
             return Ok(self.mk(
                 ExprKind::Assign {
+                    op,
                     target: Box::new(lhs),
                     value: Box::new(value),
                 },
@@ -1253,7 +1249,28 @@ impl<'a> Parser<'a> {
     fn parse_bin_inner(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let start = self.lexer.current_range();
         let mut lhs = self.parse_unary()?;
-        while let Some((op, lbp)) = binop(self.cur()) {
+        loop {
+            if matches!(self.cur(), T::DotDot | T::DotDotEq) {
+                const RANGE_BP: u8 = 4;
+                if RANGE_BP < min_bp {
+                    break;
+                }
+                let inclusive = self.cur() == T::DotDotEq;
+                self.bump()?;
+                let rhs = self.parse_bin(RANGE_BP + 1)?;
+                lhs = self.mk(
+                    ExprKind::Range {
+                        start: Box::new(lhs),
+                        end: Box::new(rhs),
+                        inclusive,
+                    },
+                    start,
+                );
+                continue;
+            }
+            let Some((op, lbp)) = binop(self.cur()) else {
+                break;
+            };
             if lbp < min_bp {
                 break;
             }
@@ -1319,7 +1336,8 @@ impl<'a> Parser<'a> {
                         start,
                     );
                 }
-                T::Dot => {
+                T::Dot | T::QuestionDot => {
+                    let optional = self.cur() == T::QuestionDot;
                     self.bump()?;
                     let member_span = self.lexer.current_range();
                     let name = self.expect_ident()?;
@@ -1340,6 +1358,7 @@ impl<'a> Parser<'a> {
                             ExprKind::MethodCall {
                                 recv: Box::new(e),
                                 method: name,
+                                optional,
                                 type_args,
                                 args,
                                 method_span: member_span,
@@ -1353,6 +1372,7 @@ impl<'a> Parser<'a> {
                             ExprKind::Field {
                                 base: Box::new(e),
                                 name,
+                                optional,
                                 name_span: member_span,
                             },
                             start,
@@ -1421,6 +1441,12 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 Ok(self.mk(ExprKind::Bool(false), start))
             }
+            T::KwLoop => {
+                self.bump()?;
+                let body = self.parse_block()?;
+                Ok(self.mk(ExprKind::Loop(body), start))
+            }
+            T::Hash => self.parse_map_literal(start),
             T::Ident | T::KwSelf => {
                 // Macro call: `name!(...)` / `name![...]`.
                 if self.cur() == T::Ident && self.lexer.peek_next() == T::Not {
@@ -1494,6 +1520,23 @@ impl<'a> Parser<'a> {
             ClosureBody::Expr(Box::new(self.parse_expr_allow_struct()?))
         };
         Ok(self.mk(ExprKind::Closure { params, ret, body }, start))
+    }
+
+    fn parse_map_literal(&mut self, start: SourceRange) -> Result<Expr, ParseError> {
+        self.expect(T::Hash)?;
+        self.expect(T::LBrace)?;
+        let mut entries = Vec::new();
+        while self.cur() != T::RBrace {
+            let key = self.parse_expr_allow_struct()?;
+            self.expect(T::Colon)?;
+            let value = self.parse_expr_allow_struct()?;
+            entries.push((key, value));
+            if !self.accept(T::Comma)? {
+                break;
+            }
+        }
+        self.expect(T::RBrace)?;
+        Ok(self.mk(ExprKind::MapLit(entries), start))
     }
 
     fn parse_macro(&mut self) -> Result<Expr, ParseError> {
@@ -1862,13 +1905,30 @@ fn starts_lowercase(s: &str) -> bool {
 fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
-        ExprKind::If { .. } | ExprKind::IfLet { .. } | ExprKind::Block(_) | ExprKind::Match { .. }
+        ExprKind::If { .. }
+            | ExprKind::IfLet { .. }
+            | ExprKind::Block(_)
+            | ExprKind::Loop(_)
+            | ExprKind::Match { .. }
     )
+}
+
+fn assignop(t: T) -> Option<Option<BinOp>> {
+    Some(match t {
+        T::Eq => None,
+        T::PlusEq => Some(BinOp::Add),
+        T::MinusEq => Some(BinOp::Sub),
+        T::StarEq => Some(BinOp::Mul),
+        T::SlashEq => Some(BinOp::Div),
+        T::PercentEq => Some(BinOp::Rem),
+        _ => return None,
+    })
 }
 
 /// Binary operator + left binding power for the current token.
 fn binop(t: T) -> Option<(BinOp, u8)> {
     Some(match t {
+        T::QuestionQuestion => (BinOp::Coalesce, 0),
         T::OrOr => (BinOp::Or, 1),
         T::AndAnd => (BinOp::And, 2),
         T::EqEq => (BinOp::Eq, 3),
@@ -1877,11 +1937,12 @@ fn binop(t: T) -> Option<(BinOp, u8)> {
         T::Le => (BinOp::Le, 3),
         T::Gt => (BinOp::Gt, 3),
         T::Ge => (BinOp::Ge, 3),
-        T::Plus => (BinOp::Add, 4),
-        T::Minus => (BinOp::Sub, 4),
-        T::Star => (BinOp::Mul, 5),
-        T::Slash => (BinOp::Div, 5),
-        T::Percent => (BinOp::Rem, 5),
+        T::KwIn => (BinOp::Contains, 3),
+        T::Plus => (BinOp::Add, 5),
+        T::Minus => (BinOp::Sub, 5),
+        T::Star => (BinOp::Mul, 6),
+        T::Slash => (BinOp::Div, 6),
+        T::Percent => (BinOp::Rem, 6),
         _ => return None,
     })
 }

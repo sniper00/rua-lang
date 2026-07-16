@@ -1,9 +1,9 @@
 use std::{fs, path::Path, sync::Arc};
 
 use rua_analysis::{
-    Analysis, AnalysisHost, BindingId, Body, BodySourceMap, CallTarget, Change, DefId, DefKind,
-    Expr, ExprId, FileId, FileKind, InferenceDiagnostic, InferenceResult, PatId, PrimitiveTy,
-    SourceRootId, SourceRootKind, Ty,
+    Analysis, AnalysisHost, BinaryOp, BindingId, Body, BodySourceMap, CallTarget, Change, DefId,
+    DefKind, Expr, ExprId, FileId, FileKind, InferenceDiagnostic, InferenceResult, PatId,
+    PrimitiveTy, SourceRootId, SourceRootKind, Ty,
 };
 
 struct Fixture {
@@ -207,6 +207,110 @@ fn invalid_primitives() -> i64 {
             .iter()
             .any(|diagnostic| matches!(diagnostic, InferenceDiagnostic::ExpectedBool { .. }))
     );
+}
+
+#[test]
+fn inference_binary_operator_matrix_rejects_incompatible_concrete_types() {
+    const SOURCE: &str = r#"
+fn binary_matrix() {
+    let bool_add = true + 1;
+    let vec_subtract = vec![1] - vec![2];
+    let string_multiply = "left" * "right";
+    let mixed_equal = 1 == "1";
+    let mixed_not_equal = true != "true";
+    let bool_order = true < false;
+    let mixed_order = "1" >= 1;
+
+    let numeric_add = 1 + 2.0;
+    let string_add = "left" + "right";
+    let numeric_order = 1 < 2.0;
+    let string_order = "left" <= "right";
+    let bool_equal = true == false;
+}
+"#;
+    let fixture = fixture(SOURCE, "binary_matrix");
+    let invalid = fixture
+        .inference
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            InferenceDiagnostic::InvalidBinary { op, .. } => Some(*op),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        invalid,
+        vec![
+            BinaryOp::Add,
+            BinaryOp::Subtract,
+            BinaryOp::Multiply,
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::Less,
+            BinaryOp::GreaterOrEqual,
+        ]
+    );
+}
+
+#[test]
+fn inference_user_arithmetic_operator_checks_implementation_and_rhs() {
+    const SOURCE: &str = r#"
+struct Scale { value: f64 }
+
+impl Mul for Scale {
+    fn mul(self, factor: f64) -> Scale {
+        Scale { value: self.value * factor }
+    }
+}
+
+fn valid_scale(value: Scale) -> Scale {
+    value * 2.0
+}
+
+fn invalid_scale(value: Scale) -> Scale {
+    value * "two"
+}
+
+struct Point { x: i64 }
+
+fn missing_add(value: Point) {
+    let invalid = value + 1;
+}
+
+fn valid_generic<T: Div>(left: T, right: T) {
+    let quotient = left / right;
+}
+
+fn invalid_generic<T>(left: T, right: T) {
+    let quotient = left / right;
+}
+"#;
+    let valid = fixture(SOURCE, "valid_scale");
+    assert!(
+        valid.inference.diagnostics().is_empty(),
+        "valid overload produced diagnostics: {:?}",
+        valid.inference.diagnostics()
+    );
+
+    let valid_generic = fixture(SOURCE, "valid_generic");
+    assert!(
+        valid_generic.inference.diagnostics().is_empty(),
+        "valid generic bound produced diagnostics: {:?}",
+        valid_generic.inference.diagnostics()
+    );
+
+    for owner in ["invalid_scale", "missing_add", "invalid_generic"] {
+        let invalid = fixture(SOURCE, owner);
+        assert!(
+            invalid
+                .inference
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic, InferenceDiagnostic::InvalidBinary { .. })),
+            "missing invalid operator diagnostic for {owner}"
+        );
+    }
 }
 
 #[test]
@@ -778,6 +882,44 @@ fn containers() -> i64 {
 }
 
 #[test]
+fn inference_covers_script_ergonomics_expressions() {
+    const SOURCE: &str = r#"
+struct Profile { city: String }
+
+fn ergonomics(optional: Option<Profile>, values: Vec<i64>) -> String {
+    let mut total = 1;
+    /*assign_expr*/total += 2;
+    let present = /*contains_expr*/2 in values;
+    let city = /*chain_expr*/optional?.city;
+    let selected = /*coalesce_expr*/city ?? "unknown";
+    let scores = /*map_expr*/#{ "alice": 10, "bob": 20 };
+    let answer = /*loop_expr*/loop { break 7; };
+    present;
+    scores;
+    answer;
+    selected
+}
+"#;
+    let fixture = fixture(SOURCE, "ergonomics");
+
+    assert_expr_ty(&fixture, "/*assign_expr*/", &Ty::UNIT);
+    assert_expr_ty(&fixture, "/*contains_expr*/", &Ty::BOOL);
+    assert_expr_ty(
+        &fixture,
+        "/*chain_expr*/",
+        &Ty::Option(Box::new(Ty::STRING)),
+    );
+    assert_expr_ty(&fixture, "/*coalesce_expr*/", &Ty::STRING);
+    assert_expr_ty(
+        &fixture,
+        "/*map_expr*/",
+        &Ty::HashMap(Box::new(Ty::STRING), Box::new(Ty::I64)),
+    );
+    assert_expr_ty(&fixture, "/*loop_expr*/", &Ty::I64);
+    assert!(fixture.inference.diagnostics().is_empty());
+}
+
+#[test]
 fn inference_calls_cache_reuses_hot_results_and_invalidates_on_signature_change() {
     const BEFORE: &str = concat!(
         "fn callee(value: i64) -> i64 { value }\n",
@@ -836,7 +978,7 @@ fn inference_calls_cache_reuses_hot_results_and_invalidates_on_signature_change(
 
 #[test]
 fn inference_calls_cache_invalidates_when_declaration_module_signature_changes() {
-    const MAIN: &str = "mod dep;\nfn caller() -> i64 { /*call*/dep::callee(1) }\n";
+    const MAIN: &str = "fn caller() -> i64 { /*call*/dep::callee(1) }\n";
     const BEFORE_DECLARATION: &str = "extern \"lua\" { pub fn callee(value: i64) -> i64; }\n";
     const AFTER_DECLARATION: &str = "extern \"lua\" { pub fn callee(value: String) -> bool; }\n";
     let root_id = SourceRootId::new(0);

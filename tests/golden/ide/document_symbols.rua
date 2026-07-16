@@ -17,6 +17,4 @@ impl Named for Point {
     fn name(&self) -> String { "point" }
 }
 
-mod utility {
-    pub fn origin() -> Point { Point { x: 0, y: 0 } }
-}
+fn origin() -> Point { Point { x: 0, y: 0 } }

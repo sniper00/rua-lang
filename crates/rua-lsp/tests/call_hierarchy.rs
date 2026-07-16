@@ -118,24 +118,31 @@ fn call_hierarchy_on_keyword_returns_none() {
 
 #[test]
 fn call_hierarchy_isolates_same_named_functions_by_definition_identity() {
-    let uri = uri("/test/callhier_same_names.rua");
+    let main_uri = uri("/test/main.rua");
+    let first_uri = uri("/test/first.rua");
+    let second_uri = uri("/test/second.rua");
     let mut srv = TestServer::new();
+    srv.open(&main_uri, "fn main() {}");
     srv.open(
-        &uri,
-        "mod first {\n    pub fn helper() {}\n    pub fn caller() { helper(); }\n}\nmod second {\n    pub fn helper() {}\n    pub fn caller() { helper(); }\n}\n",
+        &first_uri,
+        "pub fn helper() {}\npub fn caller() { helper(); }\n",
+    );
+    srv.open(
+        &second_uri,
+        "pub fn helper() {}\npub fn caller() { helper(); }\n",
     );
 
     let first_helper = srv
         .snapshot()
-        .call_hierarchy_prepare(srv.pp(&uri, 1, 12).unwrap())
+        .call_hierarchy_prepare(srv.pp(&first_uri, 0, 7).unwrap())
         .unwrap();
     let second_helper = srv
         .snapshot()
-        .call_hierarchy_prepare(srv.pp(&uri, 5, 12).unwrap())
+        .call_hierarchy_prepare(srv.pp(&second_uri, 0, 7).unwrap())
         .unwrap();
     let first_caller = srv
         .snapshot()
-        .call_hierarchy_prepare(srv.pp(&uri, 2, 12).unwrap())
+        .call_hierarchy_prepare(srv.pp(&first_uri, 1, 7).unwrap())
         .unwrap();
     let outgoing = srv.snapshot().call_hierarchy_outgoing(&first_caller);
 

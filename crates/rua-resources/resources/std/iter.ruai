@@ -41,6 +41,9 @@ impl<T> Iter<T> {
     /// Find the first element satisfying the predicate.
     pub fn find(self, f: fn(&T) -> bool) -> Option<T> {}
 
+    /// Consume elements until `value` is found.
+    pub fn contains(self, value: &T) -> bool {}
+
     /// Advance the iterator, returning the next element.
     pub fn next(&mut self) -> Option<T> {}
 }

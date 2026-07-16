@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
     sync::{Arc, Mutex, Weak},
 };
 
@@ -9,12 +10,26 @@ use crate::{
     BaseDb,
     base::{FileRange, TextRange},
     hir::{
-        Import, ItemKind, ItemSignature, ItemSourceKind, ItemTreeItem, ModuleKind,
-        SignatureFingerprint, Visibility,
-        module_resolution::{resolve_module_file_at, resolve_module_file_in_project_at},
+        Import, ItemKind, ItemSignature, ItemSourceKind, ItemTreeItem, SignatureFingerprint,
+        Visibility,
     },
     vfs::{FileId, FileKind, ProjectId, VfsPath},
 };
+use rua_project::module_path_from_relative_file;
+
+fn project_file_logical_directory(
+    db: &BaseDb,
+    project_id: ProjectId,
+    file_id: FileId,
+) -> Option<VfsPath> {
+    let project = db.project(project_id)?;
+    let source_root_id = db.source_root_id(file_id)?;
+    let directory = db.file_path(file_id)?.parent()?;
+    project
+        .roots()
+        .filter(|root| root.source_root_id() == source_root_id)
+        .find_map(|root| directory.strip_prefix(root.logical_base()))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(u32);
@@ -550,11 +565,7 @@ impl DefMap {
                 name: None,
                 file_id: Some(root_file),
                 resolution_directory: match project_id {
-                    Some(project_id) => {
-                        crate::hir::module_resolution::project_file_logical_directory(
-                            db, project_id, root_file,
-                        )
-                    }
+                    Some(project_id) => project_file_logical_directory(db, project_id, root_file),
                     None => db.file_path(root_file).and_then(VfsPath::parent),
                 },
                 definitions: BTreeMap::new(),
@@ -580,6 +591,7 @@ impl DefMap {
             pending_imports: Vec::new(),
         };
         builder.lower_file(root, root_file);
+        builder.lower_path_modules();
         builder.resolve_imports();
         let mut map = builder.map;
         // Build file→module index for O(1) module_for_file lookups.
@@ -614,6 +626,26 @@ impl DefMap {
         self.module_slots
             .get(&module_id)
             .and_then(|slot| self.modules.get(*slot))
+    }
+
+    pub fn module_path(&self, mut module_id: ModuleId) -> Option<String> {
+        let mut names = Vec::new();
+        loop {
+            let module = self.module(module_id)?;
+            if let Some(name) = module.name() {
+                names.push(name);
+            }
+            let Some(parent) = module.parent() else {
+                break;
+            };
+            module_id = parent;
+        }
+        if names.is_empty() {
+            None
+        } else {
+            names.reverse();
+            Some(names.join("::"))
+        }
     }
 
     fn module_mut(&mut self, module_id: ModuleId) -> Option<&mut ModuleData> {
@@ -756,6 +788,124 @@ struct DefMapBuilder<'db> {
 }
 
 impl DefMapBuilder<'_> {
+    fn lower_path_modules(&mut self) {
+        let mut discovered = ImplicitModule::default();
+        if let Some(project_id) = self.project_id {
+            let Some(project) = self.db.project(project_id) else {
+                return;
+            };
+            let Some(root_path) = self.db.file_path(self.map.root_file) else {
+                return;
+            };
+            let Some(source_base) = root_path.parent() else {
+                return;
+            };
+            let Some(source_root_id) = self.db.source_root_id(self.map.root_file) else {
+                return;
+            };
+            if let Some(source_root) = self.db.source_root(source_root_id) {
+                for file_id in source_root.files() {
+                    if file_id == self.map.root_file {
+                        continue;
+                    }
+                    let Some(kind) = self.db.file_kind(file_id) else {
+                        continue;
+                    };
+                    let Some(path) = self.db.file_path(file_id) else {
+                        continue;
+                    };
+                    let Some(relative) = path.strip_prefix(&source_base) else {
+                        continue;
+                    };
+                    insert_implicit_module(
+                        &mut discovered,
+                        relative.as_path(),
+                        file_id,
+                        usize::from(kind == FileKind::Declaration),
+                    );
+                }
+            }
+            for (root_order, root) in project.dependency_roots().iter().enumerate() {
+                let Some(source_root) = self.db.source_root(root.source_root_id()) else {
+                    continue;
+                };
+                for file_id in source_root.files() {
+                    if self.db.file_kind(file_id) != Some(FileKind::Declaration) {
+                        continue;
+                    }
+                    let Some(path) = self.db.file_path(file_id) else {
+                        continue;
+                    };
+                    let Some(relative) = path.strip_prefix(root.logical_base()) else {
+                        continue;
+                    };
+                    insert_implicit_module(
+                        &mut discovered,
+                        relative.as_path(),
+                        file_id,
+                        root_order + 1,
+                    );
+                }
+            }
+        } else {
+            let Some(source_root_id) = self.db.source_root_id(self.map.root_file) else {
+                return;
+            };
+            let Some(source_root) = self.db.source_root(source_root_id) else {
+                return;
+            };
+            let Some(root_path) = self.db.file_path(self.map.root_file) else {
+                return;
+            };
+            let Some(source_base) = root_path.parent() else {
+                return;
+            };
+            for file_id in source_root.files() {
+                if file_id == self.map.root_file {
+                    continue;
+                }
+                let Some(path) = self.db.file_path(file_id) else {
+                    continue;
+                };
+                let Some(relative) = path.strip_prefix(&source_base) else {
+                    continue;
+                };
+                let precedence =
+                    usize::from(self.db.file_kind(file_id) == Some(FileKind::Declaration));
+                insert_implicit_module(&mut discovered, relative.as_path(), file_id, precedence);
+            }
+        }
+        self.lower_implicit_children(self.map.root, &VfsPath::new(""), discovered.children);
+    }
+
+    fn lower_implicit_children(
+        &mut self,
+        parent: ModuleId,
+        parent_directory: &VfsPath,
+        children: BTreeMap<String, ImplicitModule>,
+    ) {
+        for (name, child) in children {
+            if self
+                .map
+                .module(parent)
+                .is_some_and(|module| module.children.contains_key(&name))
+            {
+                continue;
+            }
+            let directory = parent_directory.join(&name);
+            let module = self.add_module(parent, &name, child.file_id, Some(directory.clone()));
+            let anchor = child
+                .file_id
+                .or_else(|| child.first_file())
+                .unwrap_or(self.map.root_file);
+            self.add_implicit_module_definition(parent, anchor, &name, module);
+            if let Some(file_id) = child.file_id {
+                self.lower_file(module, file_id);
+            }
+            self.lower_implicit_children(module, &directory, child.children);
+        }
+    }
+
     fn lower_file(&mut self, module_id: ModuleId, file_id: FileId) {
         if !self.active_files.insert(file_id) || !self.lowered_files.insert(file_id) {
             return;
@@ -791,61 +941,9 @@ impl DefMapBuilder<'_> {
         scope_path: &str,
     ) {
         for item in items {
-            if item.kind() != ItemKind::Module {
-                let (definition, path) =
-                    self.add_definition(module_id, file_id, item, None, None, scope_path);
-                self.lower_members(module_id, file_id, definition, &path, item.children());
-                continue;
-            }
-
-            let target_file = match item.module_kind() {
-                Some(ModuleKind::Inline) => Some(file_id),
-                Some(ModuleKind::File) => self.resolve_module(module_id, file_id, item.name()),
-                None => None,
-            };
-            let child_directory = self
-                .map
-                .module(module_id)
-                .and_then(ModuleData::resolution_directory)
-                .map(|directory| directory.join(item.name()));
-            let child_module =
-                self.add_module(module_id, item.name(), target_file, child_directory);
-            let (module_definition, path) = self.add_definition(
-                module_id,
-                file_id,
-                item,
-                Some(child_module),
-                None,
-                scope_path,
-            );
-
-            match item.module_kind() {
-                Some(ModuleKind::Inline) => {
-                    if self.db.file_kind(file_id).unwrap_or(FileKind::Source) == FileKind::Source {
-                        self.add_chunk_definition(
-                            child_module,
-                            file_id,
-                            item.range(),
-                            ItemSourceKind::SyntheticInlineModuleChunk,
-                            &format!("{path}/chunk"),
-                        );
-                    }
-                    self.lower_items(child_module, file_id, item.children(), &path);
-                    self.pending_imports.extend(
-                        item.imports()
-                            .iter()
-                            .cloned()
-                            .map(|import| (child_module, import)),
-                    );
-                    let _ = module_definition;
-                }
-                Some(ModuleKind::File) => {
-                    if let Some(target_file) = target_file {
-                        self.lower_file(child_module, target_file);
-                    }
-                }
-                None => {}
-            }
+            let (definition, path) =
+                self.add_definition(module_id, file_id, item, None, None, scope_path);
+            self.lower_members(module_id, file_id, definition, &path, item.children());
         }
     }
 
@@ -861,16 +959,6 @@ impl DefMapBuilder<'_> {
             let (member_id, path) =
                 self.add_definition(module_id, file_id, member, None, Some(owner), owner_path);
             self.lower_members(module_id, file_id, member_id, &path, member.children());
-        }
-    }
-
-    fn resolve_module(&self, module_id: ModuleId, file_id: FileId, name: &str) -> Option<FileId> {
-        let directory = self.map.module(module_id)?.resolution_directory()?;
-        match self.project_id {
-            Some(project_id) => {
-                resolve_module_file_in_project_at(self.db, project_id, file_id, directory, name)
-            }
-            None => resolve_module_file_at(self.db, file_id, directory, name),
         }
     }
 
@@ -1019,6 +1107,64 @@ impl DefMapBuilder<'_> {
         def_id
     }
 
+    fn add_implicit_module_definition(
+        &mut self,
+        parent: ModuleId,
+        file_id: FileId,
+        name: &str,
+        target_module: ModuleId,
+    ) -> DefId {
+        let mut path = vec![name];
+        let mut cursor = Some(parent);
+        while let Some(module) = cursor.and_then(|module| self.map.module(module)) {
+            if let Some(name) = module.name() {
+                path.push(name);
+            }
+            cursor = module.parent();
+        }
+        path.reverse();
+        let structural_path = format!("path_module:{}", path.join("/"));
+        let def_id = self
+            .db
+            .intern_definition(self.context, file_id, &structural_path);
+        let file_kind = self.db.file_kind(file_id).unwrap_or(FileKind::Source);
+        let range = TextRange::new(0, 0);
+        let source = DefinitionSource {
+            full_range: FileRange::new(file_id, range),
+            name_range: FileRange::new(file_id, range),
+        };
+        let definition = Definition {
+            id: def_id,
+            module_id: parent,
+            owner: None,
+            name: name.to_string(),
+            kind: DefKind::Module,
+            source,
+            source_kind: DefinitionSourceKind {
+                file_kind,
+                item_kind: ItemSourceKind::Definition,
+            },
+            visibility: Visibility::Public,
+            signature: ItemSignature::None,
+            documentation: None,
+            signature_fingerprint: SignatureFingerprint::default().with_file_kind(file_kind),
+            target_module: Some(target_module),
+        };
+        let slot = self.map.definitions.len();
+        let previous = self.map.definition_slots.insert(def_id, slot);
+        assert!(previous.is_none(), "duplicate implicit module identity");
+        self.map.definitions.push(definition);
+        self.map.source_map.insert(def_id, source);
+        self.map
+            .module_mut(parent)
+            .expect("implicit module parent belongs to this DefMap")
+            .definitions
+            .entry(name.to_string())
+            .or_default()
+            .push(def_id);
+        def_id
+    }
+
     fn resolve_imports(&mut self) {
         let bindings: Vec<_> = self
             .pending_imports
@@ -1047,6 +1193,42 @@ impl DefMapBuilder<'_> {
     }
 }
 
+#[derive(Default)]
+struct ImplicitModule {
+    file_id: Option<FileId>,
+    precedence: usize,
+    children: BTreeMap<String, ImplicitModule>,
+}
+
+impl ImplicitModule {
+    fn first_file(&self) -> Option<FileId> {
+        self.file_id
+            .or_else(|| self.children.values().find_map(ImplicitModule::first_file))
+    }
+}
+
+fn insert_implicit_module(
+    root: &mut ImplicitModule,
+    relative: &Path,
+    file_id: FileId,
+    precedence: usize,
+) {
+    let Ok(Some(segments)) = module_path_from_relative_file(relative) else {
+        return;
+    };
+    if segments.is_empty() {
+        return;
+    }
+    let mut module = root;
+    for segment in segments {
+        module = module.children.entry(segment).or_default();
+    }
+    if module.file_id.is_none() || precedence < module.precedence {
+        module.file_id = Some(file_id);
+        module.precedence = precedence;
+    }
+}
+
 fn syntax_range(node: &rua_syntax::SyntaxNode) -> TextRange {
     let range = node.text_range();
     TextRange::new(range.start().into(), range.end().into())
@@ -1070,11 +1252,7 @@ mod tests {
             root_id,
             FileKind::Source,
             "src/main.rua",
-            concat!(
-                "pub fn root_fn() {}\n",
-                "pub mod inline { pub struct Thing {} fn private_fn() {} }\n",
-                "mod math;\n",
-            ),
+            "pub fn root_fn() {}\n",
         );
         change.set_file_with_path(
             math_id,
@@ -1089,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn def_map_builds_inline_and_file_module_tree() {
+    fn def_map_builds_path_module_tree() {
         let (host, main_id, math_id) = host_with_module_tree();
         let map = host.analysis().def_map(main_id);
         let root = map.root();
@@ -1100,19 +1278,6 @@ mod tests {
         assert_eq!(root_fn.kind(), DefKind::Function);
         assert_eq!(root_fn.visibility(), Visibility::Public);
         assert_eq!(root_fn.file_id(), main_id);
-
-        let inline = map.resolve_name(root, "inline").expect("inline module");
-        let inline_module = inline.target_module().expect("inline module target");
-        assert_eq!(
-            map.module(inline_module).expect("inline data").file_id(),
-            Some(main_id)
-        );
-        assert_eq!(
-            map.resolve_path(root, &["inline", "Thing"], ResolveStrategy::First)
-                .expect("inline struct")
-                .kind(),
-            DefKind::Struct
-        );
 
         let math = map
             .resolve_path(root, &["math"], ResolveStrategy::First)

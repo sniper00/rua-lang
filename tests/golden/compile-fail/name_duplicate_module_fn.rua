@@ -1,4 +1,0 @@
-mod service {
-    fn duplicate() {}
-    fn duplicate() {}
-}

@@ -54,7 +54,9 @@ impl Semantics {
         let parse = self.db.parse(position.file_id);
         let token = identifier_at_offset(parse.syntax_node(), position.offset)?;
 
-        if previous_significant(&token).is_some_and(|token| token.kind() == SyntaxKind::Dot) {
+        if previous_significant(&token)
+            .is_some_and(|token| matches!(token.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot))
+        {
             return None;
         }
 
@@ -406,7 +408,6 @@ mod tests {
     fn find_def_at_resolves_simple_path_and_module_items() {
         let main_source = concat!(
             "fn helper() {}\n",
-            "mod math;\n",
             "fn main() { helper(); math::answer(); }\n",
         );
         let math_source = "pub fn answer() -> i64 { 42 }\n";
@@ -446,7 +447,7 @@ mod tests {
         let module_use = semantics
             .find_def_at(FilePosition::new(
                 main_id,
-                offset_of(main_source, "math", 1),
+                offset_of(main_source, "math", 0),
             ))
             .expect("path module definition");
         assert_eq!(module_use.name(), "math");
@@ -460,40 +461,39 @@ mod tests {
             .expect("path item definition");
         assert_eq!(answer.name(), "answer");
         assert_eq!(answer.file_id(), math_id);
-
-        let module_declaration = semantics
-            .find_def_at(FilePosition::new(
-                main_id,
-                offset_of(main_source, "math", 0),
-            ))
-            .expect("module declaration definition");
-        assert_eq!(module_declaration.id(), module_use.id());
     }
 
     #[test]
-    fn find_def_at_uses_innermost_inline_module_scope() {
-        let source = concat!(
-            "fn item() {}\n",
-            "mod nested { fn item() {} fn call() { item(); } }\n",
-        );
+    fn find_def_at_uses_path_module_scope() {
+        let main_source = "fn item() {}\nfn main() { nested::call(); }\n";
+        let nested_source = "fn item() {}\npub fn call() { item(); }\n";
         let root_id = SourceRootId::new(0);
-        let file_id = FileId::new(0);
+        let main_id = FileId::new(0);
+        let nested_id = FileId::new(1);
         let mut change = Change::new();
         change.set_source_root(root_id, SourceRootKind::Workspace);
-        change.set_file_with_path(file_id, root_id, FileKind::Source, "main.rua", source);
+        change.set_file_with_path(main_id, root_id, FileKind::Source, "main.rua", main_source);
+        change.set_file_with_path(
+            nested_id,
+            root_id,
+            FileKind::Source,
+            "nested.rua",
+            nested_source,
+        );
         let mut host = AnalysisHost::new();
         host.apply_change(change);
 
         let definition = host
             .analysis()
-            .semantics(file_id)
-            .find_def_at(FilePosition::new(file_id, offset_of(source, "item", 2)))
+            .semantics(main_id)
+            .find_def_at(FilePosition::new(
+                nested_id,
+                offset_of(nested_source, "item", 1),
+            ))
             .expect("nested item definition");
 
-        assert_eq!(
-            definition.name_range().start(),
-            offset_of(source, "item", 1) - 1
-        );
+        assert_eq!(definition.file_id(), nested_id);
+        assert_eq!(definition.name_range().start(), 3);
     }
 
     #[test]

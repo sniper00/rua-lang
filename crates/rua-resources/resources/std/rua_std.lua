@@ -1,4 +1,4 @@
-local std = { ABI_VERSION = 1 }
+local std = { ABI_VERSION = 2 }
 
 local fmt = {}
 local number = {}
@@ -60,28 +60,33 @@ local Result = {}
 Result.__index = Result
 
 function result.ok(value)
-    return setmetatable({ __rua_result = true, tag = "ok", value = value }, Result)
+    return setmetatable({ true, value }, Result)
 end
 
 function result.err(value)
-    return setmetatable({ __rua_result = true, tag = "err", value = value }, Result)
+    return setmetatable({ false, value }, Result)
 end
 
 function Result:is_ok()
-    return self.tag == "ok"
+    return self[1]
 end
 
 function Result:is_err()
-    return self.tag == "err"
+    return not self[1]
 end
 
 function Result:unwrap()
-    if self.tag == "err" then error(self.value, 2) end
-    return self.value
+    if not self[1] then error(self[2], 2) end
+    return self[2]
+end
+
+function Result:expect(message)
+    if not self[1] then error(message .. ": " .. tostring(self[2]), 2) end
+    return self[2]
 end
 
 function Result:unwrap_or(default)
-    if self.tag == "ok" then return self.value end
+    if self[1] then return self[2] end
     return default
 end
 
@@ -206,6 +211,14 @@ function Iter:find(predicate)
     end
 end
 
+function Iter:contains(needle)
+    while true do
+        local value = self:next()
+        if value == nil then return false end
+        if value == needle then return true end
+    end
+end
+
 function iter.range(start_value, end_value, inclusive)
     local current = start_value
     return iter.new(function()
@@ -244,6 +257,13 @@ end
 
 function Vec:set(index, value)
     self[index] = value
+end
+
+function Vec:contains(needle)
+    for index = 0, self.n - 1 do
+        if self[index] == needle then return true end
+    end
+    return false
 end
 
 function Vec:iter()
@@ -297,8 +317,8 @@ function Map:len()
     return self.n
 end
 
-function map.new()
-    return setmetatable({ values = {}, n = 0 }, Map)
+function map.new(capacity)
+    return setmetatable({ values = table.create(0, capacity or 0), n = 0 }, Map)
 end
 
 function string_api.new()

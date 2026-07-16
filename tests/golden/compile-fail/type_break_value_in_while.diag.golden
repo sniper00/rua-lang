@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_break_value_in_while.rua:3: `break` with a value is only allowed in `loop`

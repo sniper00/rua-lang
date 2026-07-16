@@ -191,27 +191,10 @@ fn parse_trait_impl() {
     assert!(has_kind(&node, SyntaxKind::ImplDecl));
 }
 
-// ---------------------------------------------------------------------------
-// Module declarations
-// ---------------------------------------------------------------------------
-
 #[test]
-fn parse_module_declaration() {
-    let node = parse_no_errors("mod math { pub fn abs(x: i64) -> i64 { 0 } }");
-    assert!(has_kind(&node, SyntaxKind::ModDecl));
-}
-
-#[test]
-fn parse_nested_module() {
-    let node = parse_no_errors("mod outer { mod inner { fn f() -> i64 { 1 } } }");
-    assert!(has_kind(&node, SyntaxKind::ModDecl));
-    assert_eq!(count_kind(&node, SyntaxKind::ModDecl), 2);
-}
-
-#[test]
-fn parse_pub_module() {
-    let node = parse_no_errors("pub mod public_mod { pub fn f() -> i64 { 0 } }");
-    assert!(has_kind(&node, SyntaxKind::ModDecl));
+fn legacy_mod_declarations_are_rejected() {
+    let parsed = rua_syntax::parse_source_file("mod math;");
+    assert!(!parsed.errors().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +317,36 @@ fn parse_return_without_value() {
 fn parse_break_statement() {
     let node = parse_no_errors("fn main() { loop { break; } }");
     assert!(has_kind(&node, SyntaxKind::FnDecl));
+}
+
+#[test]
+fn parse_compound_assignment_and_loop_value() {
+    let node = parse_no_errors(
+        "fn main() -> i64 { let mut total = 1; total += 2; loop { break total; } }",
+    );
+    assert!(has_kind(&node, SyntaxKind::AssignExpr));
+    assert!(has_kind(&node, SyntaxKind::LoopExpr));
+    assert!(has_kind(&node, SyntaxKind::BreakExpr));
+}
+
+#[test]
+fn parse_option_coalescing_and_optional_chaining() {
+    let node = parse_no_errors(
+        "fn city(user: Option<User>) -> String { user?.profile?.city ?? \"unknown\" }",
+    );
+    assert!(has_kind(&node, SyntaxKind::BinExpr));
+    assert!(has_kind(&node, SyntaxKind::FieldExpr));
+}
+
+#[test]
+fn parse_membership_ranges_and_map_literals() {
+    let node = parse_no_errors(
+        "fn main() { let scores = #{ \"alice\": 10, \"bob\": 20 }; let found = \"alice\" in scores; let ranged = 3 in 0..5; }",
+    );
+    assert!(has_kind(&node, SyntaxKind::MapExpr));
+    assert!(has_kind(&node, SyntaxKind::MapEntry));
+    assert!(has_kind(&node, SyntaxKind::RangeExpr));
+    assert!(has_kind(&node, SyntaxKind::BinExpr));
 }
 
 #[test]
@@ -622,23 +635,6 @@ fn parse_top_level_chunk_statements_between_items() {
     assert_eq!(parsed.tree().items().count(), 1);
     assert_eq!(parsed.tree().stmts().count(), 3);
     assert_eq!(parsed.syntax_node().text().to_string(), source);
-}
-
-#[test]
-fn parse_inline_module_chunk_statements() {
-    let source = "mod startup { let ready = true; fn status() -> bool { ready } status(); }";
-    let parsed = rua_syntax::parse_source_file(source);
-    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
-    let module = parsed
-        .tree()
-        .items()
-        .find_map(|item| match item {
-            rua_syntax::ast::Item::Mod(module) => Some(module),
-            _ => None,
-        })
-        .expect("inline module");
-    assert_eq!(module.items().count(), 1);
-    assert_eq!(module.stmts().count(), 2);
 }
 
 // ---------------------------------------------------------------------------

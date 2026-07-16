@@ -7,7 +7,7 @@ cargo build --release -p ruac -p rua-lsp --features lsp
 target/release/ruac build app.rua
 ```
 
-生成物面向 Lua 5.5。标准运行时集中在单个 [rua_std.lua](crates/rua-resources/resources/std/rua_std.lua)；codegen 最多生成一次 `require("rua_std")`，并只为实际使用的子表创建局部别名。
+生成物面向 Lua 5.5。标准运行时集中在单个 [rua_std.lua](crates/rua-resources/resources/std/rua_std.lua)；bundle codegen 最多生成一次 `require("rua_std")`，modules codegen 依赖 Lua 的 `require` cache 共享同一个 runtime package。
 
 ## 语言语义
 
@@ -23,9 +23,12 @@ println!("answer = {}", value);
 `Result<T, E>` 是一等 tagged value，而不是 Lua multi-return。`Ok(value)` 和 `Err(error)` 在赋值、参数传递、字段、容器和闭包捕获后仍保留状态；`Ok(nil)` 与 `Err(nil)` 也可区分。`?`、模式匹配和普通返回使用同一表示。
 
 ```text
-Ok(v)  -> { __rua_result = true, tag = "ok",  value = v }
-Err(e) -> { __rua_result = true, tag = "err", value = e }
+Ok(v)  -> { true,  v }
+Err(e) -> { false, e }
 ```
+
+第一个数组槽是 `is_ok`，第二个是 payload。boolean tag 与 payload 分离，所以
+`Ok(nil)` 和 `Err(nil)` 仍可区分，同时避免为每个 Result 分配命名 hash 字段。
 
 只有显式 extern/FFI adapter 可以把 tagged Result 转换成宿主约定。`Option<T>` 当前使用 `T | nil`，因此 `Some(nil)` 不属于可表达状态。
 
@@ -37,6 +40,33 @@ fn load(path: String) -> Result<String, String> {
 let config = load("app.rua")?;
 ```
 
+常用脚本表达式保持静态类型，并生成显式 Lua 控制流：
+
+```rua
+struct Profile {
+    city: String,
+}
+
+fn choose_city(profile: Option<Profile>, cities: Vec<String>) -> String {
+    let mut attempts = 0;
+    attempts += 1;
+
+    let city = profile?.city ?? "unknown";
+    let aliases: HashMap<String, String> = #{ "sh": "Shanghai" };
+    let supported = city in cities && "sh" in aliases;
+
+    loop {
+        if supported { break city; }
+        break "fallback";
+    }
+}
+```
+
+复合赋值的复杂左值只求值一次；`??` 仅在 `None` 时求值右侧，因而不会把
+`Some(false)` 当成缺省；`?.` 的 method 参数也惰性求值。`in` 支持 `Vec`、
+`HashMap` key、`String` 子串和 `Iter`/range，`#{...}` 构造有统一键值类型的
+`HashMap`。`loop` 可用 `break value` 返回值，`while`/`for` 只允许裸 `break`。
+
 其他核心映射：
 
 | Rua | Lua 运行时表示 |
@@ -45,7 +75,7 @@ let config = load("app.rua")?;
 | `bool` | boolean |
 | `String` | string |
 | `Option<T>` | `T` / `nil` |
-| `Result<T, E>` | 带 `tag` 与 `value` 的 runtime value |
+| `Result<T, E>` | `{ is_ok, payload }` tagged array table |
 | `Vec<T>` | 0-based table，加 `n` 长度 |
 | `HashMap<K, V>` | runtime map table |
 | `struct` | table + class metatable |
@@ -53,16 +83,24 @@ let config = load("app.rua")?;
 
 ## 模块
 
-Rua 支持 inline module、文件 module、`.ruai` declaration 和可见性检查。
+Rua 的模块身份直接来自文件路径，不需要也不接受源码级 `mod` 声明。以
+`src/main.rua` 为入口时，`src` 是 source root：
 
 ```rua
-mod math;
 use math::add;
 
 let total = add(3, 4);
 ```
 
-文件 module 按确定顺序查找：`name.rua`、`name/mod.rua`、`name.ruai`、`name/mod.ruai`。同时存在多个候选会报歧义，不会静默选取。`.ruai` 允许空 `{}` 作为 function/method declaration body，但任何非空实现或顶层 executable statement 都以 `E0108` 拒绝。解析阶段为 module、定义、local、type、trait、variant 和 use site 分配稳定 identity；Lua codegen 只消费这些解析结果。
+`src/math.rua` 和 `src/math/mod.rua` 都映射到 `math`，但不能同时存在；
+`src/domain/order.rua` 映射到 `domain::order`，中间目录自动形成 namespace。
+`.ruai` 使用同一规则。workspace `.rua` 优先于同路径 declaration 和外部库，
+同一优先级的重复映射会报歧义，不会静默选取。
+
+`.ruai` 允许空 `{}` 作为 function/method declaration body，但任何非空实现或
+顶层 executable statement 都以 `E0108` 拒绝。compiler 与 LSP 共享
+`rua-project` 的路径映射；解析阶段为 module、定义、local、type、trait、variant
+和 use site 分配稳定 identity，Lua codegen 只消费这些结果。
 
 ## Compiler
 
@@ -71,10 +109,28 @@ CLI：
 ```bash
 ruac build src/main.rua                         # 写入 src/main.lua
 ruac build src/main.rua -o dist/app.lua
+ruac build src/main.rua --emit modules --out-dir dist \
+  --lua-path dist --lua-path /path/to/rua_std
 ruac check src/main.rua
 ruac build src/main.rua --std-path ./path/to/standard-library
 ruac build src/main.rua -c ./path/to/.ruarc.toml
 ```
+
+默认 `--emit bundle` 把完整程序写入一个 Lua 文件。`--emit modules` 为每个
+resolved runtime module 生成一个文件：入口保留 root 文件名，
+`domain::order` 写入 `domain/order.lua`。每个输出在顶部使用普通 Lua
+`require("domain.order")` 加载依赖，并直接返回自己的 module table。可用重复的
+`--lua-path <dir>` 把搜索目录写入入口的 `package.path`：
+
+```bash
+lua dist/main.lua
+```
+
+也可通过 `LUA_PATH` 设置运行环境，或在 `.ruarc.toml` 的
+`runtime.lua_path` 中持久配置目录。modules 模式遵循 Lua `require` 的深度优先
+初始化顺序；无法用普通 `require` 安全表示的循环模块依赖会在编译期报错，此类工程
+可消除依赖环或继续使用 bundle。`--out-dir` 必须显式指定；编译器覆盖本次生成的
+文件，但不删除目录中的其他内容。
 
 `ruac` 默认从输入文件目录向上查找最近的 `.ruarc.toml`。项目配置与 LSP
 共享，字段使用 snake_case：
@@ -83,16 +139,36 @@ ruac build src/main.rua -c ./path/to/.ruarc.toml
 [workspace]
 library = ["./types", "../host/moon.ruai"]
 
+[[workspace.lua_library]]
+root = "../moon_rs/lualib"
+
 [workspace.library_mounts]
 host = "../host/actual-name.ruai"
 
 [runtime]
 std_path = "./std"
+lua_path = ["./dist", "/opt/rua/lib"]
 ```
 
-`workspace.library` 按声明文件名解析 module；只有物理文件名与逻辑 module
-名不同时才需要 `workspace.library_mounts`。命令行 `--library`、
-`--library-mount name=path` 和 `--std-path` 覆盖项目配置。
+普通 Lua 库优先使用 `workspace.lua_library`。共置目录用 `root`；声明和
+runtime 分离时写一次 root pair：
+
+```toml
+[[workspace.lua_library]]
+declaration_root = "../moon_rs/ruai"
+runtime_root = "../moon_rs/lualib"
+```
+
+声明按相对路径自动映射：`moon/http/client.ruai` 对应 Rua
+`moon::http::client` 和 Lua `require("moon.http.client")`。每个文件型 `.ruai`
+是独立 Lua module。compiler 与 LSP 都递归索引 declaration root；runtime root
+自动加入生成入口的 `package.path`，因此无需逐模块配置或源码声明。
+
+`workspace.library` 和 `library_mounts` 保留给 declaration-only 路径及特殊逻辑
+名称映射。命令行 `--library`、
+`--library-mount name=path`、`--std-path` 和可重复使用的
+`--lua-path dir` 可以覆盖或补充项目配置。`lua_path` 设置 bundle/modules 生成
+入口的 Lua 运行时搜索目录，不参与 Rua/`.ruai` 的编译期 module 解析。
 
 库 API：
 
@@ -105,6 +181,7 @@ let artifact = ruac::compile_project_with_diagnostics(
     &project_spec,
     &source_provider,
 )?;
+let modules = ruac::compile_project_modules_artifact(&project_spec, &source_provider)?;
 ```
 
 `compile_project_with_diagnostics` 是完整 host 集成入口，成功值包含 Lua 与 generated-to-Rua source map，失败值 `CompileFailure` 包含 diagnostic code、文件和 byte range。`compile_str`、`compile_path`、`compile_project` 与 artifact convenience API 同样返回结构化失败；只有 CLI 负责渲染展示文字。默认入口使用内嵌标准库；`compile_*_with_std` 和 `--std-path` 显式加载包含 `std.toml` 的目录。`compile_path_artifact` 为文件系统 host 保留 generated-to-Rua source map。`ProjectSpec` 提供稳定 `FileId`、逻辑路径、source root 和 library mount；`SourceProvider` 提供源码。

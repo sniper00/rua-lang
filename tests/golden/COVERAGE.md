@@ -15,11 +15,11 @@ Status meanings:
 
 Current inventory:
 
-- Compile pass: 47 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
+- Compile pass: 44 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
 - Compile fail: 44 `.rua` / `.diag.golden` pairs plus shared code/file/range/argument manifests.
 - Phase 4A: 13 compile-pass and 8 compile-fail closure/iterator pairs.
-- Parser/range: 16 accept, 6 reject with dual-parser diagnostic snapshots, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.
-- Formatter: 10 repository-level input/output pairs with parse, lossless, token-preservation, idempotence, and `check_format` invariants.
+- Parser/range: 17 accept, 7 reject with dual-parser diagnostic snapshots, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.
+- Formatter: 11 repository-level input/output pairs with parse, lossless, token-preservation, idempotence, and `check_format` invariants.
 - File modules: one nested multi-file compile/output/runtime golden.
 - `.ruai`: 5 compiler pass, 2 compiler fail, and 4 IDE snapshots.
 - General IDE: one active native closure/iterator snapshot plus exact native
@@ -28,22 +28,25 @@ Current inventory:
 | Feature | Compile pass | Compile fail | Parser/range | IDE oracle | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Lexing, comments, literals | Partial | No | Yes | Partial | `comments_whitespace_stability`; parser comments, escapes, numeric, keyword-boundary cases. No dedicated lexical compile-fail matrix. |
-| Expressions and operators | Yes | Yes | Yes | N/A | `expr_*`, binary/unary type errors, call/field/index/path ranges. |
-| Bindings, mutability, assignment | Yes | Partial | Partial | Yes | Let annotation mismatch is covered; assignment-target/type diagnostics and a dedicated let range snapshot are missing. |
-| Blocks, if, while, loop | Yes | Yes | Yes | Yes | Includes if-expression lowering, break/continue, non-bool conditions, block ambiguity, and fast diagnostics. |
+| Expressions and operators | Yes | Yes | Yes | Yes | `expr_*`, binary/unary errors plus exact native inference for the script operators. |
+| Bindings, mutability, assignment | Yes | Partial | Yes | Yes | Compound assignment codegen and single-evaluation runtime behavior are covered; invalid assignment targets still lack a shared compile-fail. |
+| Blocks, if, while, loop | Yes | Yes | Yes | Yes | Includes loop values, compatible `break value`, rejection in `while`, break/continue and fast diagnostics. |
+| Option `??` and `?.` | Yes | Yes | Yes | Yes | False-safe/lazy runtime execution plus optional member completion, hover, goto and inference. |
+| Membership `in` | Yes | Yes | Yes | Yes | Vec/map/String/range execution, element mismatch, precedence and native bool inference. |
+| Typed map literal `#{...}` | Yes | Yes | Yes | Yes | Capacity-aware codegen, mixed-value rejection, formatting and native key/value inference. |
 | Functions, returns, recursion | Yes | Yes | Yes | Yes | Zero/typed args, explicit/tail returns, recursion, arity/type errors, fn ranges, hover and symbols. |
 | Struct declarations and literals | Yes | Yes | Yes | Yes | Fields, literals, methods, missing/extra fields, struct ranges, member completion and symbols. |
 | Enums, match, patterns | Yes | Yes | Yes | Yes | All variant forms, match bindings, constructor/pattern shape errors, match-arm ranges, enum symbols. |
-| `Option<T>` | Yes | Yes | Partial | No | `Some`/`None` and constructor arity covered; no dedicated IDE snapshot or Option-specific parser range. |
-| `Result<T, E>` and `?` | Yes | Partial | Partial | No | `Ok`/`Err` and successful `?` lowering covered; invalid `?` receiver/error propagation mismatch diagnostics are missing. |
-| `Vec<T>` | Yes | No | Yes | No | Basic codegen and index/type syntax covered; no shared element-mismatch diagnostic or Vec completion snapshot. |
-| `HashMap<K, V>` | Yes | No | No | No | Basic codegen only; key/value mismatch goldens and dedicated parser/IDE snapshots are missing. |
+| `Option<T>` | Yes | Yes | Yes | Yes | Constructors, `?`, `??`, `?.`, `expect`, declaration navigation and optional member cursor queries. |
+| `Result<T, E>` and `?` | Yes | Partial | Partial | Yes | ABI v2 array tag, `Ok(nil)`/`Err(nil)`, `expect`, methods, map, storage, FFI, hover/goto and successful `?` lowering are covered; error propagation mismatch diagnostics remain incomplete. |
+| `Vec<T>` | Yes | Yes | Yes | Yes | Construction/indexing plus `in` execution, mismatch rejection and inference. |
+| `HashMap<K, V>` | Yes | Yes | Yes | Yes | Constructor/method and typed literal codegen, key/value inference, `in` and mismatch rejection. |
 | Std macros and runtime calls | Yes | No | Partial | No | `println!`, `format!`, and macro nodes appear in range fixtures; misuse diagnostics are missing. |
 | Numeric ranges and `for` | Yes | No | Yes | Partial | Both range forms have compiler Lua coverage and the range operator has a semantic-token snapshot; invalid-bound diagnostics and dedicated `for` IDE coverage are missing. |
 | Closures | Yes | Yes | Yes | Yes | Expression/typed/block closures, read/fused mutable capture, inference diagnostics, ranges, cursor queries, and semantic tokens are covered. |
 | Iterator adapters and fusion | Yes | Yes | Yes | Yes | All Phase 4A sources/adapters/consumers are type/codegen tested; exact Lua goldens enforce fused loops and the IDE snapshot covers item types and adapter tokens. |
-| Inline modules and `use` | Yes | Yes | Yes | Yes | Inline/nested modules, aliases/grouped imports, private imports, use ranges, module-path completion and symbols. |
-| File modules (`.rua`) | Yes | Yes | No | Yes | Nested and sibling file modules, module-local imports, full generated Lua, runtime execution, source maps, missing-module rejection and IDE queries. |
+| Imports and path modules | Yes | Yes | Yes | Yes | `use`, aliases/grouping, path-derived namespaces and explicit rejection of legacy `mod` syntax. |
+| File modules (`.rua`) | Yes | Yes | Yes | Yes | Nested/sibling files, bundle/modules output, runtime execution, source maps and IDE queries. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
 | Extern Lua ABI and variadics | Yes | Partial | Yes | Partial | Plain extern and explicit `lua-result` runtime behavior, parser ranges and `.ruai` hover exist; invalid adapter diagnostics are unit-tested rather than shared goldens. |
 | Generic functions and types | Yes | Partial | Yes | No | Identity and generic ADTs covered; rejection coverage concentrates on bounds rather than inference conflicts and no generic-specific IDE snapshot exists. |
@@ -60,15 +63,13 @@ Current inventory:
 | Document symbols and docs | N/A | N/A | N/A | Yes | Struct/enum/trait/impl/module hierarchy, ranges, signatures and leading docs. |
 | Semantic tokens | N/A | N/A | N/A | Yes | Closure parameter definitions/uses, adapter methods, and range operators have an exact protocol-neutral snapshot plus LSP conversion tests. |
 | Inlay hints | N/A | N/A | N/A | Yes | Exact analysis/LSP tests cover primitive, aggregate, tuple, branch and clickable type hints. |
-| Formatter/comment stability | Yes | N/A | Yes | N/A | Shared comment/whitespace compile golden, parser trivia corpus, and 10 repository-level formatter goldens. |
+| Formatter/comment stability | Yes | N/A | Yes | N/A | Shared comment/whitespace compile golden, parser trivia corpus, and 11 repository-level formatter goldens. |
 | Lua source maps and trace | Yes | No | N/A | N/A | A cross-file golden locks generated slices to exact Rua `FileId` and byte ranges; trace rendering remains tracked separately. |
 
 ## Known Gaps
 
 - Range/`for` syntax and Lua lowering are covered; invalid-bound behavior is not
   protected by a repository golden.
-- `Vec` and `HashMap` mismatch behavior has unit tests but no shared
-  compile-fail oracle.
 - External `.ruai` roots are LSP configuration rather than compiler inputs;
   exact multi-root, mount, reload and watcher protocol tests own this contract.
 - Conservative name/call checking intentionally leaves unresolved external

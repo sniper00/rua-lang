@@ -280,9 +280,9 @@ impl Harness {
         )
     }));
     assert!(
-        statements
+        expressions
             .iter()
-            .any(|stmt| matches!(stmt, Statement::Loop { .. }))
+            .any(|expr| matches!(expr, Expr::Loop { .. }))
     );
     assert!(
         statements
@@ -292,7 +292,7 @@ impl Harness {
     assert!(
         statements
             .iter()
-            .any(|stmt| matches!(stmt, Statement::Break))
+            .any(|stmt| matches!(stmt, Statement::Break { .. }))
     );
     assert!(
         statements

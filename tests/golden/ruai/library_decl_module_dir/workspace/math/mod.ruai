@@ -1,5 +1,0 @@
-pub mod constants {
-    extern "lua" {
-        pub fn answer() -> i64;
-    }
-}

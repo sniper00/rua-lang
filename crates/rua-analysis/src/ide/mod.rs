@@ -7,7 +7,7 @@ mod completion;
 mod contract;
 mod symbol;
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use rua_core::StdSymbolId;
 use rua_syntax::{Parse, ast::SourceFile};
@@ -17,8 +17,7 @@ use crate::{
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, DefId, DefKind, DefMap,
         Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution, MemberTarget,
-        StdLibraryIndex, StdType, Ty,
-        module_resolution::{resolve_module_file, resolve_module_file_in_project_at},
+        StdLibraryIndex, StdMemberKind, StdType, Ty,
     },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
@@ -34,7 +33,7 @@ pub use contract::{
     NavigationTarget, ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind,
     ReferenceResult, RenameError, RenameTarget, SemanticToken, SemanticTokenKind,
     SemanticTokenModifiers, SignatureHelpInfo, SourceChange, TextEdit, TextRange,
-    TypeHierarchyItem, TypeHint,
+    TypeHierarchyItem, TypeHint, TypeHintLabelPart, TypeHintTarget, TypeHintTooltip,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
@@ -111,9 +110,25 @@ fn builtin_source_definition(
 
 fn builtin_hover_text(index: &MemberIndex, member: &BuiltinMemberAt) -> String {
     let resolution = &member.resolution;
-    let name = index
-        .standard_member(member.id)
-        .map_or("<std>", |member| member.name());
+    let standard_member = index.standard_member(member.id);
+    let name = standard_member.map_or("<std>", |member| member.name());
+    if standard_member.is_some_and(|member| member.kind() == StdMemberKind::Variant) {
+        return resolution.callable().map_or_else(
+            || name.to_string(),
+            |callable| {
+                format!(
+                    "{}({})",
+                    name,
+                    callable
+                        .params()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        );
+    }
     if let Some(callable) = resolution.callable() {
         let mut params = callable
             .params()
@@ -215,6 +230,40 @@ impl Analysis {
         None
     }
 
+    /// Resolve the member reference under the cursor through body inference.
+    ///
+    /// This covers both `value.method` and associated paths such as
+    /// `Type::new`. The latter is owned by an `impl`, so it cannot be found by
+    /// walking the type definition's ordinary children.
+    fn definition_member_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<(Definition, FileRange)> {
+        let owner = completion::innermost_body_owner(
+            &query.def_map,
+            position.position,
+            position.position.offset,
+        )?;
+        let source_map = self.db.body_source_map(owner.id())?;
+        let inference = self.db.infer(owner.id())?;
+        for source_id in source_map.ids_at(position.position.file_id, position.position.offset) {
+            let BodySourceId::NameRef(name_ref) = source_id else {
+                continue;
+            };
+            let Some(resolution) = inference.member_resolution(name_ref) else {
+                continue;
+            };
+            let MemberTarget::Definition(definition_id) = resolution.target() else {
+                continue;
+            };
+            let definition = query.def_map.definition(definition_id)?.clone();
+            let range = source_map.name_ref_range(name_ref)?;
+            return Some((definition, range));
+        }
+        None
+    }
+
     fn builtin_type_at(
         &self,
         position: ProjectPosition,
@@ -278,27 +327,6 @@ impl Analysis {
 
     pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
         self.db.item_tree(file_id)
-    }
-
-    pub fn resolve_module(&self, from_file: FileId, name: &str) -> Option<FileId> {
-        resolve_module_file(&self.db, from_file, name)
-    }
-
-    pub fn resolve_module_in_project(
-        &self,
-        project_id: ProjectId,
-        from_file: FileId,
-        name: &str,
-    ) -> Option<FileId> {
-        let map = self.db.project_def_map(project_id)?;
-        let module = map.module(map.module_for_file(from_file)?)?;
-        resolve_module_file_in_project_at(
-            &self.db,
-            project_id,
-            from_file,
-            module.resolution_directory()?,
-            name,
-        )
     }
 
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
@@ -601,15 +629,15 @@ impl Analysis {
                     continue;
                 }
 
-                let mut hint = TypeHint::new(
+                let hint = TypeHint::new(
                     FilePosition::new(file.file_id, range.range.end()),
                     ty.to_string(),
-                );
-                if let Ty::Named(named) = ty
-                    && let Some(target) = query.def_map.definition(named.definition())
-                {
-                    hint = hint.with_target(FileRange::new(target.file_id(), target.name_range()));
-                }
+                )
+                .with_label_parts(type_hint_label_parts(
+                    ty,
+                    &query.def_map,
+                    &query.member_index,
+                ));
                 hints.push(hint);
             }
         }
@@ -633,9 +661,26 @@ impl Analysis {
                 member.range,
                 builtin_hover_text(&query.member_index, &member),
             );
+            if let Some(context) = builtin_member_context(&query.member_index, member.id) {
+                hover = hover.with_context(context);
+            }
             if let Some(documentation) = builtin_source_definition(&query.member_index, member.id)
                 .and_then(|source| source.documentation)
             {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
+        }
+
+        if let Some((definition, range)) = self.definition_member_at(position, &query) {
+            let signature = item_hover_text(&definition, &query.member_index, &query.def_map);
+            let mut hover = HoverResult::new(range, signature);
+            if let Some(context) =
+                definition_hover_context(&query.def_map, &query.member_index, &definition)
+            {
+                hover = hover.with_context(context);
+            }
+            if let Some(documentation) = definition.documentation() {
                 hover = hover.with_documentation(documentation);
             }
             return Some(hover);
@@ -650,11 +695,16 @@ impl Analysis {
         // 2. Try item/definition hover.
         let def = semantics.find_def_at(position.position);
         if let Some(definition) = def {
-            let signature = item_hover_text(&definition, &query.member_index);
+            let signature = item_hover_text(&definition, &query.member_index, &query.def_map);
             let mut hover = HoverResult::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
                 signature,
             );
+            if let Some(context) =
+                definition_hover_context(&query.def_map, &query.member_index, &definition)
+            {
+                hover = hover.with_context(context);
+            }
             if let Some(documentation) = definition.documentation() {
                 hover = hover.with_documentation(documentation);
             }
@@ -667,10 +717,8 @@ impl Analysis {
         {
             let owner_def = target.owner().owner();
             if let Some(inference) = self.db.infer(owner_def) {
-                let ty = inference
-                    .type_of_binding(target.binding())
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| "?".to_string());
+                let inferred_ty = inference.type_of_binding(target.binding());
+                let ty = inferred_ty.map_or_else(|| "?".to_string(), ToString::to_string);
                 if let Some(body) = self.db.body(owner_def) {
                     let name = body
                         .binding(target.binding())
@@ -679,7 +727,13 @@ impl Analysis {
                     if let Some(source_map) = self.db.body_source_map(owner_def)
                         && let Some(file_range) = source_map.binding_range(target.binding())
                     {
-                        return Some(HoverResult::new(file_range, format!("let {name}: {ty}")));
+                        let mut hover = HoverResult::new(file_range, format!("let {name}: {ty}"));
+                        if let Some(context) =
+                            inferred_ty.and_then(|ty| type_hover_context(&query.def_map, ty))
+                        {
+                            hover = hover.with_context(context);
+                        }
+                        return Some(hover);
                     }
                 }
             }
@@ -690,6 +744,7 @@ impl Analysis {
                 standard_type.range,
                 builtin_type_hover_text(&standard_type.standard_type),
             );
+            hover = hover.with_context(standard_type_context(&standard_type.standard_type));
             if let Some(documentation) = standard_type.standard_type.documentation() {
                 hover = hover.with_documentation(documentation);
             }
@@ -741,9 +796,15 @@ impl Analysis {
                 HoverResult::new(token_range, format!("{}: {}", field_name, resolution.ty()));
             if let crate::hir::MemberTarget::Definition(id) = resolution.target()
                 && let Some(definition) = query.def_map.definition(id)
-                && let Some(documentation) = definition.documentation()
             {
-                hover = hover.with_documentation(documentation);
+                if let Some(context) =
+                    definition_hover_context(&query.def_map, member_index, definition)
+                {
+                    hover = hover.with_context(context);
+                }
+                if let Some(documentation) = definition.documentation() {
+                    hover = hover.with_documentation(documentation);
+                }
             }
             return Some(hover);
         }
@@ -774,9 +835,15 @@ impl Analysis {
                 HoverResult::new(token_range, format!("fn {}({pts}) -> {ret}", field_name));
             if let crate::hir::MemberTarget::Definition(id) = resolution.target()
                 && let Some(definition) = query.def_map.definition(id)
-                && let Some(documentation) = definition.documentation()
             {
-                hover = hover.with_documentation(documentation);
+                if let Some(context) =
+                    definition_hover_context(&query.def_map, member_index, definition)
+                {
+                    hover = hover.with_context(context);
+                }
+                if let Some(documentation) = definition.documentation() {
+                    hover = hover.with_documentation(documentation);
+                }
             }
             return Some(hover);
         }
@@ -789,12 +856,21 @@ impl Analysis {
         let query = self.project_query_data(position)?;
         let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
-        // 1. Try member access — resolve field/method to its definition.
+        // 1. Prefer the stable member identity recorded by inference. This
+        // includes associated functions declared in `impl` blocks.
+        if let Some((definition, _)) = self.definition_member_at(position, &query) {
+            return Some(NavigationTarget::new(
+                FileRange::new(definition.file_id(), definition.name_range()),
+                None,
+            ));
+        }
+
+        // 2. Try member access — resolve field/method to its definition.
         if let Some(target) = self.member_goto_definition(position, &query) {
             return Some(target);
         }
 
-        // 2. Try item definition.
+        // 3. Try item definition.
         if let Some(definition) = semantics.find_def_at(position.position) {
             return Some(NavigationTarget::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
@@ -802,7 +878,7 @@ impl Analysis {
             ));
         }
 
-        // 3. Try local definition.
+        // 4. Try local definition.
         if let Some(local_range) = semantics.local_definition_at(position.position) {
             return Some(NavigationTarget::new(local_range, None));
         }
@@ -880,9 +956,12 @@ impl Analysis {
         };
 
         // Must be preceded by `.`
-        if completion::previous_significant(&token)
-            .is_none_or(|t| t.kind() != rua_syntax::SyntaxKind::Dot)
-        {
+        if completion::previous_significant(&token).is_none_or(|t| {
+            !matches!(
+                t.kind(),
+                rua_syntax::SyntaxKind::Dot | rua_syntax::SyntaxKind::QuestionDot
+            )
+        }) {
             return None;
         }
         let field_name = if token.kind() == rua_syntax::SyntaxKind::Ident {
@@ -902,6 +981,9 @@ impl Analysis {
         position: ProjectPosition,
         query: &ProjectQueryData,
     ) -> Option<Definition> {
+        if let Some((definition, _)) = self.definition_member_at(position, query) {
+            return Some(definition);
+        }
         if let Some((receiver_ty, name, _)) = self.resolve_dot_access(position, &query.def_map) {
             let resolution = query
                 .member_index
@@ -1332,15 +1414,269 @@ impl Analysis {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn item_hover_text(definition: &Definition, member_index: &MemberIndex) -> String {
+fn item_hover_text(
+    definition: &Definition,
+    member_index: &MemberIndex,
+    def_map: &DefMap,
+) -> String {
     // Delegate to the shared signature formatter in the completion module.
     // For Impl blocks (which definition_signature returns None for), show a
     // simple label.
     if definition.kind() == DefKind::Impl {
         return format!("impl {}", definition.name());
     }
+    if definition.kind() == DefKind::Variant
+        && let crate::hir::ItemSignature::Variant(signature) = definition.signature()
+    {
+        return match signature.kind() {
+            crate::hir::VariantKind::Unit => definition.name().to_string(),
+            crate::hir::VariantKind::Tuple => format!(
+                "{}({})",
+                definition.name(),
+                signature
+                    .tuple_types()
+                    .iter()
+                    .map(|ty| ty.syntax().unwrap_or("?"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            crate::hir::VariantKind::Struct => {
+                let fields = def_map
+                    .members(definition.id())
+                    .filter_map(|field| {
+                        let crate::hir::ItemSignature::Field(ty) = field.signature() else {
+                            return None;
+                        };
+                        Some(format!("{}: {}", field.name(), ty.syntax().unwrap_or("?")))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {{ {fields} }}", definition.name())
+            }
+        };
+    }
     completion::definition_signature(member_index, definition)
         .unwrap_or_else(|| definition.name().to_string())
+}
+
+fn type_hint_label_parts(
+    ty: &Ty,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+) -> Vec<TypeHintLabelPart> {
+    let mut parts = Vec::new();
+    push_type_hint_parts(ty, def_map, member_index, &mut parts);
+    parts
+}
+
+fn push_type_hint_parts(
+    ty: &Ty,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    parts: &mut Vec<TypeHintLabelPart>,
+) {
+    match ty {
+        Ty::Primitive(primitive) => {
+            if matches!(primitive, crate::hir::PrimitiveTy::String) {
+                parts.push(standard_type_hint_part(
+                    primitive.name(),
+                    "String",
+                    member_index,
+                ));
+            } else {
+                parts.push(
+                    TypeHintLabelPart::new(primitive.name())
+                        .with_tooltip(TypeHintTooltip::new(primitive.name())),
+                );
+            }
+        }
+        Ty::Named(named) => {
+            let mut part = TypeHintLabelPart::new(named.path());
+            if let Some(definition) = def_map.definition(named.definition()) {
+                let mut tooltip =
+                    TypeHintTooltip::new(item_hover_text(definition, member_index, def_map))
+                        .with_context(qualified_definition_name(def_map, definition));
+                if let Some(documentation) = definition.documentation() {
+                    tooltip = tooltip.with_documentation(documentation);
+                }
+                part = part
+                    .with_tooltip(tooltip)
+                    .with_target(TypeHintTarget::Source(FileRange::new(
+                        definition.file_id(),
+                        definition.name_range(),
+                    )));
+            }
+            parts.push(part);
+            push_type_arguments(named.args().iter(), def_map, member_index, parts);
+        }
+        Ty::GenericParam(parameter) => parts.push(
+            TypeHintLabelPart::new(parameter.name()).with_tooltip(TypeHintTooltip::new(format!(
+                "generic parameter {}",
+                parameter.name()
+            ))),
+        ),
+        Ty::Tuple(items) => {
+            parts.push(TypeHintLabelPart::new("("));
+            push_type_list(items, def_map, member_index, parts);
+            if items.len() == 1 {
+                parts.push(TypeHintLabelPart::new(","));
+            }
+            parts.push(TypeHintLabelPart::new(")"));
+        }
+        Ty::Function(callable) | Ty::Closure(callable) => {
+            parts.push(TypeHintLabelPart::new("fn("));
+            push_type_list(callable.params(), def_map, member_index, parts);
+            parts.push(TypeHintLabelPart::new(") -> "));
+            push_type_hint_parts(callable.return_ty(), def_map, member_index, parts);
+        }
+        Ty::Vec(item) => {
+            parts.push(standard_type_hint_part("Vec", "Vec", member_index));
+            push_type_arguments(std::iter::once(item.as_ref()), def_map, member_index, parts);
+        }
+        Ty::HashMap(key, value) => {
+            parts.push(standard_type_hint_part("HashMap", "HashMap", member_index));
+            push_type_arguments([key.as_ref(), value.as_ref()], def_map, member_index, parts);
+        }
+        Ty::Option(item) => {
+            parts.push(standard_type_hint_part("Option", "Option", member_index));
+            push_type_arguments(std::iter::once(item.as_ref()), def_map, member_index, parts);
+        }
+        Ty::Result(ok, error) => {
+            parts.push(standard_type_hint_part("Result", "Result", member_index));
+            push_type_arguments([ok.as_ref(), error.as_ref()], def_map, member_index, parts);
+        }
+        Ty::Iterator(item) => {
+            parts.push(standard_type_hint_part("Iterator", "Iter", member_index));
+            push_type_arguments(std::iter::once(item.as_ref()), def_map, member_index, parts);
+        }
+        Ty::Unknown => parts.push(TypeHintLabelPart::new("?")),
+        Ty::Never => parts.push(TypeHintLabelPart::new("!")),
+    }
+}
+
+fn push_type_arguments<'a>(
+    arguments: impl IntoIterator<Item = &'a Ty>,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    parts: &mut Vec<TypeHintLabelPart>,
+) {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments.is_empty() {
+        return;
+    }
+    parts.push(TypeHintLabelPart::new("<"));
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            parts.push(TypeHintLabelPart::new(", "));
+        }
+        push_type_hint_parts(argument, def_map, member_index, parts);
+    }
+    parts.push(TypeHintLabelPart::new(">"));
+}
+
+fn push_type_list(
+    types: &[Ty],
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    parts: &mut Vec<TypeHintLabelPart>,
+) {
+    for (index, ty) in types.iter().enumerate() {
+        if index > 0 {
+            parts.push(TypeHintLabelPart::new(", "));
+        }
+        push_type_hint_parts(ty, def_map, member_index, parts);
+    }
+}
+
+fn standard_type_hint_part(
+    label: &str,
+    standard_name: &str,
+    member_index: &MemberIndex,
+) -> TypeHintLabelPart {
+    let Some(standard_type) = member_index.standard_type(standard_name) else {
+        return TypeHintLabelPart::new(label);
+    };
+    let mut tooltip = TypeHintTooltip::new(builtin_type_hover_text(standard_type))
+        .with_context(standard_type_context(standard_type));
+    if let Some(documentation) = standard_type.documentation() {
+        tooltip = tooltip.with_documentation(documentation);
+    }
+    TypeHintLabelPart::new(label)
+        .with_tooltip(tooltip)
+        .with_target(TypeHintTarget::Builtin(BuiltinDefinitionTarget::new(
+            standard_type.source_path(),
+            standard_type.name_range(),
+        )))
+}
+
+fn definition_hover_context(
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    definition: &Definition,
+) -> Option<String> {
+    if definition.kind() == DefKind::Method {
+        let declaring_type = member_index.declaring_type(definition.id())?;
+        let type_definition = named_type_definition(def_map, &declaring_type)?;
+        return Some(qualified_definition_name(def_map, type_definition));
+    }
+    let type_definition = match definition.kind() {
+        DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias => Some(definition),
+        DefKind::Field | DefKind::Variant => {
+            let mut owner = definition.owner().and_then(|id| def_map.definition(id));
+            loop {
+                let current = owner?;
+                if matches!(
+                    current.kind(),
+                    DefKind::Struct | DefKind::Enum | DefKind::Trait
+                ) {
+                    break Some(current);
+                }
+                owner = current.owner().and_then(|id| def_map.definition(id));
+            }
+        }
+        _ => None,
+    }?;
+    Some(qualified_definition_name(def_map, type_definition))
+}
+
+fn type_hover_context(def_map: &DefMap, ty: &Ty) -> Option<String> {
+    named_type_definition(def_map, ty)
+        .map(|definition| qualified_definition_name(def_map, definition))
+}
+
+fn named_type_definition<'a>(def_map: &'a DefMap, ty: &Ty) -> Option<&'a Definition> {
+    let Ty::Named(named) = ty else {
+        return None;
+    };
+    def_map.definition(named.definition())
+}
+
+fn qualified_definition_name(def_map: &DefMap, definition: &Definition) -> String {
+    def_map.module_path(definition.module_id()).map_or_else(
+        || definition.name().to_string(),
+        |module| format!("{module}::{}", definition.name()),
+    )
+}
+
+fn builtin_member_context(index: &MemberIndex, id: StdSymbolId) -> Option<String> {
+    let member = index.standard_member(id)?;
+    Some(standard_context(member.source_path(), member.owner()))
+}
+
+fn standard_type_context(standard_type: &StdType) -> String {
+    standard_context(standard_type.source_path(), standard_type.name())
+}
+
+fn standard_context(source_path: &str, owner: &str) -> String {
+    let module = rua_project::module_path_from_relative_file(Path::new(source_path))
+        .ok()
+        .flatten()
+        .filter(|segments| !segments.is_empty())
+        .map(|segments| segments.join("::"));
+    module.map_or_else(
+        || format!("std::{owner}"),
+        |module| format!("std::{module}::{owner}"),
+    )
 }
 
 fn is_valid_identifier(name: &str) -> bool {
@@ -1514,7 +1850,6 @@ mod tests {
             fn implemented() { let value = 1; }
             impl Value { fn method(&self) { let value = 1; } }
             trait Contract { fn defaulted(&self) { let value = 1; } }
-            mod nested { let value = 1; }
             let top_level = 1;
         "#;
         let mut change = Change::new();
@@ -1531,7 +1866,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(invalid.len(), 5, "{invalid:#?}");
+        assert_eq!(invalid.len(), 4, "{invalid:#?}");
         for diagnostic in invalid {
             assert!(!diagnostic.range().is_empty(), "{diagnostic:#?}");
         }

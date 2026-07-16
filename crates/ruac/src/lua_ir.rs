@@ -41,6 +41,10 @@ pub(crate) enum Expr {
 }
 
 impl Expr {
+    pub(crate) const fn is_statement_call(&self) -> bool {
+        matches!(self, Self::Call { .. } | Self::MethodCall { .. })
+    }
+
     pub(crate) fn name(name: impl Into<String>) -> Self {
         let name = name.into();
         assert!(is_lua_identifier(&name), "invalid Lua identifier `{name}`");
@@ -323,6 +327,10 @@ pub(crate) enum InlineStatement {
 
 impl InlineStatement {
     pub(crate) fn expression(expression: Expr) -> Self {
+        assert!(
+            expression.is_statement_call(),
+            "Lua expression statements must be function calls"
+        );
         Self::Expression(expression)
     }
 
@@ -421,6 +429,10 @@ impl Builder {
     }
 
     pub(crate) fn expression(&mut self, expression: Expr) {
+        assert!(
+            expression.is_statement_call(),
+            "Lua expression statements must be function calls"
+        );
         self.statement(Statement::Expression(expression));
     }
 

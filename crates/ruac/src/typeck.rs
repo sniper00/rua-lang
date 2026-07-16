@@ -212,7 +212,12 @@ fn collect_calls_on_stmt<'a>(name: &str, s: &'a Stmt, out: &mut Vec<(&'a str, &'
             collect_calls_on_expr(name, expr, out);
             collect_calls_on_block(name, body, out);
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(value) => {
+            if let Some(value) = value {
+                collect_calls_on_expr(name, value, out);
+            }
+        }
+        Stmt::Return(None) | Stmt::Continue => {}
     }
 }
 
@@ -246,6 +251,7 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
             }
         }
         ExprKind::Unary { expr, .. } => collect_calls_on_expr(name, expr, out),
+        ExprKind::Loop(body) => collect_calls_on_block(name, body, out),
         ExprKind::Binary { lhs, rhs, .. } => {
             collect_calls_on_expr(name, lhs, out);
             collect_calls_on_expr(name, rhs, out);
@@ -260,6 +266,12 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
         ExprKind::StructLit { fields, .. } => {
             for (_, f) in fields {
                 collect_calls_on_expr(name, f, out);
+            }
+        }
+        ExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                collect_calls_on_expr(name, key, out);
+                collect_calls_on_expr(name, value, out);
             }
         }
         ExprKind::Try { expr } => collect_calls_on_expr(name, expr, out),
@@ -309,7 +321,7 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
             }
         }
         ExprKind::Block(b) => collect_calls_on_block(name, b, out),
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value, .. } => {
             collect_calls_on_expr(name, target, out);
             collect_calls_on_expr(name, value, out);
         }
@@ -359,7 +371,12 @@ fn collect_closure_usage_stmt<'a>(name: &str, stmt: &'a Stmt, usage: &mut Closur
             collect_closure_usage_expr(name, expr, usage);
             collect_closure_usage_block(name, body, usage);
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(value) => {
+            if let Some(value) = value {
+                collect_closure_usage_expr(name, value, usage);
+            }
+        }
+        Stmt::Return(None) | Stmt::Continue => {}
     }
 }
 
@@ -394,6 +411,7 @@ fn collect_closure_usage_expr<'a>(name: &str, expr: &'a Expr, usage: &mut Closur
             ClosureBody::Expr(body) => collect_closure_usage_expr(name, body, usage),
             ClosureBody::Block(body) => collect_closure_usage_block(name, body, usage),
         },
+        ExprKind::Loop(body) => collect_closure_usage_block(name, body, usage),
         ExprKind::Unary { expr, .. } | ExprKind::Try { expr } => {
             collect_closure_usage_expr(name, expr, usage)
         }
@@ -410,6 +428,7 @@ fn collect_closure_usage_expr<'a>(name: &str, expr: &'a Expr, usage: &mut Closur
         | ExprKind::Assign {
             target: lhs,
             value: rhs,
+            ..
         } => {
             collect_closure_usage_expr(name, lhs, usage);
             collect_closure_usage_expr(name, rhs, usage);
@@ -424,6 +443,12 @@ fn collect_closure_usage_expr<'a>(name: &str, expr: &'a Expr, usage: &mut Closur
         ExprKind::StructLit { fields, .. } => {
             for (_, field) in fields {
                 collect_closure_usage_expr(name, field, usage);
+            }
+        }
+        ExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                collect_closure_usage_expr(name, key, usage);
+                collect_closure_usage_expr(name, value, usage);
             }
         }
         ExprKind::Match { scrut, arms } => {
@@ -591,6 +616,15 @@ pub struct TypeInfo {
     /// uses this as a temporary backend gate until fused closure codegen lands.
     first_closure: Option<SourceRange>,
     iter_plans: HashMap<ExprId, IterPlan>,
+    contains: HashMap<ExprId, ContainsKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContainsKind {
+    Vec,
+    Map,
+    String,
+    Iter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,6 +680,10 @@ impl TypeInfo {
 
     pub fn iter_plans(&self) -> impl Iterator<Item = &IterPlan> {
         self.iter_plans.values()
+    }
+
+    pub(crate) fn contains_kind(&self, expression: ExprId) -> Option<ContainsKind> {
+        self.contains.get(&expression).copied()
     }
 
     pub fn pending_iter_codegen(&self) -> Option<SourceRange> {
@@ -742,6 +780,7 @@ pub fn check_resolved_diagnostics(
             result_tries: tc.result_tries,
             first_closure: tc.first_closure,
             iter_plans: tc.iter_plans,
+            contains: tc.contains,
         })
     } else {
         Err(tc.errs)
@@ -771,6 +810,9 @@ struct Tc {
     closure_mutable_capture_allowed: Vec<bool>,
     /// Explicit return expression types for the currently inferred closure.
     closure_returns: Vec<Vec<Ty>>,
+    /// Innermost loop first. `Some` collects values for a `loop` expression;
+    /// `None` marks `while`/`for`, which only accept a bare `break`.
+    loop_breaks: Vec<Option<Vec<(Ty, SourceRange)>>>,
     errs: Vec<Diag>,
     /// Every `i64 / i64` division expression.
     int_divs: std::collections::HashSet<ExprId>,
@@ -788,6 +830,7 @@ struct Tc {
     result_tries: std::collections::HashSet<ExprId>,
     first_closure: Option<SourceRange>,
     iter_plans: HashMap<ExprId, IterPlan>,
+    contains: HashMap<ExprId, ContainsKind>,
 }
 
 impl Tc {
@@ -804,6 +847,7 @@ impl Tc {
             closure_boundaries: Vec::new(),
             closure_mutable_capture_allowed: Vec::new(),
             closure_returns: Vec::new(),
+            loop_breaks: Vec::new(),
             errs: Vec::new(),
             int_divs: std::collections::HashSet::new(),
             int_rems: std::collections::HashSet::new(),
@@ -816,6 +860,7 @@ impl Tc {
             result_tries: std::collections::HashSet::new(),
             first_closure: None,
             iter_plans: HashMap::new(),
+            contains: HashMap::new(),
         };
         tc.collect_identity_declarations(&prog.items, hir.root);
         for (inherited, origin) in hir.method_origins.iter() {
@@ -1235,14 +1280,16 @@ impl Tc {
     }
 
     fn err(&mut self, sp: SourceRange, msg: String) {
-        self.errs.push(Diag::new(
-            rua_core::DiagnosticCode::TypeMismatch,
-            sp.file,
-            sp.start,
-            sp.len,
-            sp.line,
-            msg,
-        ));
+        self.err_with_code(rua_core::DiagnosticCode::TypeMismatch, sp, msg);
+    }
+
+    fn err_with_code(&mut self, code: rua_core::DiagnosticCode, sp: SourceRange, msg: String) {
+        self.errs
+            .push(Diag::new(code, sp.file, sp.start, sp.len, sp.line, msg));
+    }
+
+    fn invalid_binary(&mut self, sp: SourceRange, msg: String) {
+        self.err_with_code(rua_core::DiagnosticCode::TypeInvalidBinary, sp, msg);
     }
 
     // --- driver ------------------------------------------------------------
@@ -1441,10 +1488,14 @@ impl Tc {
             Stmt::While { cond, body } => {
                 let c = self.infer(cond);
                 self.expect_bool(&c, cond.span, "`while` condition");
+                self.loop_breaks.push(None);
                 self.block(body);
+                self.loop_breaks.pop();
             }
             Stmt::Loop { body } => {
+                self.loop_breaks.push(Some(Vec::new()));
                 self.block(body);
+                self.loop_breaks.pop();
             }
             Stmt::For {
                 var, iter, body, ..
@@ -1484,17 +1535,35 @@ impl Tc {
                 };
                 self.push();
                 self.bind(var, elem);
+                self.loop_breaks.push(None);
                 self.block(body);
+                self.loop_breaks.pop();
                 self.pop();
             }
             Stmt::WhileLet { pat, expr, body } => {
                 let scrut = self.infer(expr);
                 self.push();
                 self.bind_pattern(pat, &scrut);
+                self.loop_breaks.push(None);
                 self.block(body);
+                self.loop_breaks.pop();
                 self.pop();
             }
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break(value) => {
+                let inferred = value.as_ref().map(|value| (self.infer(value), value.span));
+                match (self.loop_breaks.last_mut(), inferred) {
+                    (Some(Some(values)), Some(value)) => values.push(value),
+                    (Some(Some(values)), None) => values.push((Ty::Unit, SourceRange::EMPTY)),
+                    (Some(None), Some((_, span))) => {
+                        self.err(
+                            span,
+                            "`break` with a value is only allowed in `loop`".to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Stmt::Continue => {}
         }
     }
 
@@ -2150,6 +2219,18 @@ impl Tc {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.infer(lhs);
                 let r = self.infer(rhs);
+                if *op == BinOp::Contains {
+                    let kind = match &r {
+                        Ty::Vec(_) => Some(ContainsKind::Vec),
+                        Ty::Map(_, _) => Some(ContainsKind::Map),
+                        Ty::Str => Some(ContainsKind::String),
+                        Ty::Iter(_, _) => Some(ContainsKind::Iter),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        self.contains.insert(e.id, kind);
+                    }
+                }
                 if matches!(l, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Str)
                     && matches!(r, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Str)
                 {
@@ -2170,132 +2251,221 @@ impl Tc {
                 }
                 self.infer_binary(*op, &l, &r, sp)
             }
+            ExprKind::Loop(body) => {
+                self.loop_breaks.push(Some(Vec::new()));
+                self.block(body);
+                let values = self.loop_breaks.pop().flatten().unwrap_or_default();
+                let mut result = Ty::Unknown;
+                for (value, value_span) in values {
+                    if matches!(result, Ty::Unknown) {
+                        result = value;
+                    } else if !compatible(&result, &value) {
+                        self.err(
+                            if value_span == SourceRange::EMPTY {
+                                sp
+                            } else {
+                                value_span
+                            },
+                            format!(
+                                "incompatible `break` value: expected `{}`, found `{}`",
+                                result.name(),
+                                value.name()
+                            ),
+                        );
+                        result = Ty::Unknown;
+                    } else {
+                        result = join(&result, &value);
+                    }
+                }
+                result
+            }
             ExprKind::Call { callee, args } => self.infer_call(callee, args),
             ExprKind::MethodCall {
                 recv,
                 method,
+                optional,
                 type_args,
                 args,
                 ..
             } => {
-                let rt = self.infer(recv);
-                let standard_method = self.standard_method_definition(&rt, method);
-                if let Some(definition) = standard_method {
-                    self.standard_methods.insert(e.id, definition);
-                    if self.hir.language_item(definition)
-                        == Some(crate::builtins::LanguageItem::OptionMap)
+                let receiver_ty = self.infer(recv);
+                let (rt, optional_chain) = if *optional {
+                    match receiver_ty {
+                        Ty::Option(item) => (*item, true),
+                        Ty::Unknown => (Ty::Unknown, true),
+                        other => {
+                            self.err(
+                                recv.span,
+                                format!(
+                                    "optional chaining requires `Option`, found `{}`",
+                                    other.name()
+                                ),
+                            );
+                            (Ty::Unknown, true)
+                        }
+                    }
+                } else {
+                    (receiver_ty, false)
+                };
+                let result = (|| {
+                    let standard_method = self.standard_method_definition(&rt, method);
+                    if let Some(definition) = standard_method {
+                        self.standard_methods.insert(e.id, definition);
+                        if self.hir.language_item(definition)
+                            == Some(crate::builtins::LanguageItem::OptionMap)
+                        {
+                            self.option_maps.insert(e.id);
+                        }
+                    }
+                    let arg_tys = self.infer_method_args(&rt, method, args);
+                    if let Ty::Named {
+                        def: owner,
+                        name: type_name,
+                    } = &rt
+                        && let Some(&definition) =
+                            self.hir.associated_items.get(&(*owner, method.clone()))
+                        && let Some(signature) = self.method_sigs.get(&definition)
                     {
-                        self.option_maps.insert(e.id);
-                    }
-                }
-                let arg_tys = self.infer_method_args(&rt, method, args);
-                if let Ty::Named {
-                    def: owner,
-                    name: type_name,
-                } = &rt
-                    && let Some(&definition) =
-                        self.hir.associated_items.get(&(*owner, method.clone()))
-                    && let Some(signature) = self.method_sigs.get(&definition)
-                {
-                    self.user_methods
-                        .insert(e.id, UserMethodDispatch::Static(definition));
-                    let params = signature.params.clone();
-                    let ret = signature.ret.clone();
-                    let generics = signature.generics.clone();
-                    let generic_bounds = signature.generic_bounds.clone();
-                    self.check_method_call(type_name, method, &params, &arg_tys, args, sp);
-                    if !generics.is_empty() {
-                        let mut substitution = HashMap::new();
-                        for (parameter, argument) in params.iter().zip(arg_tys.iter()) {
-                            unify_generic(parameter, argument, &mut substitution);
+                        self.user_methods
+                            .insert(e.id, UserMethodDispatch::Static(definition));
+                        let params = signature.params.clone();
+                        let ret = signature.ret.clone();
+                        let generics = signature.generics.clone();
+                        let generic_bounds = signature.generic_bounds.clone();
+                        self.check_method_call(type_name, method, &params, &arg_tys, args, sp);
+                        if !generics.is_empty() {
+                            let mut substitution = HashMap::new();
+                            for (parameter, argument) in params.iter().zip(arg_tys.iter()) {
+                                unify_generic(parameter, argument, &mut substitution);
+                            }
+                            let display = format!("{}::{}", type_name, method);
+                            self.check_bound_satisfaction(
+                                &display,
+                                &generics,
+                                &generic_bounds,
+                                &substitution,
+                                sp,
+                            );
+                            return subst_ty(&ret, &substitution);
                         }
-                        let display = format!("{}::{}", type_name, method);
-                        self.check_bound_satisfaction(
-                            &display,
-                            &generics,
-                            &generic_bounds,
-                            &substitution,
+                        return ret;
+                    }
+                    if let Ty::Trait {
+                        def: trait_id,
+                        name: trait_name,
+                    } = &rt
+                        && let Some(&definition) =
+                            self.hir.trait_items.get(&(*trait_id, method.clone()))
+                        && let Some(signature) = self.method_sigs.get(&definition)
+                    {
+                        self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
+                        let params = signature.params.clone();
+                        let ret = signature.ret.clone();
+                        self.check_method_call(trait_name, method, &params, &arg_tys, args, sp);
+                        return ret;
+                    }
+                    // Receiver typed as a generic parameter: resolve the method via
+                    // its trait bounds. If some bound trait declares the method, use
+                    // that signature; otherwise stay silent (Unknown).
+                    if let Ty::Generic { id, .. } = &rt
+                        && let Some((tname, signature)) = self.resolve_generic_method(*id, method)
+                    {
+                        self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
+                        self.check_method_call(
+                            &tname,
+                            method,
+                            &signature.params,
+                            &arg_tys,
+                            args,
                             sp,
                         );
-                        return subst_ty(&ret, &substitution);
-                    }
-                    return ret;
-                }
-                if let Ty::Trait {
-                    def: trait_id,
-                    name: trait_name,
-                } = &rt
-                    && let Some(&definition) =
-                        self.hir.trait_items.get(&(*trait_id, method.clone()))
-                    && let Some(signature) = self.method_sigs.get(&definition)
-                {
-                    self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
-                    let params = signature.params.clone();
-                    let ret = signature.ret.clone();
-                    self.check_method_call(trait_name, method, &params, &arg_tys, args, sp);
-                    return ret;
-                }
-                // Receiver typed as a generic parameter: resolve the method via
-                // its trait bounds. If some bound trait declares the method, use
-                // that signature; otherwise stay silent (Unknown).
-                if let Ty::Generic { id, .. } = &rt
-                    && let Some((tname, signature)) = self.resolve_generic_method(*id, method)
-                {
-                    self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
-                    self.check_method_call(&tname, method, &signature.params, &arg_tys, args, sp);
-                    if !signature.generics.is_empty() {
-                        // Method-level generics: infer them from the call's
-                        // arguments, verify their bounds, and substitute into
-                        // the return type.
-                        let mut subst: HashMap<GenericParamId, Ty> = HashMap::new();
-                        for (p, a) in signature.params.iter().zip(arg_tys.iter()) {
-                            unify_generic(p, a, &mut subst);
+                        if !signature.generics.is_empty() {
+                            // Method-level generics: infer them from the call's
+                            // arguments, verify their bounds, and substitute into
+                            // the return type.
+                            let mut subst: HashMap<GenericParamId, Ty> = HashMap::new();
+                            for (p, a) in signature.params.iter().zip(arg_tys.iter()) {
+                                unify_generic(p, a, &mut subst);
+                            }
+                            let owner = format!("{}::{}", tname, method);
+                            self.check_bound_satisfaction(
+                                &owner,
+                                &signature.generics,
+                                &signature.generic_bounds,
+                                &subst,
+                                sp,
+                            );
+                            return subst_ty(&signature.ret, &subst);
                         }
-                        let owner = format!("{}::{}", tname, method);
-                        self.check_bound_satisfaction(
-                            &owner,
-                            &signature.generics,
-                            &signature.generic_bounds,
-                            &subst,
-                            sp,
-                        );
-                        return subst_ty(&signature.ret, &subst);
+                        return signature.ret;
                     }
-                    return signature.ret;
-                }
-                if standard_method.is_some()
-                    && matches!(rt, Ty::Str)
-                    && matches!(method.as_str(), "chars" | "split")
-                {
-                    self.str_methods.insert(e.id);
-                    let kind = if method == "chars" {
-                        IterSourceKind::StringChars
-                    } else {
-                        IterSourceKind::StringSplit
-                    };
-                    return Ty::Iter(
-                        Box::new(Ty::Str),
-                        Box::new(self.iter_source(kind, e.span, &Ty::Str)),
-                    );
-                }
-                if standard_method.is_some()
-                    && let Some(ret) =
-                        self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, e)
-                {
-                    return ret;
-                }
-                if let Some(definition) = standard_method {
-                    if matches!(rt, Ty::Str) {
+                    if standard_method.is_some()
+                        && matches!(rt, Ty::Str)
+                        && matches!(method.as_str(), "chars" | "split")
+                    {
                         self.str_methods.insert(e.id);
+                        let kind = if method == "chars" {
+                            IterSourceKind::StringChars
+                        } else {
+                            IterSourceKind::StringSplit
+                        };
+                        return Ty::Iter(
+                            Box::new(Ty::Str),
+                            Box::new(self.iter_source(kind, e.span, &Ty::Str)),
+                        );
                     }
-                    return self
-                        .infer_standard_method_call(definition, &rt, method, &arg_tys, args, sp);
+                    if standard_method.is_some()
+                        && let Some(ret) =
+                            self.infer_iterator_method(&rt, method, type_args, &arg_tys, args, e)
+                    {
+                        return ret;
+                    }
+                    if let Some(definition) = standard_method {
+                        if matches!(rt, Ty::Str) {
+                            self.str_methods.insert(e.id);
+                        }
+                        return self.infer_standard_method_call(
+                            definition, &rt, method, &arg_tys, args, sp,
+                        );
+                    }
+                    Ty::Unknown
+                })();
+                if optional_chain {
+                    if matches!(result, Ty::Option(_)) {
+                        result
+                    } else {
+                        Ty::Option(Box::new(result))
+                    }
+                } else {
+                    result
                 }
-                Ty::Unknown
             }
-            ExprKind::Field { base, name, .. } => {
-                let bt = self.infer(base);
-                if let Ty::Named {
+            ExprKind::Field {
+                base,
+                name,
+                optional,
+                ..
+            } => {
+                let base_ty = self.infer(base);
+                let (bt, optional_chain) = if *optional {
+                    match base_ty {
+                        Ty::Option(item) => (*item, true),
+                        Ty::Unknown => (Ty::Unknown, true),
+                        other => {
+                            self.err(
+                                base.span,
+                                format!(
+                                    "optional chaining requires `Option`, found `{}`",
+                                    other.name()
+                                ),
+                            );
+                            (Ty::Unknown, true)
+                        }
+                    }
+                } else {
+                    (base_ty, false)
+                };
+                let result = if let Ty::Named {
                     def: definition,
                     name: sname,
                 } = &bt
@@ -2321,6 +2491,15 @@ impl Tc {
                     }
                 } else {
                     Ty::Unknown
+                };
+                if optional_chain {
+                    if matches!(result, Ty::Option(_)) {
+                        result
+                    } else {
+                        Ty::Option(Box::new(result))
+                    }
+                } else {
+                    result
                 }
             }
             ExprKind::Index { base, index } => {
@@ -2397,6 +2576,45 @@ impl Tc {
                     Ty::Unknown
                 }
             }
+            ExprKind::MapLit(entries) => {
+                let mut key_ty = Ty::Unknown;
+                let mut value_ty = Ty::Unknown;
+                for (key, value) in entries {
+                    let current_key = self.infer(key);
+                    let current_value = self.infer(value);
+                    if key_ty.is_concrete()
+                        && current_key.is_concrete()
+                        && !compatible(&key_ty, &current_key)
+                    {
+                        self.err(
+                            key.span,
+                            format!(
+                                "map key must be `{}`, found `{}`",
+                                key_ty.name(),
+                                current_key.name()
+                            ),
+                        );
+                    } else {
+                        key_ty = join(&key_ty, &current_key);
+                    }
+                    if value_ty.is_concrete()
+                        && current_value.is_concrete()
+                        && !compatible(&value_ty, &current_value)
+                    {
+                        self.err(
+                            value.span,
+                            format!(
+                                "map value must be `{}`, found `{}`",
+                                value_ty.name(),
+                                current_value.name()
+                            ),
+                        );
+                    } else {
+                        value_ty = join(&value_ty, &current_value);
+                    }
+                }
+                Ty::Map(Box::new(key_ty), Box::new(value_ty))
+            }
             ExprKind::Try { expr } => {
                 // `e?` unwraps a Result<T,_> or Option<T> to T.
                 let inner = self.infer(expr);
@@ -2461,9 +2679,50 @@ impl Tc {
                 }
             }
             ExprKind::Block(b) => self.block(b),
-            ExprKind::Assign { target, value } => {
-                self.infer(target);
-                self.infer(value);
+            ExprKind::Assign { op, target, value } => {
+                let target_ty = self.infer(target);
+                let value_ty = self.infer(value);
+                if let Some(op) = op {
+                    if matches!(target_ty, Ty::I64) && matches!(value_ty, Ty::I64) {
+                        if *op == BinOp::Div {
+                            self.int_divs.insert(e.id);
+                        } else if *op == BinOp::Rem {
+                            self.int_rems.insert(e.id);
+                        }
+                    }
+                    if *op == BinOp::Add
+                        && matches!(target_ty, Ty::Str)
+                        && matches!(value_ty, Ty::Str)
+                    {
+                        self.str_concats.insert(e.id);
+                    }
+                    let assigned = self.infer_binary(*op, &target_ty, &value_ty, sp);
+                    if assigned.is_concrete()
+                        && target_ty.is_concrete()
+                        && !compatible(&target_ty, &assigned)
+                    {
+                        self.err(
+                            value.span,
+                            format!(
+                                "compound assignment produces `{}` for target `{}`",
+                                assigned.name(),
+                                target_ty.name()
+                            ),
+                        );
+                    }
+                } else if target_ty.is_concrete()
+                    && value_ty.is_concrete()
+                    && !compatible(&target_ty, &value_ty)
+                {
+                    self.err(
+                        value.span,
+                        format!(
+                            "cannot assign `{}` to `{}`",
+                            value_ty.name(),
+                            target_ty.name()
+                        ),
+                    );
+                }
                 if let ExprKind::Path(segments) = &target.kind
                     && segments.len() == 1
                     && let Some(&boundary) = self.closure_boundaries.last()
@@ -2519,6 +2778,26 @@ impl Tc {
                 if op == Add && matches!(l, Ty::Str) && matches!(r, Ty::Str) {
                     return Ty::Str;
                 }
+                if let Ty::Generic { id, .. } = l {
+                    let (trait_id, _) = arithmetic_trait(op);
+                    let target = crate::hir::TraitTarget::Builtin(trait_id);
+                    if self
+                        .gen_bounds
+                        .get(id)
+                        .is_some_and(|bounds| bounds.contains(&target))
+                    {
+                        return Ty::Unknown;
+                    }
+                    self.invalid_binary(
+                        sp,
+                        format!(
+                            "type `{}` does not implement operator trait `{}`",
+                            l.name(),
+                            trait_id.name()
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
                 if let Ty::Named { def: owner, .. } = l {
                     let (trait_id, method) = arithmetic_trait(op);
                     let target = crate::hir::TraitTarget::Builtin(trait_id);
@@ -2528,7 +2807,7 @@ impl Tc {
                         .get(owner)
                         .is_some_and(|traits| traits.contains(&target))
                     {
-                        self.err(
+                        self.invalid_binary(
                             sp,
                             format!(
                                 "type `{}` does not implement operator trait `{}`",
@@ -2538,74 +2817,146 @@ impl Tc {
                         );
                         return Ty::Unknown;
                     }
-                    return self
+                    let Some(signature) = self
                         .hir
                         .associated_items
                         .get(&(*owner, method.to_string()))
                         .and_then(|definition| self.method_sigs.get(definition))
-                        .map(|signature| signature.ret.clone())
-                        .unwrap_or(Ty::Unknown);
-                }
-                // Non-overloaded operands must be arithmetic primitives.
-                for t in [l, r] {
-                    if matches!(t, Ty::Bool | Ty::Unit) {
-                        self.err(sp, format!("arithmetic operator applied to `{}`", t.name()));
+                        .cloned()
+                    else {
+                        return Ty::Unknown;
+                    };
+                    if let Some(expected) = signature.params.first()
+                        && expected.is_concrete()
+                        && r.is_concrete()
+                        && !compatible(expected, r)
+                    {
+                        self.invalid_binary(
+                            sp,
+                            format!(
+                                "right operand of `{}` must be `{}`, found `{}`",
+                                op.symbol(),
+                                expected.name(),
+                                r.name()
+                            ),
+                        );
+                        return Ty::Unknown;
                     }
+                    return signature.ret.clone();
                 }
-                if matches!(r, Ty::Named { .. }) {
-                    self.err(
+                if l.is_numeric() && r.is_numeric() {
+                    if *l == Ty::F64 || *r == Ty::F64 {
+                        Ty::F64
+                    } else {
+                        Ty::I64
+                    }
+                } else if !l.is_concrete() || !r.is_concrete() {
+                    Ty::Unknown
+                } else {
+                    self.invalid_binary(
                         sp,
                         format!(
-                            "cannot apply arithmetic operator to `{}` and `{}`",
+                            "cannot apply binary `{}` to `{}` and `{}`",
+                            op.symbol(),
                             l.name(),
                             r.name()
                         ),
                     );
                     Ty::Unknown
-                } else if *l == Ty::F64 || *r == Ty::F64 {
-                    Ty::F64
-                } else if l.is_numeric() && r.is_numeric() {
-                    Ty::I64
-                } else {
-                    // Catch mixed-type operands (e.g. int + string, float + string).
-                    // Bool/Unit are already reported above; Named may be overloaded.
-                    let is_compat = |t: &Ty| {
-                        matches!(t, Ty::Unknown | Ty::Named { .. })
-                            || t.is_numeric()
-                            || *t == Ty::Str
-                    };
-                    let lhs_str = matches!(l, Ty::Str);
-                    let rhs_str = matches!(r, Ty::Str);
-                    if lhs_str != rhs_str {
+                }
+            }
+            Coalesce => match l {
+                Ty::Option(item) => {
+                    if item.is_concrete() && r.is_concrete() && !compatible(item, r) {
                         self.err(
                             sp,
-                            "cannot mix string and non-string operands in arithmetic".to_string(),
+                            format!(
+                                "right operand of `??` must be `{}`, found `{}`",
+                                item.name(),
+                                r.name()
+                            ),
                         );
-                    } else if !is_compat(l) || !is_compat(r) {
-                        // Already reported above for Bool/Unit, but catch
-                        // other mismatches like passing a struct to arithmetic.
-                        if !matches!(l, Ty::Bool | Ty::Unit) && !matches!(r, Ty::Bool | Ty::Unit) {
-                            self.err(
-                                sp,
-                                format!(
-                                    "cannot apply arithmetic operator to `{}` and `{}`",
-                                    l.name(),
-                                    r.name(),
-                                ),
-                            );
-                        }
+                        Ty::Unknown
+                    } else {
+                        join(item, r)
                     }
+                }
+                Ty::Unknown => r.clone(),
+                other => {
+                    self.invalid_binary(
+                        sp,
+                        format!(
+                            "left operand of `??` must be `Option`, found `{}`",
+                            other.name()
+                        ),
+                    );
                     Ty::Unknown
                 }
+            },
+            Contains => {
+                let element = match r {
+                    Ty::Vec(item) | Ty::Iter(item, _) => Some(item.as_ref().clone()),
+                    Ty::Map(key, _) => Some(key.as_ref().clone()),
+                    Ty::Str => Some(Ty::Str),
+                    Ty::Unknown => return Ty::Bool,
+                    other => {
+                        self.invalid_binary(
+                            sp,
+                            format!(
+                                "right operand of `in` is not searchable: `{}`",
+                                other.name()
+                            ),
+                        );
+                        None
+                    }
+                };
+                if let Some(element) = element
+                    && element.is_concrete()
+                    && l.is_concrete()
+                    && !compatible(&element, l)
+                {
+                    self.err(
+                        sp,
+                        format!("`in` expects `{}`, found `{}`", element.name(), l.name()),
+                    );
+                }
+                Ty::Bool
             }
             And | Or => {
                 self.expect_bool(l, sp, "operand of `&&`/`||`");
                 self.expect_bool(r, sp, "operand of `&&`/`||`");
                 Ty::Bool
             }
-            // Comparisons/equality may be overloaded (PartialOrd/PartialEq); we
-            // conservatively accept any operands and yield `bool`.
-            Eq | Ne | Lt | Le | Gt | Ge => Ty::Bool,
+            Eq | Ne => {
+                if l.is_concrete() && r.is_concrete() && !compatible(l, r) {
+                    self.invalid_binary(
+                        sp,
+                        format!(
+                            "cannot apply binary `{}` to `{}` and `{}`",
+                            op.symbol(),
+                            l.name(),
+                            r.name()
+                        ),
+                    );
+                }
+                Ty::Bool
+            }
+            Lt | Le | Gt | Ge => {
+                let valid = (l.is_numeric() && r.is_numeric())
+                    || (matches!(l, Ty::Str) && matches!(r, Ty::Str));
+                if l.is_concrete() && r.is_concrete() && !valid {
+                    self.invalid_binary(
+                        sp,
+                        format!(
+                            "cannot apply binary `{}` to `{}` and `{}`",
+                            op.symbol(),
+                            l.name(),
+                            r.name()
+                        ),
+                    );
+                }
+                Ty::Bool
+            }
         }
     }
 

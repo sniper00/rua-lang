@@ -1,7 +1,0 @@
-extern "lua" {
-    fn host_value() -> i64;
-}
-
-mod nested {
-    pub fn value() -> i64 { 1 }
-}

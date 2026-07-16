@@ -166,6 +166,8 @@ pub enum DiagnosticCode {
     TypeMissingMatchArm = 211,
     TypeImmutableAssignment = 212,
     TypeInvalidFfiAdapter = 213,
+    TypeInvalidBreak = 214,
+    TypeInvalidOptionalChain = 215,
     LintUnusedVariable = 300,
     LintRedundantMut = 301,
     LintUnreachableCode = 302,
@@ -212,6 +214,8 @@ impl DiagnosticCode {
             Self::TypeMissingMatchArm => "E0211",
             Self::TypeImmutableAssignment => "E0212",
             Self::TypeInvalidFfiAdapter => "E0213",
+            Self::TypeInvalidBreak => "E0214",
+            Self::TypeInvalidOptionalChain => "E0215",
             Self::LintUnusedVariable => "W0300",
             Self::LintRedundantMut => "W0301",
             Self::LintUnreachableCode => "W0302",
@@ -264,6 +268,8 @@ impl DiagnosticCode {
             | Self::TypeUnknownMethod
             | Self::TypeMissingMatchArm
             | Self::TypeImmutableAssignment
+            | Self::TypeInvalidBreak
+            | Self::TypeInvalidOptionalChain
             | Self::TypeInvalidFfiAdapter => DiagnosticCategory::Type,
             Self::LintUnusedVariable
             | Self::LintRedundantMut

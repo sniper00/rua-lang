@@ -8,5 +8,4 @@ symbol: Named Trait container=<root> name=113..118 full=107..152 detail="trait N
 symbol: name Method container=Named name=128..132 full=120..150 detail="fn name(&self) -> String" doc=""
 symbol: impl Point Impl container=<root> name=169..174 full=154..219 detail="impl Named for Point" doc=""
 symbol: name Method container=impl Point name=184..188 full=176..217 detail="fn name(&self) -> String" doc=""
-symbol: utility Module container=<root> name=225..232 full=221..290 detail="mod utility" doc=""
-symbol: origin Function container=utility name=246..252 full=239..288 detail="pub fn origin() -> Point" doc=""
+symbol: origin Function container=<root> name=224..230 full=221..266 detail="fn origin() -> Point" doc=""

@@ -26,6 +26,20 @@ async function main(): Promise<void> {
   fs.mkdirSync(alphaDeclarations, { recursive: true });
   fs.mkdirSync(betaDeclarations, { recursive: true });
   fs.writeFileSync(path.join(alpha, "main.rua"), "let value = 1;\n");
+  fs.mkdirSync(path.join(alpha, "domain"), { recursive: true });
+  fs.writeFileSync(
+    path.join(alpha, "domain", "order.rua"),
+    "pub struct OrderRequest { pub sku: String }\n" +
+      "impl OrderRequest {\n" +
+      "    /// Construct an order request.\n" +
+      "    pub fn new(sku: String) -> OrderRequest { OrderRequest { sku: sku } }\n" +
+      "}\n",
+  );
+  fs.writeFileSync(
+    path.join(alpha, "requests.rua"),
+    "use domain::order::OrderRequest;\n" +
+      'let requests = vec![OrderRequest::new("book-001")];\n',
+  );
   fs.writeFileSync(path.join(beta, "main.rua"), "let value = 2;\n");
   fs.writeFileSync(path.join(alphaDeclarations, "host.ruai"), "");
   fs.writeFileSync(path.join(betaDeclarations, "host.ruai"), "");

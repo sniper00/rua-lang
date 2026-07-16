@@ -21,6 +21,61 @@ fn parser_preserves_top_level_chunk_order() {
 }
 
 #[test]
+fn compound_assignment_and_loop_expression_lower_without_duplicate_lvalues() {
+    let lua = compile_str(
+        r#"
+        fn index() -> i64 { println!("index"); 0 }
+        let mut values = vec![1];
+        values[index()] += 4;
+        let answer = loop { break values[0]; };
+        println!("{}", answer);
+        "#,
+    )
+    .expect("compile compound assignment and loop value");
+
+    assert_eq!(lua.matches("= index()").count(), 1, "{lua}");
+    assert!(lua.contains("while true do"), "{lua}");
+    assert!(lua.contains("+ 4"), "{lua}");
+}
+
+#[test]
+fn option_coalesce_and_optional_chain_lower_with_nil_checks() {
+    let lua = compile_str(
+        r#"
+        struct Profile { city: String }
+        impl Profile { fn label(&self) -> String { self.city } }
+        let profile: Option<Profile> = Option::Some(Profile { city: "Shanghai" });
+        let city = profile?.city ?? "unknown";
+        let label = profile?.label() ?? "none";
+        println!("{} {}", city, label);
+        "#,
+    )
+    .expect("compile option operators");
+
+    assert!(lua.contains("~= nil"), "{lua}");
+    assert!(lua.contains("== nil"), "{lua}");
+    assert!(!lua.contains(" or \"unknown\""), "{lua}");
+}
+
+#[test]
+fn membership_and_map_literals_lower_through_typed_runtime_operations() {
+    let lua = compile_str(
+        r#"
+        let scores: HashMap<String, i64> = #{ "alice": 10, "bob": 20 };
+        println!("{}", "alice" in scores);
+        println!("{}", 2 in vec![1, 2, 3]);
+        println!("{}", "ua" in "Rua");
+        println!("{}", 3 in 0..5);
+        "#,
+    )
+    .expect("compile membership and map literal");
+
+    assert!(lua.contains("map.new(2)"), "{lua}");
+    assert!(lua.contains(":contains_key("), "{lua}");
+    assert!(lua.contains(":contains("), "{lua}");
+}
+
+#[test]
 fn parser_records_blank_lines_without_treating_comment_lines_as_blank() {
     let program = crate::parser::parse(
         "let first = 1;\n\
@@ -388,9 +443,6 @@ fn closure_typeck_reports_unknown_mutable_capture_and_escape() {
 fn iterator_type_info(source: &str) -> crate::typeck::TypeInfo {
     let mut program = crate::parser::parse(source).expect("parse iterator source");
     crate::load_builtins(&mut program, None).expect("load standard declarations");
-    let mut files = vec![String::new()];
-    crate::resolve::resolve_modules(&mut program.items, None, &mut files)
-        .expect("resolve iterator source");
     let hir = crate::hir::resolve(&program);
     crate::check::check_resolved(&program, &hir).expect("structurally check iterator source");
     crate::typeck::check_resolved(&program, &hir).expect("type-check iterator source")
@@ -961,7 +1013,11 @@ fn result_and_try() {
     "#,
     );
     assert!(lua.contains("result.ok(3)"), "got: {lua}");
-    assert!(lua.contains(".tag == \"err\" then return"), "got: {lua}");
+    assert!(
+        lua.contains("if not __t1[1] then return __t1 end"),
+        "got: {lua}"
+    );
+    assert!(lua.contains("local v = __t1[2]"), "got: {lua}");
 }
 
 #[test]
@@ -1377,7 +1433,7 @@ fn standard_runtime_package_alias_does_not_shadow_user_definition() {
         "{lua}"
     );
     assert!(
-        lua.contains("assert(rua_std__runtime.ABI_VERSION == 1, \"incompatible rua_std ABI\")"),
+        lua.contains("assert(rua_std__runtime.ABI_VERSION == 2, \"incompatible rua_std ABI\")"),
         "{lua}"
     );
     assert!(lua.contains("return rua_std()"), "{lua}");
@@ -1458,7 +1514,7 @@ fn typeck_fn_arg_type() {
 fn typeck_arithmetic_on_bool() {
     let err = compile_str("fn f() { let x = true + 1; }").unwrap_err();
     assert!(
-        err.contains("arithmetic operator applied to `bool`"),
+        err.contains("cannot apply binary `+` to `bool` and `i64`"),
         "got: {err}"
     );
 }
@@ -1655,9 +1711,12 @@ fn codegen_mixed_division_stays_slash() {
 fn generic_division_requires_operator_bound() {
     let error = crate::compile_str("fn f<T>(a: T, b: T) { let x = a / b; }").unwrap_err();
     assert!(
-        error.contains("cannot apply arithmetic operator to `T` and `T`"),
+        error.contains("type `T` does not implement operator trait `Div`"),
         "got: {error}"
     );
+
+    let lua = compile("fn f<T: Div>(a: T, b: T) { let x = a / b; }");
+    assert!(lua.contains("local x = a / b"), "got: {lua}");
 }
 
 #[test]
@@ -1766,6 +1825,55 @@ fn typeck_operator_overload_not_flagged() {
 }
 
 #[test]
+fn typeck_operator_overload_checks_right_operand_type() {
+    let error = compile_str(
+        r#"
+        struct V { x: f64 }
+        impl Mul for V {
+            fn mul(self, scale: f64) -> V { V { x: self.x * scale } }
+        }
+        fn scale(value: V) -> V { value * "three" }
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("right operand of `*` must be `f64`, found `String`"),
+        "got: {error}"
+    );
+    assert_eq!(
+        error
+            .structured_diagnostics()
+            .next()
+            .map(|diagnostic| diagnostic.code),
+        Some(rua_core::DiagnosticCode::TypeInvalidBinary)
+    );
+}
+
+#[test]
+fn typeck_binary_operator_matrix_accepts_compatible_types() {
+    let lua = compile(
+        r#"
+        fn valid() -> bool {
+            let numeric_add = 1 + 2.0;
+            let string_add = "left" + "right";
+            let numeric_order = 1 < 2.0;
+            let string_order = "left" <= "right";
+            let bool_equal = true == false;
+            numeric_add > 0.0
+                && string_add == "leftright"
+                && numeric_order
+                && string_order
+                && bool_equal
+        }
+        "#,
+    );
+
+    assert!(lua.contains("1 + 2.0"), "got: {lua}");
+    assert!(lua.contains(r#""left" .. "right""#), "got: {lua}");
+}
+
+#[test]
 fn user_trait_named_like_operator_does_not_enable_operator_lowering() {
     let error = compile_str(
         r#"
@@ -1828,8 +1936,10 @@ fn if_let_ok_unwraps_result() {
         }
     "#,
     );
-    assert!(lua.contains(".tag == \"ok\""), "got: {lua}");
-    assert!(lua.contains(".value"), "got: {lua}");
+    assert!(lua.contains("if r[1] then"), "got: {lua}");
+    assert!(lua.contains("local v = r[2]"), "got: {lua}");
+    assert!(!lua.contains("r.tag"), "got: {lua}");
+    assert!(!lua.contains("r.value"), "got: {lua}");
 }
 
 #[test]
@@ -2313,13 +2423,6 @@ fn duplicate_fn_in_module_is_rejected() {
     );
 }
 
-#[test]
-fn file_module_via_string_errors() {
-    // `mod m;` parses, but resolving it needs a base directory (a file compile).
-    let err = compile_str("mod m;\nfn main() {}").unwrap_err();
-    assert!(err.contains("requires compiling from a file"), "got: {err}");
-}
-
 fn tmp_dir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2341,7 +2444,7 @@ fn file_module_resolution() {
     let dir = tmp_dir("filemod");
     std::fs::write(
         dir.join("main.rua"),
-        "mod util;\nfn main() { println!(\"{}\", util::f()); }\n",
+        "fn main() { println!(\"{}\", util::f()); }\n",
     )
     .unwrap();
     std::fs::write(dir.join("util.rua"), "pub fn f() -> i64 { 7 }\n").unwrap();
@@ -2360,10 +2463,10 @@ fn nested_file_module_resolution() {
     let dir = tmp_dir("nested");
     std::fs::write(
         dir.join("main.rua"),
-        "mod math;\nfn main() { println!(\"{}\", math::trig::triple(2)); }\n",
+        "fn main() { println!(\"{}\", math::trig::triple(2)); }\n",
     )
     .unwrap();
-    std::fs::write(dir.join("math.rua"), "pub mod trig;\n").unwrap();
+    std::fs::write(dir.join("math.rua"), "").unwrap();
     std::fs::create_dir_all(dir.join("math")).unwrap();
     std::fs::write(
         dir.join("math").join("trig.rua"),
@@ -2376,12 +2479,11 @@ fn nested_file_module_resolution() {
 }
 
 #[test]
-fn mod_dir_style_resolution() {
-    // `mod foo;` may also resolve to `foo/mod.rua`.
+fn directory_module_file_maps_from_its_path() {
     let dir = tmp_dir("moddir");
     std::fs::write(
         dir.join("main.rua"),
-        "mod foo;\nfn main() { println!(\"{}\", foo::g()); }\n",
+        "fn main() { println!(\"{}\", foo::g()); }\n",
     )
     .unwrap();
     std::fs::create_dir_all(dir.join("foo")).unwrap();
@@ -2394,22 +2496,25 @@ fn mod_dir_style_resolution() {
 #[test]
 fn ambiguous_file_module_layout_is_rejected() {
     let dir = tmp_dir("ambiguous_mod");
-    std::fs::write(dir.join("main.rua"), "mod api;\n").unwrap();
+    std::fs::write(dir.join("main.rua"), "").unwrap();
     std::fs::write(dir.join("api.rua"), "pub fn flat() {}\n").unwrap();
     std::fs::create_dir_all(dir.join("api")).unwrap();
     std::fs::write(dir.join("api/mod.rua"), "pub fn nested() {}\n").unwrap();
     let error = crate::compile_path(&dir.join("main.rua")).unwrap_err();
-    assert!(error.contains("ambiguous module `api`"), "got: {error}");
+    assert!(
+        error.contains("multiple files map to one module"),
+        "got: {error}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn missing_file_module_errors() {
+fn unknown_path_module_errors() {
     let dir = tmp_dir("missing");
-    std::fs::write(dir.join("main.rua"), "mod nope;\nfn main() {}\n").unwrap();
+    std::fs::write(dir.join("main.rua"), "fn main() { nope::run(); }\n").unwrap();
     let err = crate::compile_path(&dir.join("main.rua")).unwrap_err();
     assert!(
-        err.contains("cannot find file for module `nope`"),
+        err.contains("cannot resolve name `nope::run`"),
         "got: {err}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -2421,7 +2526,7 @@ fn file_module_visibility_enforced() {
     let dir = tmp_dir("filevis");
     std::fs::write(
         dir.join("main.rua"),
-        "mod m;\nfn main() { println!(\"{}\", m::secret()); }\n",
+        "fn main() { println!(\"{}\", m::secret()); }\n",
     )
     .unwrap();
     std::fs::write(dir.join("m.rua"), "fn secret() -> i64 { 42 }\n").unwrap();
@@ -2435,11 +2540,7 @@ fn type_error_in_child_file_attributes_file_and_line() {
     // A type error in a loaded child file must report that file's path + line,
     // not a bare line number relative to the merged root.
     let dir = tmp_dir("attrib");
-    std::fs::write(
-        dir.join("main.rua"),
-        "mod util;\nfn main() { let _ = util::f(); }\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("main.rua"), "fn main() { let _ = util::f(); }\n").unwrap();
     // Return type mismatch on line 2 of util.rua.
     std::fs::write(dir.join("util.rua"), "pub fn f() -> bool {\n    1 + 2\n}\n").unwrap();
     let err = crate::compile_path(&dir.join("main.rua")).unwrap_err();
@@ -2905,7 +3006,7 @@ fn same_type_name_in_two_modules_preserves_return_and_field_identity() {
         "got: {err}"
     );
     assert!(
-        err.contains("arithmetic operator applied to `bool`"),
+        err.contains("cannot apply binary `+` to `bool` and `i64`"),
         "got: {err}"
     );
 }
@@ -3123,19 +3224,16 @@ fn ruai_module_omitted_from_codegen() {
     // A `.ruai` file is a declaration-only module: the checker knows its
     // signatures, but codegen emits no Lua and references hit the host global.
     let dir = tmp_dir("ruai_codegen");
-    std::fs::write(
-        dir.join("main.rua"),
-        "mod moon;\nfn main() { moon::log(\"hi\"); }\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("main.rua"), "fn main() { moon::log(\"hi\"); }\n").unwrap();
     std::fs::write(
         dir.join("moon.ruai"),
         "extern \"lua\" { fn log(msg: String); }\n",
     )
     .unwrap();
     let lua = crate::compile_path(&dir.join("main.rua")).unwrap();
-    assert!(lua.contains("moon.log(\"hi\")"), "got: {lua}");
-    // The module must NOT be declared as a local nor defined as a table.
+    assert!(lua.contains("require(\"moon\")"), "got: {lua}");
+    assert!(lua.contains(".log(\"hi\")"), "got: {lua}");
+    // The declaration module is imported, never emitted as a generated table.
     assert!(!lua.contains("moon = {}"), "got: {lua}");
     assert!(!lua.contains("local main, moon"), "got: {lua}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3150,11 +3248,7 @@ fn external_library_file_resolves_and_local_module_takes_precedence() {
     std::fs::create_dir_all(&library).unwrap();
     let input = workspace.join("main.rua");
     let declaration = library.join("moon.ruai");
-    std::fs::write(
-        &input,
-        "mod moon;\nlet actor: i64 = moon::query(\"bootstrap\");\n",
-    )
-    .unwrap();
+    std::fs::write(&input, "let actor: i64 = moon::query(\"bootstrap\");\n").unwrap();
     std::fs::write(
         &declaration,
         "extern \"lua\" { pub fn query(name: String) -> i64; }\n",
@@ -3165,17 +3259,18 @@ fn external_library_file_resolves_and_local_module_takes_precedence() {
         ..crate::CompileOptions::default()
     };
     let lua = crate::compile_path_with_options(&input, &options).unwrap();
-    assert!(lua.contains("local moon = require(\"moon\")"), "{lua}");
-    assert!(lua.contains("moon.query(\"bootstrap\")"), "{lua}");
+    assert!(lua.contains("require(\"moon\")"), "{lua}");
+    assert!(lua.contains(".query(\"bootstrap\")"), "{lua}");
 
     std::fs::write(
         workspace.join("moon.ruai"),
         "extern \"lua\" { pub fn local_api() -> i64; }\n",
     )
     .unwrap();
-    std::fs::write(&input, "mod moon;\nlet value = moon::local_api();\n").unwrap();
+    std::fs::write(&input, "let value = moon::local_api();\n").unwrap();
     let lua = crate::compile_path_with_options(&input, &options).unwrap();
-    assert!(lua.contains("moon.local_api()"), "{lua}");
+    assert!(lua.contains("require(\"moon\")"), "{lua}");
+    assert!(lua.contains(".local_api()"), "{lua}");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3199,7 +3294,7 @@ fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
         rua_core::DiagnosticCode::NameInvalidDeclaration
     );
 
-    std::fs::write(&root, "mod child;\n").unwrap();
+    std::fs::write(&root, "").unwrap();
     std::fs::write(dir.join("child.rua"), "pub fn answer() -> i64 { 42 }\n").unwrap();
     let failure = crate::compile_path_artifact(&root).unwrap_err();
     assert_eq!(
@@ -3213,11 +3308,7 @@ fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
 fn ruai_declaration_type_checked() {
     // Calls against a `.ruai` declaration are arity/type checked.
     let dir = tmp_dir("ruai_check");
-    std::fs::write(
-        dir.join("main.rua"),
-        "mod moon;\nfn main() { moon::log(1, 2); }\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("main.rua"), "fn main() { moon::log(1, 2); }\n").unwrap();
     std::fs::write(
         dir.join("moon.ruai"),
         "extern \"lua\" { fn log(msg: String); }\n",

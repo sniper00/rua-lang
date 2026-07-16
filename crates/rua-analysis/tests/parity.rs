@@ -8,8 +8,7 @@ use std::{
 };
 
 use rua_analysis::{
-    Analysis, AnalysisHost, Change, DefKind, FileId, FileKind, FilePosition, SourceRootId,
-    SourceRootKind,
+    Analysis, AnalysisHost, Change, DefKind, FileId, FileKind, SourceRootId, SourceRootKind,
 };
 use rua_syntax::{AstNode, Named, ast::ClosureExpr};
 use ruac::ast::{Item as CompilerItem, Program};
@@ -23,17 +22,6 @@ fn workspace_root() -> PathBuf {
 
 fn golden_root() -> PathBuf {
     workspace_root().join("tests/golden")
-}
-
-fn analysis_for_source(source: &str) -> (Analysis, FileId) {
-    let root_id = SourceRootId::new(0);
-    let file_id = FileId::new(0);
-    let mut change = Change::new();
-    change.set_source_root(root_id, SourceRootKind::Workspace);
-    change.set_file_with_path(file_id, root_id, FileKind::Source, "main.rua", source);
-    let mut host = AnalysisHost::new();
-    host.apply_change(change);
-    (host.analysis(), file_id)
 }
 
 fn analysis_for_workspace(directory: &Path, main: &Path) -> (Analysis, FileId) {
@@ -171,57 +159,6 @@ fn analysis_kind(kind: DefKind) -> &'static str {
         DefKind::ExternFunction => "function",
         DefKind::Module => "module",
         DefKind::TypeAlias => "type_alias",
-    }
-}
-
-fn offset_of(source: &str, needle: &str, occurrence: usize) -> u32 {
-    source
-        .match_indices(needle)
-        .nth(occurrence)
-        .unwrap_or_else(|| panic!("missing occurrence {occurrence} of {needle:?}"))
-        .0 as u32
-        + 1
-}
-
-#[test]
-fn parity_inline_module_and_name_resolution() {
-    let cases = [
-        ("module_inline_basic.rua", "add", 1, "add"),
-        ("module_inline_nested.rua", "value", 2, "value"),
-        ("module_use_alias.rua", "answer", 1, "value"),
-        ("module_use_grouped.rua", "one", 2, "one"),
-        ("module_use_grouped.rua", "second", 1, "two"),
-        ("visibility_pub_access.rua", "visible", 1, "visible"),
-        ("visibility_private_same_module.rua", "hidden", 1, "hidden"),
-    ];
-
-    for (fixture, needle, occurrence, expected_definition) in cases {
-        let path = golden_root().join("compile-pass").join(fixture);
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        ruac::compile_str(&source)
-            .unwrap_or_else(|error| panic!("compiler rejected {fixture}: {error}"));
-        let compiler = ruac::parser::parse(&source)
-            .unwrap_or_else(|error| panic!("compiler parse failed for {fixture}: {error}"));
-        let (analysis, file_id) = analysis_for_source(&source);
-
-        assert_eq!(
-            analysis_definitions(&analysis, file_id),
-            compiler_definitions(&compiler),
-            "definition parity failed for {fixture}"
-        );
-        let definition = analysis
-            .semantics(file_id)
-            .find_def_at(FilePosition::new(
-                file_id,
-                offset_of(&source, needle, occurrence),
-            ))
-            .unwrap_or_else(|| panic!("analysis did not resolve {needle:?} in {fixture}"));
-        assert_eq!(
-            definition.name(),
-            expected_definition,
-            "name-resolution parity failed for {fixture}"
-        );
     }
 }
 

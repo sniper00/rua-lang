@@ -1,1 +1,0 @@
-<golden>/compile-fail/name_duplicate_module_fn.rua: duplicate definition `duplicate` in module `service`

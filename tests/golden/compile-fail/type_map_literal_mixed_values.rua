@@ -1,0 +1,6 @@
+fn invalid() {
+    let values = #{
+        "number": 1,
+        "boolean": true,
+    };
+}

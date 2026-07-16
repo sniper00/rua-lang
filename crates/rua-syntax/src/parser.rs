@@ -294,7 +294,6 @@ impl<'a> Parser<'a> {
                 | K::KwTrait
                 | K::KwImpl
                 | K::KwExtern
-                | K::KwMod
                 | K::KwUse
         ) {
             self.item();
@@ -317,12 +316,11 @@ impl<'a> Parser<'a> {
             K::KwTrait => self.trait_decl(cp),
             K::KwImpl => self.impl_decl(cp),
             K::KwExtern => self.extern_block(cp),
-            K::KwMod => self.mod_decl(cp),
             K::KwUse => self.use_decl(cp),
             _ => {
                 self.error_with_code(
                     DiagnosticCode::ParseExpectedItem,
-                    "expected item (fn/struct/enum/impl/trait/extern/mod/use)",
+                    "expected item (fn/struct/enum/impl/trait/extern/use)",
                 );
                 self.error_bump();
             }
@@ -654,26 +652,6 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    fn mod_decl(&mut self, cp: rowan::Checkpoint) {
-        self.expect(K::KwMod);
-        self.expect_ident();
-        if self.accept(K::Semi) {
-            self.wrap(cp, K::ModDecl);
-            return;
-        }
-        self.expect(K::LBrace);
-        while !self.at(K::RBrace) && !self.at(K::Eof) {
-            self.eat_trivia();
-            let before = self.pos;
-            self.scope_entry();
-            if self.pos == before {
-                self.error_bump();
-            }
-        }
-        self.expect(K::RBrace);
-        self.wrap(cp, K::ModDecl);
-    }
-
     fn use_decl(&mut self, cp: rowan::Checkpoint) {
         self.expect(K::KwUse);
         self.expect_ident();
@@ -814,12 +792,14 @@ impl<'a> Parser<'a> {
             K::KwLet => self.let_stmt(),
             K::KwReturn => self.return_stmt(),
             K::KwWhile => self.while_stmt(),
-            K::KwLoop => self.loop_stmt(),
             K::KwFor => self.for_stmt(),
             K::KwBreak => {
                 self.builder.start_node(K::BreakExpr);
                 self.bump();
-                self.expect(K::Semi);
+                if !self.accept(K::Semi) {
+                    self.expr();
+                    self.expect(K::Semi);
+                }
                 self.builder.finish_node();
             }
             K::KwContinue => {
@@ -916,12 +896,7 @@ impl<'a> Parser<'a> {
         let cp = self.builder.checkpoint();
         self.bin(0);
         match self.current() {
-            K::DotDot | K::DotDotEq => {
-                self.bump();
-                self.bin(0);
-                self.wrap(cp, K::RangeExpr);
-            }
-            K::Eq => {
+            K::Eq | K::PlusEq | K::MinusEq | K::StarEq | K::SlashEq | K::PercentEq => {
                 self.bump();
                 self.expr();
                 self.wrap(cp, K::AssignExpr);
@@ -934,7 +909,20 @@ impl<'a> Parser<'a> {
         self.eat_trivia();
         let cp = self.builder.checkpoint();
         self.unary();
-        while let Some(lbp) = infix_bp(self.current()) {
+        loop {
+            if matches!(self.current(), K::DotDot | K::DotDotEq) {
+                const RANGE_BP: u8 = 4;
+                if RANGE_BP < min_bp {
+                    break;
+                }
+                self.bump();
+                self.bin(RANGE_BP + 1);
+                self.wrap(cp, K::RangeExpr);
+                continue;
+            }
+            let Some(lbp) = infix_bp(self.current()) else {
+                break;
+            };
             if lbp < min_bp {
                 break;
             }
@@ -966,7 +954,7 @@ impl<'a> Parser<'a> {
                     self.arg_list();
                     self.wrap(cp, K::CallExpr);
                 }
-                K::Dot => {
+                K::Dot | K::QuestionDot => {
                     self.bump();
                     self.expect_ident();
                     if self.accept(K::ColonColon) {
@@ -1050,6 +1038,8 @@ impl<'a> Parser<'a> {
                 self.wrap(cp, K::ParenExpr);
             }
             K::LBrace => self.block(),
+            K::Hash => self.map_expr(),
+            K::KwLoop => self.loop_stmt(),
             K::KwIf => self.if_expr(),
             K::KwMatch => self.match_expr(),
             _ => {
@@ -1091,6 +1081,28 @@ impl<'a> Parser<'a> {
             self.allow_struct_expr();
         }
         self.wrap(cp, K::ClosureExpr);
+    }
+
+    fn map_expr(&mut self) {
+        self.builder.start_node(K::MapExpr);
+        self.expect(K::Hash);
+        self.expect(K::LBrace);
+        while !self.at(K::RBrace) && !self.at(K::Eof) {
+            let before = self.pos;
+            self.builder.start_node(K::MapEntry);
+            self.allow_struct_expr();
+            self.expect(K::Colon);
+            self.allow_struct_expr();
+            self.builder.finish_node();
+            if !self.accept(K::Comma) {
+                break;
+            }
+            if self.pos == before {
+                self.error_bump();
+            }
+        }
+        self.expect(K::RBrace);
+        self.builder.finish_node();
     }
 
     fn macro_call(&mut self) {
@@ -1290,11 +1302,12 @@ impl<'a> Parser<'a> {
 /// parser's `binop` precedence table (`None` = not an infix operator).
 fn infix_bp(t: SyntaxKind) -> Option<u8> {
     Some(match t {
+        K::QuestionQuestion => 0,
         K::OrOr => 1,
         K::AndAnd => 2,
-        K::EqEq | K::Ne | K::Lt | K::Le | K::Gt | K::Ge => 3,
-        K::Plus | K::Minus => 4,
-        K::Star | K::Slash | K::Percent => 5,
+        K::EqEq | K::Ne | K::Lt | K::Le | K::Gt | K::Ge | K::KwIn => 3,
+        K::Plus | K::Minus => 5,
+        K::Star | K::Slash | K::Percent => 6,
         _ => return None,
     })
 }
@@ -1318,6 +1331,13 @@ fn user_str(k: SyntaxKind) -> &'static str {
         K::Semi => ";",
         K::Comma => ",",
         K::Eq => "=",
+        K::PlusEq => "+=",
+        K::MinusEq => "-=",
+        K::StarEq => "*=",
+        K::SlashEq => "/=",
+        K::PercentEq => "%=",
+        K::QuestionQuestion => "??",
+        K::QuestionDot => "?.",
         K::Arrow => "->",
         K::FatArrow => "=>",
         K::Not => "!",

@@ -431,6 +431,7 @@ fn validate_lang_items(items: &BTreeMap<String, String>) -> Result<(), StdError>
         "option_none",
         "option_map",
         "option_unwrap",
+        "option_expect",
         "option_unwrap_or",
         "option_is_some",
         "option_is_none",
@@ -439,6 +440,7 @@ fn validate_lang_items(items: &BTreeMap<String, String>) -> Result<(), StdError>
         "result_err",
         "result_map",
         "result_unwrap",
+        "result_expect",
         "result_unwrap_or",
         "result_is_ok",
         "result_is_err",
@@ -539,6 +541,7 @@ option_some = "Option::Some"
 option_none = "Option::None"
 option_map = "Option::map"
 option_unwrap = "Option::unwrap"
+option_expect = "Option::expect"
 option_unwrap_or = "Option::unwrap_or"
 option_is_some = "Option::is_some"
 option_is_none = "Option::is_none"
@@ -547,6 +550,7 @@ result_ok = "Result::Ok"
 result_err = "Result::Err"
 result_map = "Result::map"
 result_unwrap = "Result::unwrap"
+result_expect = "Result::expect"
 result_unwrap_or = "Result::unwrap_or"
 result_is_ok = "Result::is_ok"
 result_is_err = "Result::is_err"
@@ -565,7 +569,7 @@ export = "option"
 
     #[test]
     fn manifest_rejects_conflicting_abis_within_one_runtime_package() {
-        let manifest = include_str!("../resources/std/std.toml").replacen("abi = 1", "abi = 2", 1);
+        let manifest = include_str!("../resources/std/std.toml").replacen("abi = 2", "abi = 3", 1);
         let error = build_library(&manifest, |_| Ok(Arc::from(""))).unwrap_err();
         assert!(
             error

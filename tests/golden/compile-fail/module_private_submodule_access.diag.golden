@@ -1,1 +1,0 @@
-<golden>/compile-fail/module_private_submodule_access.rua:8: `inner` is private to module `outer`

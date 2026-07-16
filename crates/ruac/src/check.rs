@@ -312,7 +312,12 @@ fn walk_stmt(info: &Info, hir: &crate::hir::ResolvedHir, s: &Stmt, errs: &mut Ve
             walk_expr(info, hir, expr, errs);
             walk_block(info, hir, body, errs);
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(value) => {
+            if let Some(value) = value {
+                walk_expr(info, hir, value, errs);
+            }
+        }
+        Stmt::Continue => {}
     }
 }
 
@@ -330,6 +335,7 @@ fn walk_expr(info: &Info, hir: &crate::hir::ResolvedHir, e: &Expr, errs: &mut Ve
             walk_expr(info, hir, lhs, errs);
             walk_expr(info, hir, rhs, errs);
         }
+        ExprKind::Loop(body) => walk_block(info, hir, body, errs),
         ExprKind::Call { callee, args } => {
             check_call(info, hir, callee, args, errs);
             for a in args {
@@ -366,6 +372,12 @@ fn walk_expr(info: &Info, hir: &crate::hir::ResolvedHir, e: &Expr, errs: &mut Ve
                 walk_expr(info, hir, v, errs);
             }
         }
+        ExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                walk_expr(info, hir, key, errs);
+                walk_expr(info, hir, value, errs);
+            }
+        }
         ExprKind::Try { expr } => walk_expr(info, hir, expr, errs),
         ExprKind::If {
             cond,
@@ -396,7 +408,7 @@ fn walk_expr(info: &Info, hir: &crate::hir::ResolvedHir, e: &Expr, errs: &mut Ve
             }
         }
         ExprKind::Block(b) => walk_block(info, hir, b, errs),
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value, .. } => {
             walk_expr(info, hir, target, errs);
             walk_expr(info, hir, value, errs);
         }

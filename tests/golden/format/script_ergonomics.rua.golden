@@ -1,0 +1,12 @@
+struct Profile {
+    city: String,
+}
+
+fn inspect(profile: Option<Profile>) -> bool {
+    let scores: HashMap<String, i64> = #{ "alice": 10, "bob": 20 };
+    let mut total = 1;
+    total += loop {
+        break 2;
+    };
+    (profile?.city ?? "unknown") in "Shanghai" && total in 0..10 && "alice" in scores
+}

@@ -9,7 +9,6 @@ mod def_map;
 pub mod infer;
 mod item_tree;
 mod member;
-pub(crate) mod module_resolution;
 pub mod scope;
 mod std_library;
 pub mod ty;
@@ -32,7 +31,7 @@ pub use infer::{
 };
 pub use item_tree::{
     AggregateSignature, CallableSignature, GenericParamData, ImplSignature, Import, ItemKind,
-    ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, ModuleKind, ParameterData, ReceiverKind,
+    ItemSignature, ItemSourceKind, ItemTree, ItemTreeItem, ParameterData, ReceiverKind,
     SignatureFingerprint, TypeRef, VariantKind, VariantSignature, Visibility, WherePredicateData,
 };
 pub(crate) use member::CallableRequirement;
@@ -40,7 +39,6 @@ pub use member::{
     BuiltinType, ImplementationData, MemberCandidate, MemberIndex, MemberKind, MemberOrigin,
     MemberResolution, MemberTarget, TraitBound,
 };
-pub use module_resolution::module_file_candidates;
 pub use scope::{
     BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult,
     LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,

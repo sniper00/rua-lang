@@ -2,6 +2,7 @@
 
 mod support;
 
+use rua_analysis::{ProjectFile, ProjectId};
 use support::{TestServer, uri};
 
 #[test]
@@ -44,6 +45,38 @@ fn semantic_tokens_empty_file_returns_empty() {
     assert!(
         tokens.is_empty(),
         "empty file should have no tokens, got {tokens:?}"
+    );
+}
+
+#[test]
+fn project_semantic_tokens_are_scoped_to_the_requested_file() {
+    let main_uri = uri("/test/main.rua");
+    let child_uri = uri("/test/child.rua");
+    let child_source = "pub fn answer() -> i64 { 1 }\n";
+    let mut srv = TestServer::new();
+    srv.open(
+        &main_uri,
+        "fn run() { let variable_with_a_long_name = 42; variable_with_a_long_name }\n",
+    );
+    let child_id = srv.open(&child_uri, child_source);
+
+    let tokens = srv
+        .snapshot()
+        .semantic_tokens_in_project(ProjectFile::new(ProjectId::new(0), child_id));
+
+    assert!(
+        !tokens.is_empty(),
+        "child source should produce semantic tokens"
+    );
+    assert!(
+        tokens.iter().all(|token| token.file_id() == child_id),
+        "semantic tokens from sibling modules must not leak into the requested file: {tokens:?}"
+    );
+    assert!(
+        tokens
+            .iter()
+            .all(|token| token.range().end() as usize <= child_source.len()),
+        "semantic token ranges must be valid for the requested file: {tokens:?}"
     );
 }
 

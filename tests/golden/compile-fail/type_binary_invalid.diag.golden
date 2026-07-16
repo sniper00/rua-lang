@@ -1,1 +1,8 @@
-<golden>/compile-fail/type_binary_invalid.rua:2: arithmetic operator applied to `bool`
+<golden>/compile-fail/type_binary_invalid.rua:6: cannot apply binary `+` to `bool` and `i64`
+<golden>/compile-fail/type_binary_invalid.rua:7: cannot apply binary `-` to `Vec<i64>` and `Vec<i64>`
+<golden>/compile-fail/type_binary_invalid.rua:8: cannot apply binary `*` to `String` and `String`
+<golden>/compile-fail/type_binary_invalid.rua:9: cannot apply binary `==` to `i64` and `String`
+<golden>/compile-fail/type_binary_invalid.rua:10: cannot apply binary `!=` to `bool` and `String`
+<golden>/compile-fail/type_binary_invalid.rua:11: cannot apply binary `<` to `bool` and `bool`
+<golden>/compile-fail/type_binary_invalid.rua:12: cannot apply binary `>=` to `String` and `i64`
+<golden>/compile-fail/type_binary_invalid.rua:13: type `Point` does not implement operator trait `Add`

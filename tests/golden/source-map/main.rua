@@ -1,4 +1,2 @@
-mod api;
-
 let value = api::answer();
 println!("{}", value);

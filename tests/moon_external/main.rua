@@ -1,8 +1,6 @@
 // Open this directory as a VS Code workspace. Its `.ruarc.toml` loads the
 // sibling moon_rs declaration file as the `moon` module.
 
-mod moon;
-
 struct ServiceConfig {
     source: String,
     name: String,

@@ -18,6 +18,9 @@ impl<T> Option<T> {
     /// Extract the value, panicking if `None`.
     pub fn unwrap(self) -> T {}
 
+    /// Extract the value, panicking with `message` if `None`.
+    pub fn expect(self, message: String) -> T {}
+
     /// Extract the value, returning `default` if `None`.
     pub fn unwrap_or(self, default: T) -> T {}
 

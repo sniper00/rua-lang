@@ -11,7 +11,7 @@ use std::{
 
 use rua_syntax::{
     AstNode, Parse,
-    ast::{FnDecl, ModDecl, SourceFile, TraitMethod},
+    ast::{FnDecl, SourceFile, TraitMethod},
     parse_source_file,
 };
 
@@ -398,14 +398,6 @@ impl BaseDb {
 
     pub fn file_path(&self, file_id: FileId) -> Option<&VfsPath> {
         self.vfs.file_path(file_id)
-    }
-
-    pub(crate) fn file_for_path_in_root(
-        &self,
-        path: &VfsPath,
-        source_root_id: SourceRootId,
-    ) -> Option<FileId> {
-        self.vfs.file_for_path_in_root(path, source_root_id)
     }
 
     fn invalidate_file_text(&mut self, file_id: FileId) {
@@ -836,12 +828,6 @@ impl BaseDb {
                 definition.file_id(),
                 parse.tree().syntax(),
             )),
-            (DefKind::Chunk, ItemSourceKind::SyntheticInlineModuleChunk) => parse
-                .syntax_node()
-                .descendants()
-                .filter_map(ModDecl::cast)
-                .find(|module| syntax_range(module.syntax()) == definition.range())
-                .map(|module| lower_chunk_body(def_id, definition.file_id(), module.syntax())),
             (DefKind::Function, ItemSourceKind::Definition)
             | (DefKind::Method, ItemSourceKind::ImplMethod) => parse
                 .syntax_node()
@@ -981,13 +967,7 @@ mod tests {
         let child_id = FileId::new(1);
         let mut initial = Change::new();
         initial.set_source_root(root_id, SourceRootKind::Workspace);
-        initial.set_file_with_path(
-            main_id,
-            root_id,
-            FileKind::Source,
-            "src/main.rua",
-            "mod child;",
-        );
+        initial.set_file_with_path(main_id, root_id, FileKind::Source, "src/main.rua", "");
         initial.set_file_with_path(
             child_id,
             root_id,

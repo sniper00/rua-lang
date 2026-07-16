@@ -1,5 +1,3 @@
-mod moon;
-
 fn first() {
     moon::log("first");
 }

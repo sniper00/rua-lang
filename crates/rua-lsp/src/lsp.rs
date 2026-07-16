@@ -44,30 +44,31 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams,
-    CompletionItem, CompletionItemKind, CompletionList, CompletionOptions, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams, DocumentFormattingParams,
-    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
-    DocumentLinkParams, DocumentOnTypeFormattingParams, DocumentSymbol, DocumentSymbolResponse,
-    Documentation, FileSystemWatcher, FoldingRange, FoldingRangeKind, FoldingRangeParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, InitializeParams,
-    InlayHint, InlayHintKind, InlayHintLabel, InlayHintLabelPart, InlayHintParams,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, ParameterInformation,
-    ParameterLabel, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration,
-    RegistrationParams, RenameOptions, SelectionRange, SelectionRangeParams,
-    SemanticToken as LspSemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureInformation, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Unregistration, UnregistrationParams, Uri, WatchKind,
-    WorkspaceEdit, WorkspaceSymbol, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    Command, CompletionItem, CompletionItemKind, CompletionList, CompletionOptions,
+    CompletionResponse, Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentLink, DocumentLinkParams, DocumentOnTypeFormattingParams, DocumentSymbol,
+    DocumentSymbolResponse, Documentation, FileSystemWatcher, FoldingRange, FoldingRangeKind,
+    FoldingRangeParams, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
+    InitializeParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintLabelPart,
+    InlayHintLabelPartTooltip, InlayHintParams, InsertTextFormat, Location, MarkupContent,
+    MarkupKind, OneOf, ParameterInformation, ParameterLabel, Position, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams, RenameOptions,
+    SelectionRange, SelectionRangeParams, SemanticToken as LspSemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureInformation,
+    SymbolKind as LspSymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Unregistration, UnregistrationParams, Uri, WatchKind, WorkspaceEdit, WorkspaceSymbol,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 
 use rua_analysis::{
     AnalysisHost, BuiltinDefinitionTarget, Change, CompletionInsert, CompletionKind, DefId,
     DefKind, FileId, FileKind, HoverResult, MacroDelimiter, NavigationTarget, ProjectData,
     ProjectFile, ProjectId, ProjectPosition, ProjectRoot, QueryContext, ReferenceResult,
-    SemanticTokenKind, SourceChange, SourceRootId, SourceRootKind, TextRange,
-    WorkspaceSymbol as AnalysisWorkspaceSymbol,
+    SemanticTokenKind, SourceChange, SourceRootId, SourceRootKind, TextRange, TypeHintTarget,
+    TypeHintTooltip, WorkspaceSymbol as AnalysisWorkspaceSymbol,
 };
 use rua_syntax::LineIndex;
 
@@ -812,31 +813,55 @@ impl Server {
         );
 
         let mut hints = Vec::new();
+        let mut builtin_locations = HashMap::<BuiltinDefinitionTarget, Option<Location>>::new();
         for hint in analysis.inlay_hints(project_file) {
             let offset = hint.position().offset as usize;
             if offset < range_start || offset > range_end || offset > source.len() {
                 continue;
             }
             let (line, col) = line_index.line_col(offset, &source);
-            let value = format!(": {}", hint.ty());
-            let location = hint.target().and_then(|target| {
-                Some(Location {
-                    uri: self.uri_for_file(target.file_id)?,
-                    range: self.range_for_file(target.file_id, target.range)?,
-                })
-            });
-            let label = match location {
-                Some(location) => InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
-                    value,
-                    tooltip: None,
-                    location: Some(location),
-                    command: None,
-                }]),
-                None => InlayHintLabel::String(value),
-            };
+            let mut label_parts = vec![InlayHintLabelPart {
+                value: ": ".to_string(),
+                ..InlayHintLabelPart::default()
+            }];
+            label_parts.extend(hint.label_parts().iter().map(|part| {
+                let location = match part.target() {
+                    Some(TypeHintTarget::Source(target)) => self
+                        .uri_for_file(target.file_id)
+                        .zip(self.range_for_file(target.file_id, target.range))
+                        .map(|(uri, range)| Location { uri, range }),
+                    Some(TypeHintTarget::Builtin(target)) => {
+                        if let Some(location) = builtin_locations.get(target) {
+                            location.clone()
+                        } else {
+                            let location = self.std_target_location(target);
+                            builtin_locations.insert(target.clone(), location.clone());
+                            location
+                        }
+                    }
+                    None => None,
+                };
+                let command = location.as_ref().map(|location| Command {
+                    title: "Go to type definition".to_string(),
+                    command: "rua.openLocation".to_string(),
+                    arguments: Some(vec![serde_json::json!({
+                        "uri": location.uri.as_str(),
+                        "range": location.range,
+                    })]),
+                });
+                InlayHintLabelPart {
+                    value: part.value().to_string(),
+                    // A location makes VS Code fetch and append another hover
+                    // asynchronously. Keep the immediate tooltip and route
+                    // navigation through a client command instead.
+                    tooltip: part.tooltip().map(to_lsp_type_hint_tooltip),
+                    location: None,
+                    command,
+                }
+            }));
             hints.push(InlayHint {
                 position: Position::new(line as u32, col as u32),
-                label,
+                label: InlayHintLabel::LabelParts(label_parts),
                 kind: Some(InlayHintKind::TYPE),
                 padding_left: Some(true),
                 padding_right: None,
@@ -2711,6 +2736,12 @@ impl Server {
         &self,
         target: &BuiltinDefinitionTarget,
     ) -> Option<GotoDefinitionResponse> {
+        Some(GotoDefinitionResponse::Scalar(
+            self.std_target_location(target)?,
+        ))
+    }
+
+    fn std_target_location(&self, target: &BuiltinDefinitionTarget) -> Option<Location> {
         let path = self
             .standard_library_navigation_root
             .as_ref()?
@@ -2720,13 +2751,13 @@ impl Server {
         let start = line_index.line_col(target.range().start() as usize, &source);
         let end = line_index.line_col(target.range().end() as usize, &source);
         let uri = path_to_uri(&path)?;
-        Some(GotoDefinitionResponse::Scalar(Location {
+        Some(Location {
             uri,
             range: Range::new(
                 Position::new(start.0 as u32, start.1 as u32),
                 Position::new(end.0 as u32, end.1 as u32),
             ),
-        }))
+        })
     }
 
     fn ref_to_location(&self, r: &rua_analysis::ReferenceResult) -> Option<Location> {
@@ -3009,16 +3040,21 @@ impl Server {
 fn to_lsp_hover(hover: &HoverResult) -> Hover {
     let mut value = String::new();
 
-    // Documentation (if present) — rendered as raw markdown.
-    if let Some(doc) = hover.documentation()
-        && !doc.is_empty()
-    {
-        value.push_str(doc);
-        value.push_str("\n\n---\n\n");
+    if let Some(context) = hover.context() {
+        value.push('`');
+        value.push_str(context);
+        value.push_str("`\n\n");
     }
 
     // Signature in a code block with syntax highlighting.
     value.push_str(&format!("```rua\n{}\n```", hover.signature()));
+
+    if let Some(doc) = hover.documentation()
+        && !doc.is_empty()
+    {
+        value.push_str("\n\n---\n\n");
+        value.push_str(doc);
+    }
 
     // Footer with clickable command links (VS Code extension).
     value.push_str("\n\n---\n\n");
@@ -3033,6 +3069,28 @@ fn to_lsp_hover(hover: &HoverResult) -> Hover {
         }),
         range: None,
     }
+}
+
+fn to_lsp_type_hint_tooltip(tooltip: &TypeHintTooltip) -> InlayHintLabelPartTooltip {
+    let mut value = String::new();
+    if let Some(context) = tooltip.context() {
+        value.push('`');
+        value.push_str(context);
+        value.push_str("`\n\n");
+    }
+    value.push_str("```rua\n");
+    value.push_str(tooltip.signature());
+    value.push_str("\n```");
+    if let Some(documentation) = tooltip.documentation()
+        && !documentation.is_empty()
+    {
+        value.push_str("\n\n---\n\n");
+        value.push_str(documentation);
+    }
+    InlayHintLabelPartTooltip::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    })
 }
 
 /// Exact semantic declaration target used by completion resolve.
@@ -3391,6 +3449,9 @@ fn encode_semantic_tokens(
         let range = token.range();
         let start = range.start() as usize;
         let end = range.end() as usize;
+        let Some(token_text) = source.get(start..end) else {
+            continue;
+        };
         let (line, column) = line_index.line_col(start, source);
         let line = line as u32;
         let column = column as u32;
@@ -3404,7 +3465,7 @@ fn encode_semantic_tokens(
         data.push(LspSemanticToken {
             delta_line,
             delta_start,
-            length: source[start..end].encode_utf16().count() as u32,
+            length: token_text.encode_utf16().count() as u32,
             token_type,
             token_modifiers_bitset: token.modifiers().bits(),
         });
@@ -3518,6 +3579,25 @@ mod tests {
                 .expect("background scan must finish");
             server.handle_background_result(result);
         }
+    }
+
+    #[test]
+    fn hover_markdown_renders_qualified_type_context_before_signature() {
+        let hover = HoverResult::new(
+            rua_analysis::FileRange::new(FileId::new(0), rua_analysis::TextRange::new(0, 18)),
+            "LintUnusedFunction",
+        )
+        .with_context("rua_core::DiagnosticCode");
+
+        let rendered = to_lsp_hover(&hover);
+        let HoverContents::Markup(content) = rendered.contents else {
+            panic!("hover must use markdown")
+        };
+        assert!(
+            content
+                .value
+                .starts_with("`rua_core::DiagnosticCode`\n\n```rua\nLintUnusedFunction\n```")
+        );
     }
 
     #[test]
@@ -3753,6 +3833,51 @@ mod tests {
     }
 
     #[test]
+    fn ruarc_bulk_lua_library_supports_hover_and_goto_definition() {
+        let temp = temp_test_dir("bulk-lua-library-navigation");
+        let workspace = temp.join("workspace");
+        let declarations = temp.join("declarations");
+        let runtime = temp.join("runtime");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&declarations).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+
+        let source = "let value: i64 = moon::query(\"actor\");\n";
+        let declaration = "/// Looks up an actor by name.\npub fn query(name: String) -> i64;\n";
+        std::fs::write(workspace.join("main.rua"), source).unwrap();
+        std::fs::write(declarations.join("moon.ruai"), declaration).unwrap();
+        std::fs::write(
+            workspace.join(rua_project::PROJECT_CONFIG_FILE),
+            "[[workspace.lua_library]]\ndeclaration_root = \"../declarations\"\nruntime_root = \"../runtime\"\n",
+        )
+        .unwrap();
+
+        let (server_connection, _client_connection) = lsp_server::Connection::memory();
+        let mut server = Server::new(server_connection);
+        server.index_workspace_folders(&[path_to_uri(&workspace).unwrap()]);
+        finish_background_scans(&mut server);
+        server.reload_configuration(&serde_json::json!({ "rua": {} }));
+        finish_background_scans(&mut server);
+
+        let main_uri = path_to_uri(&workspace.join("main.rua")).unwrap();
+        let declaration_uri = path_to_uri(&declarations.join("moon.ruai")).unwrap();
+        let main_file = server.file_id_for_uri(&main_uri).unwrap();
+        let declaration_file = server.file_id_for_uri(&declaration_uri).unwrap();
+        let query_offset = source.find("query").unwrap() as u32 + 1;
+        let position = ProjectPosition::at(ProjectId::new(0), main_file, query_offset);
+        let analysis = server.host.analysis();
+
+        let hover = analysis.hover(position).expect("external Lua API hover");
+        assert_eq!(hover.documentation(), Some("Looks up an actor by name."));
+        let target = analysis
+            .goto_definition(position)
+            .expect("external Lua API definition");
+        assert_eq!(target.target_range().file_id, declaration_file);
+
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn library_reload_replaces_roots_and_clears_removed_definitions() {
         let temp = temp_test_dir("library-reload");
         let first = temp.join("first");
@@ -3765,7 +3890,7 @@ mod tests {
         let (server_connection, _client_connection) = lsp_server::Connection::memory();
         let mut server = Server::new(server_connection);
         let main: Uri = "file:///workspace/main.rua".parse().unwrap();
-        server.open_document(main, 1, "mod api;".to_string());
+        server.open_document(main, 1, String::new());
 
         server.reload_configuration(&serde_json::json!({
             "rua": { "library": [first.to_string_lossy()] }
@@ -3835,7 +3960,7 @@ mod tests {
         server.open_document(
             "file:///workspace/main.rua".parse().unwrap(),
             1,
-            "mod api;".to_string(),
+            String::new(),
         );
         server.reload_configuration(&serde_json::json!({
             "rua": { "library": [first] }
@@ -3871,7 +3996,7 @@ mod tests {
         let (server_connection, _client_connection) = lsp_server::Connection::memory();
         let mut server = Server::new(server_connection);
         let main: Uri = "file:///workspace/main.rua".parse().unwrap();
-        server.open_document(main, 1, "mod host;".to_string());
+        server.open_document(main, 1, String::new());
         server.reload_configuration(&serde_json::json!({
             "rua": { "libraryMounts": { "host": declaration.to_string_lossy() } }
         }));
@@ -3897,7 +4022,7 @@ mod tests {
         let (server_connection, _client_connection) = lsp_server::Connection::memory();
         let mut server = Server::new(server_connection);
         let main: Uri = "file:///workspace/main.rua".parse().unwrap();
-        server.open_document(main, 1, "mod one; mod two;".to_string());
+        server.open_document(main, 1, String::new());
         server.reload_configuration(&serde_json::json!({
             "rua": { "library": [library.to_string_lossy()] }
         }));
@@ -3920,11 +4045,7 @@ mod tests {
 
         assert_eq!(server.library_source_root, root);
         let analysis = server.host.analysis();
-        let main_id = server
-            .file_id_for_uri(&"file:///workspace/main.rua".parse().unwrap())
-            .unwrap();
         let one_id = server.ensure_file_id_for_path(&library.join("one.ruai"));
-        let resolution = analysis.resolve_module_in_project(ProjectId::new(0), main_id, "one");
         let one_path = analysis.file_path(one_id).cloned();
         let definitions = analysis.def_map_for_project(ProjectId::new(0)).unwrap();
         let names: Vec<_> = definitions
@@ -3935,7 +4056,7 @@ mod tests {
             definitions
                 .definitions()
                 .any(|definition| definition.name() == "first_api"),
-            "{names:?}; resolution={resolution:?}; one={one_id:?} path={one_path:?}; roots={:?}",
+            "{names:?}; one={one_id:?} path={one_path:?}; roots={:?}",
             server.project_dependency_roots
         );
         assert!(
@@ -4036,7 +4157,7 @@ mod tests {
         let second = temp.join("second");
         for (folder, marker) in [(&first, "first_only"), (&second, "second_only")] {
             std::fs::create_dir_all(folder).unwrap();
-            std::fs::write(folder.join("main.rua"), "mod shared; shared::same();").unwrap();
+            std::fs::write(folder.join("main.rua"), "shared::same();").unwrap();
             std::fs::write(
                 folder.join("shared.rua"),
                 format!("pub fn same() {{}} pub fn {marker}() {{}}"),
@@ -4112,7 +4233,7 @@ mod tests {
             (&second, &second_library, "pub fn second_api();"),
         ] {
             std::fs::create_dir_all(library).unwrap();
-            std::fs::write(workspace.join("main.rua"), "mod api;").unwrap();
+            std::fs::write(workspace.join("main.rua"), "").unwrap();
             std::fs::write(library.join("api.ruai"), api).unwrap();
         }
 
@@ -4254,6 +4375,32 @@ mod tests {
 
     fn empty_line_index() -> LineIndex {
         LineIndex::new("")
+    }
+
+    #[test]
+    fn semantic_token_encoding_skips_invalid_source_ranges() {
+        let source = "let value = 1;";
+        let line_index = LineIndex::new(source);
+        let tokens = [
+            rua_analysis::SemanticToken::new(
+                rua_analysis::FileRange::new(FileId::new(0), rua_analysis::TextRange::new(4, 9)),
+                rua_analysis::SemanticTokenKind::Variable,
+                rua_analysis::SemanticTokenModifiers::NONE,
+            ),
+            rua_analysis::SemanticToken::new(
+                rua_analysis::FileRange::new(
+                    FileId::new(0),
+                    rua_analysis::TextRange::new(100, 101),
+                ),
+                rua_analysis::SemanticTokenKind::Variable,
+                rua_analysis::SemanticTokenModifiers::NONE,
+            ),
+        ];
+
+        let encoded = encode_semantic_tokens(&tokens, &line_index, source);
+
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].length, 5);
     }
 
     #[test]

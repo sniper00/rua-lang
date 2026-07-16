@@ -1,0 +1,7 @@
+extern "lua" {
+    fn host_value() -> i64;
+}
+
+use api::{read, write as save};
+
+fn value() -> i64 { host_value() }

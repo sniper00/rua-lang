@@ -41,7 +41,10 @@ fn print_usage() {
     println!("ruac — Rua -> Lua 5.5 compiler\n");
     println!("USAGE:");
     println!(
-        "    ruac build <file.rua> [-o <out.lua>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
+        "    ruac build <file.rua> [-o <out.lua>] [--emit bundle] [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
+    );
+    println!(
+        "    ruac build <file.rua> --emit modules --out-dir <dir> [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
     );
     println!(
         "    ruac check <file.rua> [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
@@ -52,13 +55,39 @@ fn print_usage() {
 fn build(args: &[String]) -> Result<(), String> {
     let args = parse_command_args(args, "build", true)?;
     let options = load_compile_options(&args)?;
-    let lua = ruac::compile_path_with_options(&args.input, &options)
-        .map_err(|error| error.to_string())?;
-    let out = args
-        .output
-        .unwrap_or_else(|| args.input.with_extension("lua"));
-    std::fs::write(&out, lua).map_err(|e| format!("writing {}: {}", out.display(), e))?;
-    println!("compiled {} -> {}", args.input.display(), out.display());
+    match args.emit {
+        EmitMode::Bundle => {
+            let lua = ruac::compile_path_with_options(&args.input, &options)
+                .map_err(|error| error.to_string())?;
+            let out = args
+                .output
+                .unwrap_or_else(|| args.input.with_extension("lua"));
+            std::fs::write(&out, lua).map_err(|e| format!("writing {}: {}", out.display(), e))?;
+            println!("compiled {} -> {}", args.input.display(), out.display());
+        }
+        EmitMode::Modules => {
+            let output_dir = args
+                .output_dir
+                .expect("modules mode validates --out-dir during argument parsing");
+            let artifact = ruac::compile_path_modules_artifact_with_options(&args.input, &options)
+                .map_err(|error| error.to_string())?;
+            for module in &artifact.modules {
+                let output = output_dir.join(&module.output_path);
+                let parent = output.parent().unwrap_or(&output_dir);
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+                std::fs::write(&output, &module.source)
+                    .map_err(|error| format!("writing {}: {error}", output.display()))?;
+            }
+            println!(
+                "compiled {} -> {} ({} Lua modules, entry {})",
+                args.input.display(),
+                output_dir.display(),
+                artifact.modules.len(),
+                artifact.root_output_path
+            );
+        }
+    }
     Ok(())
 }
 
@@ -74,10 +103,20 @@ fn check(args: &[String]) -> Result<(), String> {
 struct CommandOptions {
     input: PathBuf,
     output: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    emit: EmitMode,
     config: Option<PathBuf>,
     std_path: Option<PathBuf>,
     library: Vec<PathBuf>,
     library_mounts: BTreeMap<String, PathBuf>,
+    lua_path: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EmitMode {
+    #[default]
+    Bundle,
+    Modules,
 }
 
 fn parse_command_args(
@@ -87,10 +126,13 @@ fn parse_command_args(
 ) -> Result<CommandOptions, String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut output_dir: Option<PathBuf> = None;
+    let mut emit = EmitMode::Bundle;
     let mut config: Option<PathBuf> = None;
     let mut std_path: Option<PathBuf> = None;
     let mut library = Vec::new();
     let mut library_mounts = BTreeMap::new();
+    let mut lua_path = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -100,6 +142,26 @@ fn parse_command_args(
                     .get(i)
                     .ok_or_else(|| format!("{command}: `-o` requires a path"))?;
                 output = Some(PathBuf::from(path));
+            }
+            "--out-dir" if allow_output => {
+                i += 1;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| format!("{command}: `--out-dir` requires a path"))?;
+                output_dir = Some(PathBuf::from(path));
+            }
+            "--emit" if allow_output => {
+                i += 1;
+                emit = match args.get(i).map(String::as_str) {
+                    Some("bundle") => EmitMode::Bundle,
+                    Some("modules") => EmitMode::Modules,
+                    Some(value) => {
+                        return Err(format!(
+                            "{command}: unknown emit mode `{value}` (expected `bundle` or `modules`)"
+                        ));
+                    }
+                    None => return Err(format!("{command}: `--emit` requires a mode")),
+                };
             }
             "-c" | "--config" => {
                 i += 1;
@@ -126,6 +188,11 @@ fn parse_command_args(
                 let (name, path) = parse_library_mount(mount)?;
                 library_mounts.insert(name, path);
             }
+            "--lua-path" if allow_output => {
+                i += 1;
+                let path = args.get(i).ok_or("`--lua-path` requires a directory")?;
+                lua_path.push(PathBuf::from(path));
+            }
             other => {
                 if other.starts_with('-') {
                     return Err(format!("{command}: unknown flag `{other}`"));
@@ -138,13 +205,32 @@ fn parse_command_args(
         }
         i += 1;
     }
+    match emit {
+        EmitMode::Bundle if output_dir.is_some() => {
+            return Err(format!("{command}: `--out-dir` requires `--emit modules`"));
+        }
+        EmitMode::Modules if output.is_some() => {
+            return Err(format!(
+                "{command}: `-o`/`--out` cannot be used with `--emit modules`"
+            ));
+        }
+        EmitMode::Modules if output_dir.is_none() => {
+            return Err(format!(
+                "{command}: `--emit modules` requires `--out-dir <dir>`"
+            ));
+        }
+        EmitMode::Bundle | EmitMode::Modules => {}
+    }
     Ok(CommandOptions {
         input: input.ok_or_else(|| format!("{command}: missing <file.rua>"))?,
         output,
+        output_dir,
+        emit,
         config,
         std_path,
         library,
         library_mounts,
+        lua_path,
     })
 }
 
@@ -192,6 +278,9 @@ fn load_compile_options(command: &CommandOptions) -> Result<ruac::CompileOptions
             .library_mounts
             .insert(name.clone(), absolute_from_cwd(path.clone())?);
     }
+    for path in &command.lua_path {
+        options.lua_path.push(absolute_from_cwd(path.clone())?);
+    }
     Ok(options)
 }
 
@@ -217,10 +306,27 @@ fn parse_project_config(path: &Path) -> Result<ruac::CompileOptions, String> {
     let resolved = config
         .resolve(base)
         .map_err(|error| format!("resolving {}: {error}", path.display()))?;
+    for library in &resolved.lua_library {
+        if !library.declaration_root.is_dir() {
+            return Err(format!(
+                "resolving {}: Lua library declaration_root is not a directory: {}",
+                path.display(),
+                library.declaration_root.display()
+            ));
+        }
+        if !library.runtime_root.is_dir() {
+            return Err(format!(
+                "resolving {}: Lua library runtime_root is not a directory: {}",
+                path.display(),
+                library.runtime_root.display()
+            ));
+        }
+    }
     Ok(ruac::CompileOptions {
         std_path: resolved.std_path,
         library: resolved.library,
         library_mounts: resolved.library_mounts,
+        lua_path: resolved.lua_path,
     })
 }
 

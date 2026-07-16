@@ -1,9 +1,0 @@
-mod outer {
-    mod inner {
-        pub fn value() -> i64 { 42 }
-    }
-}
-
-fn main() {
-    outer::inner::value();
-}

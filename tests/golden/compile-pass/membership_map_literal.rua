@@ -1,0 +1,11 @@
+let scores: HashMap<String, i64> = #{
+    "alice": 10,
+    "bob": 20,
+};
+
+println!("{}", scores.get("alice").unwrap());
+println!("{}", "alice" in scores);
+println!("{}", "carol" in scores);
+println!("{}", 2 in vec![1, 2, 3]);
+println!("{}", "ua" in "Rua");
+println!("{}", 3 in 0..5);

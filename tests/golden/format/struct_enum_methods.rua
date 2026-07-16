@@ -1,0 +1,26 @@
+// Structs, enums, methods, and pattern matching.
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn norm_sq(&self) -> f64 {
+        self.x * self.x + self.y * self.y
+    }
+}
+
+enum Shape {
+    Circle(f64),
+    Rect { width: f64, height: f64 },
+    Dot,
+}
+
+fn area(shape: Shape) -> f64 {
+    match shape {
+        Shape::Circle(radius) => radius * radius * 3,
+        Shape::Rect { width, height } => width * height,
+        Shape::Dot => 0.0,
+    }
+}

@@ -82,6 +82,64 @@ export async function run(): Promise<void> {
     "Rua build command is available for .rua files in the Explorer context menu",
   );
 
+  const requestsUri = vscode.Uri.joinPath(firstFolder.uri, "requests.rua");
+  const requestsDocument = await vscode.workspace.openTextDocument(requestsUri);
+  const associatedFunction = new vscode.Position(
+    1,
+    requestsDocument.lineAt(1).text.indexOf("new") + 1,
+  );
+  await waitUntil(async () => {
+    const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+      "vscode.executeHoverProvider",
+      requestsUri,
+      associatedFunction,
+    );
+    return hovers.length > 0;
+  }, "Rua hover provider did not resolve OrderRequest::new");
+  const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+    "vscode.executeHoverProvider",
+    requestsUri,
+    associatedFunction,
+  );
+  assert.ok(
+    hovers.some((hover) =>
+      hover.contents.some((content) =>
+        (typeof content === "string" ? content : content.value).includes(
+          "fn new(",
+        ),
+      ),
+    ),
+    "associated-function hover contains its signature",
+  );
+  const definitions = await vscode.commands.executeCommand<
+    Array<vscode.Location | vscode.LocationLink>
+  >("vscode.executeDefinitionProvider", requestsUri, associatedFunction);
+  assert.ok(definitions.length > 0, "associated function has a definition");
+  const definitionUri =
+    definitions[0] instanceof vscode.Location
+      ? definitions[0].uri
+      : definitions[0].targetUri;
+  assert.strictEqual(
+    fs.realpathSync.native(definitionUri.fsPath),
+    fs.realpathSync.native(
+      vscode.Uri.joinPath(firstFolder.uri, "domain", "order.rua").fsPath,
+    ),
+  );
+  await vscode.commands.executeCommand("rua.openLocation", {
+    uri: definitionUri.toString(),
+    range: {
+      start: { line: 3, character: 11 },
+      end: { line: 3, character: 14 },
+    },
+  });
+  const openedDefinition = vscode.window.activeTextEditor;
+  assert.ok(openedDefinition, "type-definition command opens an editor");
+  assert.strictEqual(
+    fs.realpathSync.native(openedDefinition.document.uri.fsPath),
+    fs.realpathSync.native(definitionUri.fsPath),
+  );
+  assert.strictEqual(requestsDocument.languageId, "rua");
+
   const source = vscode.Uri.joinPath(firstFolder.uri, "main.rua");
   const generated = vscode.Uri.joinPath(firstFolder.uri, "main.lua");
   assert.strictEqual(

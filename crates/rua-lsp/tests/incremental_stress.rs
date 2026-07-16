@@ -1223,17 +1223,18 @@ fn multi_file_workspace_does_not_panic() {
 
 #[test]
 fn path_completions_after_colon_colon() {
-    // CB1 fix: after `mod::`, path completions should offer the module's
+    // After `module::`, path completions should offer the module's
     // public items (not return empty).
-    let uri = uri("/test/pathcomp.rua");
+    let main_uri = uri("/test/main.rua");
+    let math_uri = uri("/test/math.rua");
     let mut srv = TestServer::new();
+    srv.open(&main_uri, "fn main() { math:: }");
     srv.open(
-        &uri,
-        "mod math { pub fn abs(x: i64) -> i64 { if x < 0 { -x } else { x } } }\nfn main() { math:: }",
+        &math_uri,
+        "pub fn abs(x: i64) -> i64 { if x < 0 { -x } else { x } }",
     );
 
-    // cursor on the space after `math::` (after the `::`)
-    let pp = srv.pp(&uri, 1, 21).unwrap();
+    let pp = srv.pp(&main_uri, 0, 18).unwrap();
     let items = srv.snapshot().completions(pp);
     let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
     assert!(

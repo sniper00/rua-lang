@@ -12,7 +12,7 @@ fn references_cross_file_parses_and_intra_file_works() {
     let mut srv = TestServer::new();
 
     srv.open(&uri_b, "pub fn helper() -> i64 { 42 }");
-    let main_source = "mod b; fn main() { b::helper(); }";
+    let main_source = "fn main() { b::helper(); }";
     srv.open(&uri_a, main_source);
 
     let analysis = srv.snapshot();
@@ -112,8 +112,7 @@ fn readonly_ruai_variant_has_precise_navigation_hover_and_atomic_rename_rejectio
     let api_uri = uri("/project/src/api.ruai");
     let main_uri = uri("/project/src/main.rua");
     let api = "pub enum State {\n    /// The host is ready.\n    Ready,\n}\n";
-    let main =
-        "mod api;\nlet state = api::State::Ready;\nmatch state { api::State::Ready => {} }\n";
+    let main = "let state = api::State::Ready;\nmatch state { api::State::Ready => {} }\n";
     let mut srv = TestServer::new();
     let api_id = srv.open(&api_uri, api);
     srv.open(&main_uri, main);

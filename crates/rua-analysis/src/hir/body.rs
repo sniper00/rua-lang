@@ -243,7 +243,11 @@ pub enum Expr {
         return_type: Option<TypeRef>,
         body: ExprId,
     },
+    Loop {
+        body: ExprId,
+    },
     Assign {
+        op: Option<BinaryOp>,
         target: ExprId,
         value: ExprId,
     },
@@ -257,12 +261,14 @@ pub enum Expr {
     MethodCall {
         receiver: ExprId,
         method: NameRefId,
+        optional: bool,
         type_args: Vec<TypeRef>,
         args: Vec<ExprId>,
     },
     Field {
         base: ExprId,
         field: NameRefId,
+        optional: bool,
     },
     Index {
         base: ExprId,
@@ -283,6 +289,9 @@ pub enum Expr {
     StructLiteral {
         path: Vec<NameRefId>,
         fields: Vec<StructField>,
+    },
+    MapLiteral {
+        entries: Vec<MapLiteralEntry>,
     },
     MacroCall {
         macro_name: NameRefId,
@@ -333,7 +342,9 @@ pub enum Statement {
         iterable: ExprId,
         body: ExprId,
     },
-    Break,
+    Break {
+        value: Option<ExprId>,
+    },
     Continue,
 }
 
@@ -369,6 +380,22 @@ pub struct StructField {
     name: NameRefId,
     value: ExprId,
     shorthand: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapLiteralEntry {
+    key: ExprId,
+    value: ExprId,
+}
+
+impl MapLiteralEntry {
+    pub const fn key(self) -> ExprId {
+        self.key
+    }
+
+    pub const fn value(self) -> ExprId {
+        self.value
+    }
 }
 
 impl StructField {
@@ -477,7 +504,32 @@ pub enum BinaryOp {
     GreaterOrEqual,
     And,
     Or,
+    Coalesce,
+    Contains,
     Missing,
+}
+
+impl BinaryOp {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Remainder => "%",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Coalesce => "??",
+            Self::Contains => "in",
+            Self::Missing => "<missing>",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -912,7 +964,9 @@ impl BodyLowerer {
                     body,
                 }
             }
-            AstStmt::Break(_) => Statement::Break,
+            AstStmt::Break(statement) => Statement::Break {
+                value: statement.value().map(|value| self.lower_expr(value)),
+            },
             AstStmt::Continue(_) => Statement::Continue,
         }
     }
@@ -1016,16 +1070,27 @@ impl BodyLowerer {
                     body,
                 }
             }
+            AstExpr::Loop(expr) => Expr::Loop {
+                body: self.lower_required_block(expr.body(), expr.syntax()),
+            },
             AstExpr::Assign(expr) => {
+                let operator = expr.op();
                 let target = self.lower_required_expr_at(
                     expr.target(),
-                    insertion_before_token(expr.syntax(), SyntaxKind::Eq),
+                    operator
+                        .as_ref()
+                        .map(insertion_before_syntax_token)
+                        .unwrap_or_else(|| insertion_range(expr.syntax())),
                 );
                 let value = self.lower_required_expr_at(
                     expr.value(),
-                    insertion_after_token(expr.syntax(), SyntaxKind::Eq),
+                    operator
+                        .as_ref()
+                        .map(insertion_after_syntax_token)
+                        .unwrap_or_else(|| insertion_range(expr.syntax())),
                 );
-                Expr::Assign { target, value }
+                let op = operator.and_then(lower_assignment_op);
+                Expr::Assign { op, target, value }
             }
             AstExpr::Try(expr) => {
                 let inner = self.lower_required_expr_at(
@@ -1046,9 +1111,14 @@ impl BodyLowerer {
                 Expr::Call { callee, args }
             }
             AstExpr::MethodCall(expr) => {
+                let separator =
+                    direct_token_any(expr.syntax(), &[SyntaxKind::Dot, SyntaxKind::QuestionDot]);
                 let receiver = self.lower_required_expr_at(
                     expr.receiver(),
-                    insertion_before_token(expr.syntax(), SyntaxKind::Dot),
+                    separator
+                        .as_ref()
+                        .map(insertion_before_syntax_token)
+                        .unwrap_or_else(|| insertion_range(expr.syntax())),
                 );
                 let method_token = expr.method_name();
                 let method = match method_token {
@@ -1060,7 +1130,10 @@ impl BodyLowerer {
                     None => self.alloc_name_ref(
                         None,
                         NameRefKind::Method,
-                        insertion_after_token(expr.syntax(), SyntaxKind::Dot),
+                        separator
+                            .as_ref()
+                            .map(insertion_after_syntax_token)
+                            .unwrap_or_else(|| insertion_range(expr.syntax())),
                     ),
                 };
                 let type_args = expr
@@ -1074,14 +1147,20 @@ impl BodyLowerer {
                 Expr::MethodCall {
                     receiver,
                     method,
+                    optional: expr.is_optional(),
                     type_args,
                     args,
                 }
             }
             AstExpr::Field(expr) => {
+                let separator =
+                    direct_token_any(expr.syntax(), &[SyntaxKind::Dot, SyntaxKind::QuestionDot]);
                 let base = self.lower_required_expr_at(
                     expr.base(),
-                    insertion_before_token(expr.syntax(), SyntaxKind::Dot),
+                    separator
+                        .as_ref()
+                        .map(insertion_before_syntax_token)
+                        .unwrap_or_else(|| insertion_range(expr.syntax())),
                 );
                 let field = match expr.field_name() {
                     Some(token) => self.alloc_name_ref(
@@ -1092,10 +1171,17 @@ impl BodyLowerer {
                     None => self.alloc_name_ref(
                         None,
                         NameRefKind::Field,
-                        insertion_after_token(expr.syntax(), SyntaxKind::Dot),
+                        separator
+                            .as_ref()
+                            .map(insertion_after_syntax_token)
+                            .unwrap_or_else(|| insertion_range(expr.syntax())),
                     ),
                 };
-                Expr::Field { base, field }
+                Expr::Field {
+                    base,
+                    field,
+                    optional: expr.is_optional(),
+                }
             }
             AstExpr::Index(expr) => {
                 let base = self.lower_required_expr_at(
@@ -1205,6 +1291,16 @@ impl BodyLowerer {
                     .map(|field| self.lower_struct_field(field))
                     .collect();
                 Expr::StructLiteral { path, fields }
+            }
+            AstExpr::Map(expr) => {
+                let entries = expr
+                    .entries()
+                    .map(|entry| MapLiteralEntry {
+                        key: self.lower_required_expr(entry.key(), entry.syntax()),
+                        value: self.lower_required_expr(entry.value(), entry.syntax()),
+                    })
+                    .collect();
+                Expr::MapLiteral { entries }
             }
             AstExpr::MacroCall(expr) => {
                 let macro_name =
@@ -1519,8 +1615,22 @@ fn lower_binary_op(token: SyntaxToken) -> BinaryOp {
         SyntaxKind::Ge => BinaryOp::GreaterOrEqual,
         SyntaxKind::AndAnd => BinaryOp::And,
         SyntaxKind::OrOr => BinaryOp::Or,
+        SyntaxKind::QuestionQuestion => BinaryOp::Coalesce,
+        SyntaxKind::KwIn => BinaryOp::Contains,
         _ => BinaryOp::Missing,
     }
+}
+
+fn lower_assignment_op(token: SyntaxToken) -> Option<BinaryOp> {
+    Some(match token.kind() {
+        SyntaxKind::Eq => return None,
+        SyntaxKind::PlusEq => BinaryOp::Add,
+        SyntaxKind::MinusEq => BinaryOp::Subtract,
+        SyntaxKind::StarEq => BinaryOp::Multiply,
+        SyntaxKind::SlashEq => BinaryOp::Divide,
+        SyntaxKind::PercentEq => BinaryOp::Remainder,
+        _ => return None,
+    })
 }
 
 fn literal_from_pattern(pattern: &SyntaxNode) -> Option<Literal> {

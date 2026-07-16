@@ -70,6 +70,27 @@ npm run package      # produces rua-lang-<version>.vsix
 | `rua.compiler.args` | `[]` | Extra args appended to `ruac build <file>`. |
 | `rua.trace.server` | `off` | Trace JSON-RPC traffic (`off`/`messages`/`verbose`). |
 
+To make the context-menu command emit a project module tree when it is invoked
+on the root source file:
+
+```json
+{
+  "rua.compiler.args": ["--emit", "modules", "--out-dir", "dist/modules"]
+}
+```
+
+Configure runtime search directories in `.ruarc.toml`; `ruac` writes them into
+the generated root module's `package.path`:
+
+```toml
+[runtime]
+lua_path = ["./dist/modules", "./lua"]
+```
+
+Alternatively set `LUA_PATH` in the host process or append repeated
+`--lua-path <dir>` compiler arguments. Child source modules are not independent
+compiler entry points; use the command on the project root file.
+
 Restart waits for the server child process `close` event before disposing its
 output channel and watcher.
 
@@ -80,12 +101,21 @@ root so `ruac` and `rua-lsp` consume the same inputs:
 [workspace]
 library = ["./types"]
 
+[[workspace.lua_library]]
+root = "../moon_rs/lualib"
+
 [workspace.library_mounts]
 host = "../host/host.ruai"
 
 [runtime]
 std_path = "./std"
+lua_path = ["./dist/modules", "./lua"]
 ```
+
+`workspace.lua_library` is the preferred bulk configuration for ordinary Lua
+libraries. With colocated files, `moon/http/client.ruai` automatically describes
+`require("moon.http.client")`. For separate trees, use one entry with
+`declaration_root` and `runtime_root`; no per-module mapping is needed.
 
 All project fields use snake_case. Library and standard-library inputs are
 configured only in `.ruarc.toml`; VS Code settings only control the compiler

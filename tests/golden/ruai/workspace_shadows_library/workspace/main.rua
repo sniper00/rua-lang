@@ -1,5 +1,3 @@
-mod service;
-
 fn value() -> i64 {
     service::value()
 }

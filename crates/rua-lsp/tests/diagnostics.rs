@@ -378,6 +378,114 @@ fn type_valid_binary_string_plus_string() {
 }
 
 #[test]
+fn binary_operator_matrix_reports_only_incompatible_concrete_types() {
+    let uri = uri("/test/diag_binary_matrix.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        r#"
+fn binary_matrix() {
+    let bool_add = true + 1;
+    let vec_subtract = vec![1] - vec![2];
+    let string_multiply = "left" * "right";
+    let mixed_equal = 1 == "1";
+    let mixed_not_equal = true != "true";
+    let bool_order = true < false;
+    let mixed_order = "1" >= 1;
+
+    let numeric_add = 1 + 2.0;
+    let string_add = "left" + "right";
+    let numeric_order = 1 < 2.0;
+    let string_order = "left" <= "right";
+    let bool_equal = true == false;
+}
+"#,
+    );
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diagnostics = srv.snapshot().diagnostics(file_id);
+    let invalid = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == Some(DiagnosticCode::TypeInvalidBinary))
+        .collect::<Vec<_>>();
+
+    assert_eq!(invalid.len(), 7, "unexpected diagnostics: {diagnostics:?}");
+    for operator in ["`+`", "`-`", "`*`", "`==`", "`!=`", "`<`", "`>=`"] {
+        assert!(
+            invalid
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains(operator)),
+            "missing diagnostic for {operator}: {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn user_arithmetic_operator_checks_implementation_and_rhs_type() {
+    let uri = uri("/test/diag_user_binary.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        r#"
+struct Scale { value: f64 }
+impl Mul for Scale {
+    fn mul(self, factor: f64) -> Scale { Scale { value: self.value * factor } }
+}
+fn valid_scale(value: Scale) -> Scale { value * 2.0 }
+fn invalid_scale(value: Scale) -> Scale { value * "two" }
+
+struct Point { x: i64 }
+fn missing_add(value: Point) { let invalid = value + 1; }
+
+fn valid_generic<T: Div>(left: T, right: T) { let quotient = left / right; }
+fn invalid_generic<T>(left: T, right: T) { let quotient = left / right; }
+"#,
+    );
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let diagnostics = srv.snapshot().diagnostics(file_id);
+    let invalid = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == Some(DiagnosticCode::TypeInvalidBinary))
+        .collect::<Vec<_>>();
+
+    assert_eq!(invalid.len(), 3, "unexpected diagnostics: {diagnostics:?}");
+}
+
+#[test]
+fn method_string_return_after_membership_if_initializer_has_no_type_mismatch() {
+    let uri = uri("/test/product_label.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        r#"
+pub struct Product {
+    pub name: String,
+}
+
+impl Product {
+    pub fn display_label(&self) -> String {
+        let category = if "Book" in self.name {
+            "book"
+        } else {
+            "general"
+        };
+        self.name + " [" + category + "]"
+    }
+}
+"#,
+    );
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+    assert!(analysis.parse(file_id).errors().is_empty());
+    let diagnostics = analysis.diagnostics(file_id);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code() != Some(DiagnosticCode::TypeMismatch)),
+        "valid method return must not produce E0200: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn type_invalid_try_on_non_result() {
     let uri = uri("/test/diag_try.rua");
     let mut srv = TestServer::new();

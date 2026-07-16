@@ -23,6 +23,36 @@ fn completions_offer_locals_in_unattached_workspace_file() {
 }
 
 #[test]
+fn completions_offer_top_level_chunk_variables() {
+    let uri = uri("/test/main.rua");
+    let (source, offset) = extract_marker(
+        "let requests = vec![\"keyboard-001\"];\n\
+         let mut processed = 0;\n\
+         let featured = requests[0];\n\
+         println!(\"{}\", $0);\n",
+    );
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+
+    assert!(
+        items.iter().any(|item| item.label() == "featured"),
+        "top-level chunk variable missing from completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "processed"),
+        "earlier top-level chunk variable missing from completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "requests"),
+        "first top-level chunk variable missing from completions: {items:?}"
+    );
+}
+
+#[test]
 fn completions_offer_option_map_member() {
     let (source, offset) = extract_marker("fn run(value: Option<i64>) { let mapped = value.$0; }");
     let uri = uri("/test/option_member.rua");
@@ -35,6 +65,50 @@ fn completions_offer_option_map_member() {
     assert!(
         items.iter().any(|item| item.label() == "map"),
         "Option<T>.map missing from member completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "expect"),
+        "Option<T>.expect missing from member completions: {items:?}"
+    );
+}
+
+#[test]
+fn completions_offer_result_expect_member() {
+    let (source, offset) =
+        extract_marker("fn run(value: Result<i64, String>) { let required = value.ex$0; }");
+    let uri = uri("/test/result_expect_member.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "expect"),
+        "Result<T, E>.expect missing from member completions: {items:?}"
+    );
+}
+
+#[test]
+fn optional_chain_completion_uses_the_unwrapped_receiver_type() {
+    let (source, offset) = extract_marker(
+        "struct Profile { city: String }\nimpl Profile { fn label(&self) -> String { self.city } }\nfn run(value: Option<Profile>) { let shown = value?.$0; }",
+    );
+    let uri = uri("/test/optional_chain_completion.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    let labels = items.iter().map(|item| item.label()).collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"city"),
+        "field missing after `?.`: {items:?}"
+    );
+    assert!(
+        labels.contains(&"label"),
+        "method missing after `?.`: {items:?}"
     );
 }
 
@@ -76,15 +150,14 @@ fn completions_trait_method_struct_parsed_correctly() {
 
 #[test]
 fn completions_module_path_nested() {
-    let uri = uri("/test/comp_mod.rua");
+    let main_uri = uri("/test/main.rua");
+    let module_uri = uri("/test/math/ops.rua");
+    let (source, offset) = extract_marker("fn main() { math::ops::$0 }");
     let mut srv = TestServer::new();
-    srv.open(
-        &uri,
-        "mod math {\n    pub mod ops {\n        pub fn add(a: i64, b: i64) -> i64 { a + b }\n    }\n}\nfn main() { math::ops:: }",
-    );
+    srv.open(&main_uri, &source);
+    srv.open(&module_uri, "pub fn add(a: i64, b: i64) -> i64 { a + b }");
 
-    // cursor after `math::ops::`
-    let pp = srv.pp(&uri, 5, 25).unwrap();
+    let pp = srv.pp_at_offset(&main_uri, offset).unwrap();
     let items = srv.snapshot().completions(pp);
     let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
 

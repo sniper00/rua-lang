@@ -1,3 +1,0 @@
-query: math::
-completion: Value Struct "struct Value"
-completion: add Function "pub fn add(left: i64, right: i64) -> i64"

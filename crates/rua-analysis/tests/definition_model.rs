@@ -16,11 +16,18 @@ fn single_file_host(source: &str, file_kind: FileKind) -> (AnalysisHost, FileId)
 
 #[test]
 fn definition_identity_survives_body_and_unrelated_item_edits() {
-    let original = concat!(
-        "fn target(value: i64) -> i64 { value + 1 }\n",
-        "mod stable { fn child() {} }\n",
-    );
+    let original = "fn target(value: i64) -> i64 { value + 1 }\n";
     let (mut host, file_id) = single_file_host(original, FileKind::Source);
+    let stable_file = FileId::new(1);
+    let mut add_module = Change::new();
+    add_module.set_file_with_path(
+        stable_file,
+        SourceRootId::new(0),
+        FileKind::Source,
+        "stable.rua",
+        "fn child() {}\n",
+    );
+    host.apply_change(add_module);
     let before_snapshot = host.analysis();
     let before_map = before_snapshot.def_map(file_id);
     let before = before_map
@@ -38,8 +45,6 @@ fn definition_identity_survives_body_and_unrelated_item_edits() {
     let body_edit = concat!(
         "fn unrelated() {}\n",
         "fn target(value: i64) -> i64 { let doubled = value * 2; doubled }\n",
-        "mod unrelated_module {}\n",
-        "mod stable { fn child() {} }\n",
     );
     let mut change = Change::new();
     change.set_file_text(file_id, body_edit);
@@ -73,8 +78,6 @@ fn definition_identity_survives_body_and_unrelated_item_edits() {
         concat!(
             "fn unrelated() {}\n",
             "fn target(value: String) -> i64 { 1 }\n",
-            "mod unrelated_module {}\n",
-            "mod stable { fn child() {} }\n",
         ),
     );
     host.apply_change(signature_edit);
@@ -287,7 +290,7 @@ fn module(map: &DefMap, name: &str) -> rua_analysis::ModuleId {
 }
 
 #[test]
-fn module_resolution_uses_flat_file_and_inline_scope_directories() {
+fn module_resolution_uses_flat_directory_and_virtual_path_modules() {
     let root = SourceRootId::new(0);
     let main = FileId::new(0);
     let flat = FileId::new(1);
@@ -295,14 +298,8 @@ fn module_resolution_uses_flat_file_and_inline_scope_directories() {
     let inline_child = FileId::new(3);
     let mut change = Change::new();
     change.set_source_root(root, SourceRootKind::Workspace);
-    change.set_file_with_path(
-        main,
-        root,
-        FileKind::Source,
-        "src/main.rua",
-        "mod flat; mod inline { mod child; }",
-    );
-    change.set_file_with_path(flat, root, FileKind::Source, "src/flat.rua", "mod nested;");
+    change.set_file_with_path(main, root, FileKind::Source, "src/main.rua", "");
+    change.set_file_with_path(flat, root, FileKind::Source, "src/flat.rua", "");
     change.set_file_with_path(
         nested,
         root,
@@ -377,20 +374,8 @@ fn multi_root_identity_is_project_scoped_and_uses_logical_bases() {
     ] {
         change.set_source_root(root, kind);
     }
-    change.set_file_with_path(
-        main_a,
-        root_a,
-        FileKind::Source,
-        "src/main.rua",
-        "mod foo; mod foreign; mod shadow; mod nested;",
-    );
-    change.set_file_with_path(
-        main_b,
-        root_b,
-        FileKind::Source,
-        "src/main.rua",
-        "mod foo; mod foreign;",
-    );
+    change.set_file_with_path(main_a, root_a, FileKind::Source, "src/main.rua", "");
+    change.set_file_with_path(main_b, root_b, FileKind::Source, "src/main.rua", "");
     change.set_file_with_path(
         shadow_a,
         root_a,
@@ -415,9 +400,9 @@ fn multi_root_identity_is_project_scoped_and_uses_logical_bases() {
     change.set_file_with_path(
         foo_two,
         library_two,
-        FileKind::Source,
+        FileKind::Declaration,
         "foo.rua",
-        "mod child; fn from_two() {}",
+        "fn from_two() {}",
     );
     change.set_file_with_path(
         foo_std,
@@ -426,13 +411,7 @@ fn multi_root_identity_is_project_scoped_and_uses_logical_bases() {
         "foo.rua",
         "fn from_std() {}",
     );
-    change.set_file_with_path(
-        nested_a,
-        root_a,
-        FileKind::Source,
-        "src/nested/mod.rua",
-        "mod leaf;",
-    );
+    change.set_file_with_path(nested_a, root_a, FileKind::Source, "src/nested/mod.rua", "");
     change.set_file_with_path(
         nested_leaf,
         library_two,
@@ -476,35 +455,6 @@ fn multi_root_identity_is_project_scoped_and_uses_logical_bases() {
     host.apply_change(change);
     let analysis = host.analysis();
 
-    assert_eq!(
-        analysis.resolve_module_in_project(project_a, main_a, "foo"),
-        Some(foo_two)
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_a, main_a, "shadow"),
-        Some(shadow_a)
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_a, main_a, "foreign"),
-        None
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_a, nested_a, "leaf"),
-        Some(nested_leaf)
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_a, foo_two, "child"),
-        Some(foo_child)
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_b, main_b, "foreign"),
-        Some(foreign_b)
-    );
-    assert_eq!(
-        analysis.resolve_module_in_project(project_b, main_b, "foo"),
-        None
-    );
-
     let map_a = analysis
         .def_map_for_project(project_a)
         .expect("project A map");
@@ -535,9 +485,7 @@ fn multi_root_identity_is_project_scoped_and_uses_logical_bases() {
             .resolve_name(leaf_module, "from_nested_library")
             .is_some()
     );
-    assert!(map_a.resolve_name(map_a.root(), "foreign").is_some());
-    let foreign_module = module(&map_a, "foreign");
-    assert!(map_a.module(foreign_module).unwrap().file_id().is_none());
+    assert!(map_a.resolve_name(map_a.root(), "foreign").is_none());
 
     let map_shared = analysis
         .def_map_for_project(project_shared)

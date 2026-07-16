@@ -1,0 +1,4 @@
+tolerant:
+E0001 @0: expected expression
+strict:
+E0001 0..3: expected expression, found `mod`

@@ -13,3 +13,7 @@ end
 function service.value()
     return 7
 end
+
+return {
+    service = service,
+}

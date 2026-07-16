@@ -2,6 +2,7 @@
 
 mod support;
 
+use rua_analysis::TypeHintTarget;
 use support::{TestServer, uri};
 
 #[test]
@@ -79,6 +80,54 @@ fn inlay_hint_for_let_binding_with_struct_type() {
     assert!(
         has_point_hint,
         "should have Point type hint, got: {hints_found:?}"
+    );
+}
+
+#[test]
+fn inlay_hint_option_type_and_payload_are_hoverable_and_navigable() {
+    let uri = uri("/test/main.rua");
+    let source = "struct Product {}\n\
+                  fn first_available() -> Option<Product> { Option::None }\n\
+                  let featured = first_available();\n";
+    let mut srv = TestServer::new();
+    let file_id = srv.open(&uri, source);
+
+    let hints = srv.snapshot().inlay_hints(rua_analysis::ProjectFile::new(
+        rua_analysis::ProjectId::new(0),
+        file_id,
+    ));
+    let featured_end = source.find("featured").unwrap() as u32 + "featured".len() as u32;
+    let hint = hints
+        .iter()
+        .find(|hint| hint.position().offset == featured_end)
+        .expect("featured type hint");
+
+    assert_eq!(hint.ty(), "Option<Product>");
+    let option = hint
+        .label_parts()
+        .iter()
+        .find(|part| part.value() == "Option")
+        .expect("Option label part");
+    assert!(
+        matches!(option.target(), Some(TypeHintTarget::Builtin(target)) if target.source_name() == "option.ruai")
+    );
+    assert_eq!(
+        option.tooltip().and_then(|tooltip| tooltip.context()),
+        Some("std::option::Option")
+    );
+
+    let product = hint
+        .label_parts()
+        .iter()
+        .find(|part| part.value() == "Product")
+        .expect("Product label part");
+    assert!(matches!(
+        product.target(),
+        Some(TypeHintTarget::Source(target)) if target.file_id == file_id
+    ));
+    assert_eq!(
+        product.tooltip().and_then(|tooltip| tooltip.context()),
+        Some("Product")
     );
 }
 

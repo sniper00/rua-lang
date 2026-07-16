@@ -528,26 +528,9 @@ fn collect_declaration_item_diagnostics(
                     }
                 }
             }
-            SyntaxItem::Mod(module) if !module.is_file() => {
-                if let Some(statement) = module.stmts().next() {
-                    diagnostics.push(invalid_declaration_diag(
-                        file_id,
-                        syntax_node_range(statement.syntax()),
-                        format!(
-                            "module `{}` in a declaration file cannot contain executable statements",
-                            module.name().map_or_else(
-                                || "<missing>".to_string(),
-                                |name| name.text().to_string(),
-                            )
-                        ),
-                    ));
-                }
-                collect_declaration_item_diagnostics(file_id, module.items(), diagnostics);
-            }
             SyntaxItem::Struct(_)
             | SyntaxItem::Enum(_)
             | SyntaxItem::Extern(_)
-            | SyntaxItem::Mod(_)
             | SyntaxItem::Use(_) => {}
         }
     }
@@ -604,7 +587,7 @@ fn add_control_flow_lints(
         );
     }
 
-    for (_, loop_body) in cfg.infinite_loops() {
+    for loop_body in cfg.infinite_loops() {
         if let Some(range) = source_map.expr_range(loop_body) {
             diagnostics.push(
                 fast_diag(
@@ -690,8 +673,9 @@ fn statement_range(statement: &Statement, source_map: &BodySourceMap) -> Option<
         Statement::While { body, .. } | Statement::Loop { body } => source_map.expr_range(*body)?,
         Statement::Return { value: None }
         | Statement::Missing
-        | Statement::Break
+        | Statement::Break { value: None }
         | Statement::Continue => return None,
+        Statement::Break { value: Some(expr) } => source_map.expr_range(*expr)?,
     };
     Some(range.range)
 }
@@ -764,7 +748,10 @@ fn convert_inference_diagnostic(
             let range = expr_range(*expr, source_map)?;
             (
                 DiagnosticCode::TypeInvalidBinary,
-                format!("cannot apply binary `{op:?}` to `{lhs}` and `{rhs}`"),
+                format!(
+                    "cannot apply binary `{}` to `{lhs}` and `{rhs}`",
+                    op.symbol()
+                ),
                 range,
             )
         }
@@ -773,6 +760,22 @@ fn convert_inference_diagnostic(
             (
                 DiagnosticCode::TypeInvalidTry,
                 format!("`?` operator requires `Result` or `Option`, found `{found}`"),
+                range,
+            )
+        }
+        InferenceDiagnostic::InvalidBreakValue { expr } => {
+            let range = expr_range(*expr, source_map)?;
+            (
+                DiagnosticCode::TypeInvalidBreak,
+                "`break` with a value is only allowed in `loop`".to_string(),
+                range,
+            )
+        }
+        InferenceDiagnostic::InvalidOptionalChain { expr, found } => {
+            let range = expr_range(*expr, source_map)?;
+            (
+                DiagnosticCode::TypeInvalidOptionalChain,
+                format!("optional chaining requires `Option`, found `{found}`"),
                 range,
             )
         }

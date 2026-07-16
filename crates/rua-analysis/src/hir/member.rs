@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use rua_core::StdSymbolId;
+use rua_core::{BuiltinTraitId, StdSymbolId};
 
 use super::{
     CallableSignature, CallableTy, DefId, DefKind, DefMap, GenericParamId, ItemSignature,
@@ -238,6 +238,7 @@ pub struct ImplementationData {
     target_ty: Ty,
     trait_ty: Option<Ty>,
     trait_id: Option<DefId>,
+    builtin_trait: Option<BuiltinTraitId>,
     methods: Vec<DefId>,
     requirements: Vec<(Ty, DefId)>,
 }
@@ -255,6 +256,10 @@ impl ImplementationData {
         self.trait_id
     }
 
+    pub const fn builtin_trait(&self) -> Option<BuiltinTraitId> {
+        self.builtin_trait
+    }
+
     pub fn methods(&self) -> &[DefId] {
         &self.methods
     }
@@ -267,6 +272,7 @@ pub struct MemberIndex {
     standard_library: Arc<StdLibraryIndex>,
     generic_params: BTreeMap<DefId, Vec<GenericParamDecl>>,
     bounds: BTreeMap<GenericParamId, Vec<TraitBound>>,
+    builtin_bounds: BTreeMap<GenericParamId, Vec<BuiltinTraitId>>,
     scoped_bounds: BTreeMap<DefId, BTreeMap<GenericParamId, Vec<TraitBound>>>,
     type_templates: BTreeMap<DefId, Ty>,
     callables: BTreeMap<DefId, CallableTemplate>,
@@ -310,6 +316,7 @@ impl MemberIndex {
             standard_library,
             generic_params: BTreeMap::new(),
             bounds: BTreeMap::new(),
+            builtin_bounds: BTreeMap::new(),
             scoped_bounds: BTreeMap::new(),
             type_templates: BTreeMap::new(),
             callables: BTreeMap::new(),
@@ -376,6 +383,15 @@ impl MemberIndex {
             .and_then(|template| template.receiver_ty.clone())
     }
 
+    /// Type whose trait or `impl` block declares this callable.
+    ///
+    /// Unlike `receiver_type`, this also exists for associated functions that
+    /// do not take `self`.
+    pub fn declaring_type(&self, callable: DefId) -> Option<Ty> {
+        let owner = self.def_map.definition(callable)?.owner()?;
+        self.owner_receiver_type(owner)
+    }
+
     pub fn builtin_receiver_type(&self, builtin: StdSymbolId) -> Option<Ty> {
         self.builtin_receivers.get(&builtin).cloned()
     }
@@ -426,6 +442,30 @@ impl MemberIndex {
             self.method_candidates_with_scope(receiver, Some(scope)),
             name,
         )
+    }
+
+    pub fn resolve_builtin_trait_method(
+        &self,
+        receiver: &Ty,
+        trait_id: BuiltinTraitId,
+        name: &str,
+    ) -> Option<MemberResolution> {
+        let mut candidates = Vec::new();
+        for implementation in &self.implementations {
+            if implementation.builtin_trait != Some(trait_id) {
+                continue;
+            }
+            let Some(substitution) = self.match_implementation(implementation, receiver) else {
+                continue;
+            };
+            candidates.extend(self.impl_declared_candidates(
+                implementation,
+                &substitution,
+                true,
+                MemberOrigin::InherentImpl(implementation.definition),
+            ));
+        }
+        unique_named(candidates, name)
     }
 
     pub fn resolve_associated(&self, owner: DefId, name: &str) -> Option<MemberResolution> {
@@ -601,6 +641,19 @@ impl MemberIndex {
         self.implements_trait_inner(ty, trait_id, &mut BTreeSet::new())
     }
 
+    pub fn implements_builtin_trait(&self, ty: &Ty, trait_id: BuiltinTraitId) -> bool {
+        match ty {
+            Ty::GenericParam(param) => self
+                .builtin_bounds
+                .get(&param.id())
+                .is_some_and(|bounds| bounds.contains(&trait_id)),
+            _ => self.implementations.iter().any(|implementation| {
+                implementation.builtin_trait == Some(trait_id)
+                    && self.match_implementation(implementation, ty).is_some()
+            }),
+        }
+    }
+
     fn collect_generic_params(&mut self) {
         for definition in self.def_map.definitions() {
             let params = match definition.signature() {
@@ -684,13 +737,18 @@ impl MemberIndex {
             bounds.sort();
             bounds.dedup();
         }
+        for bounds in self.builtin_bounds.values_mut() {
+            bounds.sort();
+            bounds.dedup();
+        }
     }
 
     fn record_bound(&mut self, owner: DefId, generic: GenericParamId, bound: &TypeRef) {
-        let Some(bound) = self.lower_trait_bound(owner, bound) else {
-            return;
-        };
-        self.bounds.entry(generic).or_default().push(bound);
+        if let Some(bound) = self.lower_trait_bound(owner, bound) {
+            self.bounds.entry(generic).or_default().push(bound);
+        } else if let Some(bound) = bound.syntax().and_then(rua_core::builtin_trait) {
+            self.builtin_bounds.entry(generic).or_default().push(bound);
+        }
     }
 
     fn lower_trait_bound(&self, owner: DefId, bound: &TypeRef) -> Option<TraitBound> {
@@ -956,7 +1014,12 @@ impl MemberIndex {
                 .trait_ref()
                 .map(|trait_ref| self.lower_type(definition, trait_ref));
             let trait_id = trait_ty.as_ref().and_then(trait_definition);
-            if signature.trait_ref().is_some() && trait_id.is_none() {
+            let builtin_trait = signature
+                .trait_ref()
+                .filter(|_| trait_id.is_none())
+                .and_then(TypeRef::syntax)
+                .and_then(rua_core::builtin_trait);
+            if signature.trait_ref().is_some() && trait_id.is_none() && builtin_trait.is_none() {
                 continue;
             }
             let requirements = self
@@ -979,8 +1042,9 @@ impl MemberIndex {
             self.implementations.push(ImplementationData {
                 definition,
                 target_ty,
-                trait_ty,
+                trait_ty: trait_id.and(trait_ty),
                 trait_id,
+                builtin_trait,
                 methods,
                 requirements,
             });

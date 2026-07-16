@@ -18,6 +18,9 @@ impl<T, E> Result<T, E> {
     /// Extract the `Ok` value, panicking if `Err`.
     pub fn unwrap(self) -> T {}
 
+    /// Extract the `Ok` value, panicking with `message` and the error payload if `Err`.
+    pub fn expect(self, message: String) -> T {}
+
     /// Extract the `Ok` value, returning `default` if `Err`.
     pub fn unwrap_or(self, default: T) -> T {}
 

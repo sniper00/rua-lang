@@ -188,6 +188,14 @@ fn position_of(source: &str, needle: &str) -> Value {
     json!({ "line": line, "character": source[line_start..offset].encode_utf16().count() })
 }
 
+fn position_after(source: &str, needle: &str) -> Value {
+    let offset = source.find(needle).expect("needle in source") + needle.len();
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    json!({ "line": line, "character": source[line_start..offset].encode_utf16().count() })
+}
+
 fn offset_of_position(source: &str, position: &Value) -> usize {
     let line = position["line"].as_u64().unwrap() as usize;
     let character = position["character"].as_u64().unwrap() as usize;
@@ -271,6 +279,94 @@ fn workspace_symbols(server: &mut ProtocolServer, id: i64, query: &str) -> Value
     server.response(id)["result"].clone()
 }
 
+#[test]
+fn stdio_src_main_uses_src_as_module_root_for_associated_function_navigation() {
+    let temp = temp_test_dir("src-module-root");
+    let root = temp.join("workspace");
+    let source_root = root.join("src");
+    let domain = source_root.join("domain");
+    std::fs::create_dir_all(&domain).unwrap();
+
+    let main_source = concat!(
+        "use domain::order::OrderRequest;\n",
+        "let requests = vec![OrderRequest::new(\"book-001\", 2, 10)];\n",
+    );
+    let order_source = concat!(
+        "pub struct OrderRequest { pub sku: String, pub quantity: i64 }\n",
+        "impl OrderRequest {\n",
+        "    /// Construct an order request.\n",
+        "    pub fn new(sku: String, quantity: i64, discount: i64) -> OrderRequest {\n",
+        "        OrderRequest { sku: sku, quantity: quantity }\n",
+        "    }\n",
+        "}\n",
+    );
+    let main = source_root.join("main.rua");
+    let order = domain.join("order.rua");
+    std::fs::write(&main, main_source).unwrap();
+    std::fs::write(&order, order_source).unwrap();
+    let main_uri = file_uri(&main);
+    let order_uri = file_uri(&order);
+
+    let mut server = ProtocolServer::start();
+    server.initialize_with(
+        vec![json!({ "uri": file_uri(&root), "name": "workspace" })],
+        Value::Null,
+    );
+
+    let mut indexed = false;
+    for request_id in 200..220 {
+        let symbols = workspace_symbols(&mut server, request_id, "OrderRequest");
+        if symbols
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())
+        {
+            indexed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(indexed, "workspace scan did not index OrderRequest");
+
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "rua",
+                "version": 1,
+                "text": main_source
+            }
+        }
+    }));
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 220,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": position_of(main_source, "new")
+        }
+    }));
+    let hover = server.response(220);
+    assert!(hover.to_string().contains("fn new("), "{hover}");
+
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 221,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": position_of(main_source, "new")
+        }
+    }));
+    let definition = server.response(221);
+    assert_eq!(definition["result"]["uri"], order_uri, "{definition}");
+
+    server.shutdown();
+    std::fs::remove_dir_all(temp).unwrap();
+}
+
 impl Drop for ProtocolServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -289,7 +385,7 @@ fn large_project() -> String {
 #[test]
 fn stdio_inlay_hints_return_inferred_binding_types() {
     let uri = "file:///workspace/inlay-hints.rua";
-    let source = "fn main() { let inferred = 42; let explicit: bool = true; }\n";
+    let source = "struct Product {} fn first_available() -> Option<Product> { Option::None } fn scores() -> HashMap<String, i64> { #{} } fn main() { let inferred = 42; let explicit: bool = true; let featured = first_available(); let scores = scores(); }\n";
     let mut server = ProtocolServer::start();
     server.initialize();
     server.send(json!({
@@ -321,11 +417,82 @@ fn stdio_inlay_hints_return_inferred_binding_types() {
         .as_array()
         .expect("inlay hint result array")
         .iter()
-        .filter_map(|hint| hint["label"].as_str())
+        .map(|hint| inlay_hint_label_text(&hint["label"]))
         .collect::<Vec<_>>();
-    assert!(labels.contains(&": i64"), "{hints}");
-    assert!(!labels.contains(&": bool"), "{hints}");
+    assert!(labels.iter().any(|label| label == ": i64"), "{hints}");
+    assert!(!labels.iter().any(|label| label == ": bool"), "{hints}");
+    assert!(
+        labels.iter().any(|label| label == ": Option<Product>"),
+        "{hints}"
+    );
+
+    let featured = hints
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hint| inlay_hint_label_text(&hint["label"]) == ": Option<Product>")
+        .expect("featured inlay hint");
+    let parts = featured["label"].as_array().expect("composite type label");
+    for name in ["Option", "Product"] {
+        let part = parts
+            .iter()
+            .find(|part| part["value"] == name)
+            .unwrap_or_else(|| panic!("missing {name} label part: {featured}"));
+        assert!(part.get("location").is_none(), "{part}");
+        assert!(part.get("tooltip").is_some(), "{part}");
+        assert_eq!(part["command"]["command"], "rua.openLocation", "{part}");
+    }
+    let option = parts.iter().find(|part| part["value"] == "Option").unwrap();
+    assert!(
+        option["tooltip"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("std::option::Option")),
+        "{option}"
+    );
+    let product = parts
+        .iter()
+        .find(|part| part["value"] == "Product")
+        .unwrap();
+    assert!(
+        product["tooltip"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("struct Product")),
+        "{product}"
+    );
+
+    let scores = hints
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hint| inlay_hint_label_text(&hint["label"]) == ": HashMap<String, i64>")
+        .expect("scores inlay hint");
+    let parts = scores["label"].as_array().expect("composite map label");
+    for name in ["HashMap", "String", "i64"] {
+        let part = parts
+            .iter()
+            .find(|part| part["value"] == name)
+            .unwrap_or_else(|| panic!("missing {name} label part: {scores}"));
+        assert!(part.get("tooltip").is_some(), "{part}");
+    }
+    for name in ["HashMap", "String"] {
+        let part = parts.iter().find(|part| part["value"] == name).unwrap();
+        assert_eq!(part["command"]["command"], "rua.openLocation", "{part}");
+    }
+    let i64_part = parts.iter().find(|part| part["value"] == "i64").unwrap();
+    assert!(i64_part.get("command").is_none(), "{i64_part}");
     server.shutdown();
+}
+
+fn inlay_hint_label_text(label: &Value) -> String {
+    if let Some(label) = label.as_str() {
+        return label.to_string();
+    }
+    label
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["value"].as_str())
+        .collect()
 }
 
 #[test]
@@ -376,6 +543,51 @@ fn stdio_completion_inserts_builtin_generic_type_snippets() {
         assert_eq!(item["insertTextFormat"], 2, "{item}");
         assert_eq!(item["textEdit"]["newText"], snippet, "{item}");
     }
+    server.shutdown();
+}
+
+#[test]
+fn stdio_completion_returns_top_level_chunk_variables_while_typing() {
+    let uri = "file:///workspace/chunk-variable-completion.rua";
+    let source = concat!(
+        "let processed = 1;\n",
+        "let featured = processed + 1;\n",
+        "println!(\"{}\", fea);\n",
+    );
+    let mut server = ProtocolServer::start();
+    server.initialize();
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "rua",
+                "version": 1,
+                "text": source
+            }
+        }
+    }));
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": position_after(source, "println!(\"{}\", fea")
+        }
+    }));
+
+    let response = server.response(22);
+    let items = response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("completion result array: {response}"));
+    let featured = items
+        .iter()
+        .find(|item| item["label"] == "featured")
+        .unwrap_or_else(|| panic!("missing featured variable: {response}"));
+    assert_eq!(featured["kind"], 6, "{featured}");
+    assert_eq!(featured["textEdit"]["newText"], "featured", "{featured}");
     server.shutdown();
 }
 
@@ -767,7 +979,6 @@ fn stdio_multi_root_library_watchers_and_overlay_lifecycle() {
     }
 
     let first_source = concat!(
-        "mod api;\n",
         "fn call_api() { api::first_api(); }\n",
         "fn first_only() {}\n",
         "fn disk_only() {}\n",

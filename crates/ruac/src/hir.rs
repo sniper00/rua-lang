@@ -852,7 +852,12 @@ fn resolve_statement_types(
         Stmt::Expr(expression) | Stmt::Return(Some(expression)) => {
             resolve_expression_types(hir, module, aliases, generics, expression);
         }
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(value) => {
+            if let Some(value) = value {
+                resolve_expression_types(hir, module, aliases, generics, value);
+            }
+        }
+        Stmt::Return(None) | Stmt::Continue => {}
         Stmt::While { cond, body } => {
             resolve_expression_types(hir, module, aliases, generics, cond);
             resolve_block_types(hir, module, aliases, generics, body);
@@ -910,6 +915,7 @@ fn resolve_expression_types(
             resolve_expression_types(hir, module, aliases, generics, lhs);
             resolve_expression_types(hir, module, aliases, generics, rhs);
         }
+        ExprKind::Loop(body) => resolve_block_types(hir, module, aliases, generics, body),
         ExprKind::Call { callee, args } => {
             resolve_expression_types(hir, module, aliases, generics, callee);
             for argument in args {
@@ -935,6 +941,12 @@ fn resolve_expression_types(
         }
         ExprKind::StructLit { fields, .. } => {
             for (_, value) in fields {
+                resolve_expression_types(hir, module, aliases, generics, value);
+            }
+        }
+        ExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                resolve_expression_types(hir, module, aliases, generics, key);
                 resolve_expression_types(hir, module, aliases, generics, value);
             }
         }
@@ -984,7 +996,7 @@ fn resolve_expression_types(
             resolve_else_types(hir, module, aliases, generics, else_block);
         }
         ExprKind::Block(block) => resolve_block_types(hir, module, aliases, generics, block),
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value, .. } => {
             resolve_expression_types(hir, module, aliases, generics, target);
             resolve_expression_types(hir, module, aliases, generics, value);
         }
@@ -1169,7 +1181,12 @@ impl<'a> BodyResolver<'a> {
                 self.bind(name, *mutable, Some(*name_span));
             }
             Stmt::Expr(expression) | Stmt::Return(Some(expression)) => self.expression(expression),
-            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            Stmt::Break(value) => {
+                if let Some(value) = value {
+                    self.expression(value);
+                }
+            }
+            Stmt::Return(None) | Stmt::Continue => {}
             Stmt::While { cond, body } => {
                 self.expression(cond);
                 self.block(body);
@@ -1220,6 +1237,12 @@ impl<'a> BodyResolver<'a> {
                     self.expression(value);
                 }
             }
+            ExprKind::MapLit(entries) => {
+                for (key, value) in entries {
+                    self.expression(key);
+                    self.expression(value);
+                }
+            }
             ExprKind::MacroCall { name, args } => {
                 let target = builtin_macro(name)
                     .map(|builtin| ResolvedTarget::Builtin(builtin.id))
@@ -1248,6 +1271,7 @@ impl<'a> BodyResolver<'a> {
                 self.expression(lhs);
                 self.expression(rhs);
             }
+            ExprKind::Loop(body) => self.block(body),
             ExprKind::Call { callee, args } => {
                 self.expression(callee);
                 for argument in args {
@@ -1306,7 +1330,7 @@ impl<'a> BodyResolver<'a> {
                 self.else_branch(else_block.as_deref());
             }
             ExprKind::Block(block) => self.block(block),
-            ExprKind::Assign { target, value } => {
+            ExprKind::Assign { target, value, .. } => {
                 self.expression(target);
                 let immutable = self.root_local_target(target).and_then(|local| {
                     let local = &self.hir.locals[local.index()];

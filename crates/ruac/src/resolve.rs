@@ -1,24 +1,539 @@
-//! Module resolution: splice file modules (`mod name;`) into the AST.
-//!
-//! For a file module `mod foo;` declared in a source file living in directory
-//! `dir`, the module body is loaded from `dir/foo.rua` (or `dir/foo/mod.rua`).
-//! A module's own file-based children are then resolved relative to `dir/foo/`,
-//! mirroring Rust's `foo.rs` + `foo/` layout. Inline modules extend the search
-//! directory the same way (`mod bar { mod baz; }` looks for `dir/bar/baz.rua`).
+//! Path-based module discovery and compiler-internal module-tree construction.
 
 use crate::ast::*;
 use crate::diag::Diag;
 use crate::token::SourceRange;
 use rua_core::DiagnosticCode;
-use rua_project::{FileId, LogicalSourcePath, ProjectSpec, SourceProvider};
+use rua_project::{
+    FileId, LogicalSourcePath, ProjectSpec, SourceProvider, module_path_from_relative_file,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone)]
+struct DiscoveredFile<S> {
+    source: S,
+    display: String,
+    is_declaration: bool,
+    precedence: usize,
+}
+
+struct DiscoveredModule<S> {
+    source: Option<DiscoveredFile<S>>,
+    children: BTreeMap<String, DiscoveredModule<S>>,
+}
+
+impl<S> Default for DiscoveredModule<S> {
+    fn default() -> Self {
+        Self {
+            source: None,
+            children: BTreeMap::new(),
+        }
+    }
+}
+
+/// Discover every project source and declaration file by path. User-authored
+/// `mod` declarations are not part of this model; the resulting `ModDecl`s are
+/// compiler-internal nodes consumed by the existing semantic pipeline.
+pub fn discover_modules_from_filesystem(
+    program: &mut Program,
+    root_file: &Path,
+    library: &[PathBuf],
+    library_mounts: &BTreeMap<String, PathBuf>,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    let source_root = root_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let root_canonical = root_file.canonicalize().map_err(|error| {
+        module_error(
+            DiagnosticCode::HostSourceRead,
+            format!("canonicalizing {}: {error}", root_file.display()),
+        )
+    })?;
+    let mut discovered = DiscoveredModule::default();
+    collect_filesystem_root(
+        &mut discovered,
+        source_root,
+        &[],
+        "rua",
+        0,
+        Some(&root_canonical),
+    )?;
+    collect_filesystem_root(
+        &mut discovered,
+        source_root,
+        &[],
+        "ruai",
+        1,
+        Some(&root_canonical),
+    )?;
+    for (index, root) in library.iter().enumerate() {
+        collect_library_input(&mut discovered, root, &[], index + 2)?;
+    }
+    let mount_precedence = library.len() + 2;
+    for (index, (name, root)) in library_mounts.iter().enumerate() {
+        collect_library_input(
+            &mut discovered,
+            root,
+            std::slice::from_ref(name),
+            mount_precedence + index,
+        )?;
+    }
+    materialize_filesystem_modules(
+        &mut program.items,
+        &mut program.source_order,
+        discovered.children,
+        files,
+    )
+}
+
+/// IO-free counterpart of [`discover_modules_from_filesystem`]. The project
+/// file table is already a complete snapshot, so no provider path probing is
+/// needed.
+pub fn discover_modules_with_provider<P: SourceProvider>(
+    program: &mut Program,
+    scope_dir: &LogicalSourcePath,
+    project: &ProjectSpec,
+    provider: &P,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    let mut discovered = DiscoveredModule::default();
+    let scope = Path::new(scope_dir.as_str());
+    for (logical_path, file_id) in &project.files {
+        if *file_id == project.root_file {
+            continue;
+        }
+        let path = Path::new(logical_path.as_str());
+        let Ok(relative) = path.strip_prefix(scope) else {
+            continue;
+        };
+        let extension = relative
+            .extension()
+            .and_then(|extension| extension.to_str());
+        if !matches!(extension, Some("rua" | "ruai")) {
+            continue;
+        }
+        insert_discovered_file(
+            &mut discovered,
+            module_path(relative)?,
+            DiscoveredFile {
+                source: (*file_id, logical_path.clone()),
+                display: logical_path.to_string(),
+                is_declaration: extension == Some("ruai"),
+                precedence: usize::from(extension == Some("ruai")),
+            },
+        )?;
+    }
+    for (mount_index, mount) in project.libraries.iter().enumerate() {
+        let base = Path::new(mount.logical_base.as_str());
+        for (logical_path, file_id) in &project.files {
+            let path = Path::new(logical_path.as_str());
+            let Ok(relative) = path.strip_prefix(base) else {
+                continue;
+            };
+            if relative
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("ruai")
+            {
+                continue;
+            }
+            let mut segments = vec![mount.name.clone()];
+            segments.extend(module_path_with_root(relative, true)?);
+            insert_discovered_file(
+                &mut discovered,
+                segments,
+                DiscoveredFile {
+                    source: (*file_id, logical_path.clone()),
+                    display: logical_path.to_string(),
+                    is_declaration: true,
+                    precedence: mount_index + 2,
+                },
+            )?;
+        }
+    }
+    materialize_provider_modules(
+        &mut program.items,
+        &mut program.source_order,
+        discovered.children,
+        provider,
+        files,
+    )
+}
+
+fn module_path(relative: &Path) -> Result<Vec<String>, Diag> {
+    module_path_with_root(relative, false)
+}
+
+fn module_path_with_root(relative: &Path, allow_root: bool) -> Result<Vec<String>, Diag> {
+    let path = module_path_from_relative_file(relative)
+        .map_err(|error| module_error(DiagnosticCode::NameInvalidModulePath, error.to_string()))?
+        .ok_or_else(|| {
+            module_error(
+                DiagnosticCode::NameInvalidModulePath,
+                format!("not a Rua module source: {}", relative.display()),
+            )
+        })?;
+    if path.is_empty() && !allow_root {
+        return Err(module_error(
+            DiagnosticCode::NameAmbiguousImport,
+            format!(
+                "root-level `{}` needs an explicit library mount or must be the project entry",
+                relative.display()
+            ),
+        ));
+    }
+    Ok(path)
+}
+
+fn insert_discovered_file<S>(
+    root: &mut DiscoveredModule<S>,
+    segments: Vec<String>,
+    source: DiscoveredFile<S>,
+) -> Result<(), Diag> {
+    let mut module = root;
+    for segment in segments {
+        module = module.children.entry(segment).or_default();
+    }
+    let Some(existing) = &module.source else {
+        module.source = Some(source);
+        return Ok(());
+    };
+    if source.precedence == existing.precedence {
+        return Err(module_error(
+            DiagnosticCode::NameAmbiguousImport,
+            format!(
+                "multiple files map to one module: {}, {}",
+                existing.display, source.display
+            ),
+        ));
+    }
+    if source.precedence < existing.precedence {
+        module.source = Some(source);
+    }
+    Ok(())
+}
+
+fn collect_filesystem_root(
+    discovered: &mut DiscoveredModule<PathBuf>,
+    root: &Path,
+    prefix: &[String],
+    extension: &str,
+    precedence: usize,
+    excluded: Option<&Path>,
+) -> Result<(), Diag> {
+    if !root.is_dir() {
+        return Err(module_error(
+            DiagnosticCode::HostProjectInvalid,
+            format!("module source root is not a directory: {}", root.display()),
+        ));
+    }
+    let mut paths = Vec::new();
+    let mut visited = HashSet::new();
+    collect_source_files(root, extension, &mut paths, &mut visited)?;
+    for path in paths {
+        let canonical = path.canonicalize().map_err(|error| {
+            module_error(
+                DiagnosticCode::HostSourceRead,
+                format!("canonicalizing {}: {error}", path.display()),
+            )
+        })?;
+        if excluded.is_some_and(|excluded| canonical == excluded) {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|error| {
+            module_error(
+                DiagnosticCode::HostProjectInvalid,
+                format!(
+                    "mapping {} below {}: {error}",
+                    path.display(),
+                    root.display()
+                ),
+            )
+        })?;
+        let mut segments = prefix.to_vec();
+        segments.extend(module_path_with_root(relative, !prefix.is_empty())?);
+        insert_discovered_file(
+            discovered,
+            segments,
+            DiscoveredFile {
+                display: path.display().to_string(),
+                source: path,
+                is_declaration: extension == "ruai",
+                precedence,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_library_input(
+    discovered: &mut DiscoveredModule<PathBuf>,
+    input: &Path,
+    prefix: &[String],
+    precedence: usize,
+) -> Result<(), Diag> {
+    if input.is_dir() {
+        return collect_filesystem_root(discovered, input, prefix, "ruai", precedence, None);
+    }
+    if !input.is_file()
+        || input.extension().and_then(|extension| extension.to_str()) != Some("ruai")
+    {
+        return Err(module_error(
+            DiagnosticCode::HostProjectInvalid,
+            format!(
+                "declaration library must be a `.ruai` file or directory: {}",
+                input.display()
+            ),
+        ));
+    }
+    let mut segments = prefix.to_vec();
+    if segments.is_empty() {
+        segments.extend(module_path(input.file_name().map(Path::new).ok_or_else(
+            || {
+                module_error(
+                    DiagnosticCode::HostProjectInvalid,
+                    format!("declaration library has no filename: {}", input.display()),
+                )
+            },
+        )?)?);
+    }
+    insert_discovered_file(
+        discovered,
+        segments,
+        DiscoveredFile {
+            source: input.to_path_buf(),
+            display: input.display().to_string(),
+            is_declaration: true,
+            precedence,
+        },
+    )
+}
+
+fn collect_source_files(
+    directory: &Path,
+    extension: &str,
+    files: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), Diag> {
+    let canonical = directory.canonicalize().map_err(|error| {
+        module_error(
+            DiagnosticCode::HostSourceRead,
+            format!("canonicalizing {}: {error}", directory.display()),
+        )
+    })?;
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| {
+            module_error(
+                DiagnosticCode::HostSourceRead,
+                format!("reading directory {}: {error}", directory.display()),
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            module_error(
+                DiagnosticCode::HostSourceRead,
+                format!("reading directory {}: {error}", directory.display()),
+            )
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            module_error(
+                DiagnosticCode::HostSourceRead,
+                format!("reading file type for {}: {error}", path.display()),
+            )
+        })?;
+        if file_type.is_dir() {
+            if matches!(
+                entry.file_name().to_str(),
+                Some(".git" | "node_modules" | "target" | "dist")
+            ) {
+                continue;
+            }
+            collect_source_files(&path, extension, files, visited)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|candidate| candidate.to_str()) == Some(extension)
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn materialize_filesystem_modules(
+    items: &mut Vec<Item>,
+    source_order: &mut Vec<ChunkEntry>,
+    modules: BTreeMap<String, DiscoveredModule<PathBuf>>,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    let mut entries = Vec::new();
+    for (name, module) in modules {
+        let item_index = items.len();
+        items.push(Item::Mod(materialize_filesystem_module(
+            name, module, files,
+        )?));
+        entries.push(ChunkEntry::Item(item_index));
+    }
+    entries.append(source_order);
+    *source_order = entries;
+    Ok(())
+}
+
+fn materialize_filesystem_module(
+    name: String,
+    module: DiscoveredModule<PathBuf>,
+    files: &mut Vec<String>,
+) -> Result<ModDecl, Diag> {
+    let (mut items, chunk, mut source_order, source_is_declaration, source_file) =
+        if let Some(source) = module.source {
+            let text = std::fs::read_to_string(&source.source).map_err(|error| {
+                module_error(
+                    DiagnosticCode::HostSourceRead,
+                    format!("reading {}: {error}", source.source.display()),
+                )
+            })?;
+            let file = files.len() as u32;
+            files.push(source.source.display().to_string());
+            let mut program =
+                crate::parser::parse_with_semantic_file(&text, file).map_err(parser_diagnostic)?;
+            set_file_program(&mut program, file);
+            (
+                program.items,
+                program.chunk,
+                program.source_order,
+                source.is_declaration,
+                Some(file),
+            )
+        } else {
+            (Vec::new(), empty_block(), Vec::new(), false, None)
+        };
+    materialize_filesystem_modules(&mut items, &mut source_order, module.children, files)?;
+    let is_declaration = source_is_declaration
+        || (!items.is_empty()
+            && items
+                .iter()
+                .all(|item| matches!(item, Item::Mod(child) if child.is_decl))
+            && chunk.stmts.is_empty());
+    if let Some(source_file) = source_file.filter(|_| source_is_declaration) {
+        validate_declaration_contents(&items, &chunk, source_file)?;
+    }
+    if is_declaration {
+        mark_decl(&mut items);
+    }
+    Ok(ModDecl {
+        name,
+        documentation: None,
+        items,
+        chunk,
+        source_order,
+        is_pub: true,
+        is_file: true,
+        is_decl: is_declaration,
+    })
+}
+
+fn materialize_provider_modules<P: SourceProvider>(
+    items: &mut Vec<Item>,
+    source_order: &mut Vec<ChunkEntry>,
+    modules: BTreeMap<String, DiscoveredModule<(FileId, LogicalSourcePath)>>,
+    provider: &P,
+    files: &mut Vec<String>,
+) -> Result<(), Diag> {
+    let mut entries = Vec::new();
+    for (name, module) in modules {
+        let item_index = items.len();
+        items.push(Item::Mod(materialize_provider_module(
+            name, module, provider, files,
+        )?));
+        entries.push(ChunkEntry::Item(item_index));
+    }
+    entries.append(source_order);
+    *source_order = entries;
+    Ok(())
+}
+
+fn materialize_provider_module<P: SourceProvider>(
+    name: String,
+    module: DiscoveredModule<(FileId, LogicalSourcePath)>,
+    provider: &P,
+    files: &mut Vec<String>,
+) -> Result<ModDecl, Diag> {
+    let (mut items, chunk, mut source_order, source_is_declaration, source_file) =
+        if let Some(source) = module.source {
+            let (file_id, logical_path) = source.source;
+            ensure_file_registry(files, file_id, &logical_path);
+            let text = provider.load(file_id).map_err(|error| {
+                module_error(
+                    DiagnosticCode::HostSourceRead,
+                    format!("reading `{logical_path}`: {error}"),
+                )
+            })?;
+            let mut program = crate::parser::parse_with_semantic_file(&text.text, file_id.index())
+                .map_err(parser_diagnostic)?;
+            set_file_program(&mut program, file_id.index());
+            (
+                program.items,
+                program.chunk,
+                program.source_order,
+                source.is_declaration,
+                Some(file_id.index()),
+            )
+        } else {
+            (Vec::new(), empty_block(), Vec::new(), false, None)
+        };
+    materialize_provider_modules(
+        &mut items,
+        &mut source_order,
+        module.children,
+        provider,
+        files,
+    )?;
+    let is_declaration = source_is_declaration
+        || (!items.is_empty()
+            && items
+                .iter()
+                .all(|item| matches!(item, Item::Mod(child) if child.is_decl))
+            && chunk.stmts.is_empty());
+    if let Some(source_file) = source_file.filter(|_| source_is_declaration) {
+        validate_declaration_contents(&items, &chunk, source_file)?;
+    }
+    if is_declaration {
+        mark_decl(&mut items);
+    }
+    Ok(ModDecl {
+        name,
+        documentation: None,
+        items,
+        chunk,
+        source_order,
+        is_pub: true,
+        is_file: true,
+        is_decl: is_declaration,
+    })
+}
+
+fn empty_block() -> Block {
+    Block {
+        stmts: Vec::new(),
+        statement_blank_before: Vec::new(),
+        tail: None,
+        tail_blank_before: false,
+    }
+}
 
 /// Recursively load file modules under `items`. `dir` is the directory used to
 /// resolve this scope's file modules; `None` disables file modules (e.g. when
 /// compiling from an in-memory string). `files` is the compile-time file registry
 /// (index = file id); each newly loaded file is appended and its AST spans are
 /// stamped with the resulting id so diagnostics can attribute `path:line`.
+#[cfg(test)]
 pub fn resolve_modules(
     items: &mut [Item],
     dir: Option<&Path>,
@@ -29,6 +544,7 @@ pub fn resolve_modules(
 
 /// Resolve filesystem modules with external declaration roots and explicit
 /// logical root-module mounts.
+#[cfg(test)]
 pub fn resolve_modules_with_libraries(
     items: &mut [Item],
     dir: Option<&Path>,
@@ -49,6 +565,7 @@ pub fn resolve_modules_with_libraries(
 }
 
 /// Resolve file modules through an IO-free project/provider contract.
+#[cfg(test)]
 pub fn resolve_modules_with_provider<P: SourceProvider>(
     items: &mut [Item],
     scope_dir: &LogicalSourcePath,
@@ -60,6 +577,7 @@ pub fn resolve_modules_with_provider<P: SourceProvider>(
 }
 
 /// Resolve project modules while preserving machine-readable diagnostic data.
+#[cfg(test)]
 pub fn resolve_modules_with_provider_diagnostics<P: SourceProvider>(
     items: &mut [Item],
     scope_dir: &LogicalSourcePath,
@@ -71,6 +589,7 @@ pub fn resolve_modules_with_provider_diagnostics<P: SourceProvider>(
     resolve_project_modules_inner(items, scope_dir, project, provider, files, &mut loading)
 }
 
+#[cfg(test)]
 fn resolve_project_modules_inner<P: SourceProvider>(
     items: &mut [Item],
     scope_dir: &LogicalSourcePath,
@@ -140,6 +659,7 @@ fn resolve_project_modules_inner<P: SourceProvider>(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_project_module(
     project: &ProjectSpec,
     scope_dir: &LogicalSourcePath,
@@ -201,6 +721,7 @@ fn ensure_file_registry(files: &mut Vec<String>, file_id: FileId, path: &Logical
     files[index] = path.to_string();
 }
 
+#[cfg(test)]
 fn resolve_modules_inner(
     items: &mut [Item],
     dir: Option<&Path>,
@@ -580,7 +1101,12 @@ fn set_file_stmt(s: &mut Stmt, id: u32) {
             set_file_expr(expr, id);
             set_file_block(body, id);
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(value) => {
+            if let Some(value) = value {
+                set_file_expr(value, id);
+            }
+        }
+        Stmt::Continue => {}
     }
 }
 
@@ -615,6 +1141,7 @@ fn set_file_expr(e: &mut Expr, id: u32) {
             set_file_expr(lhs, id);
             set_file_expr(rhs, id);
         }
+        ExprKind::Loop(body) => set_file_block(body, id),
         ExprKind::Call { callee, args } => {
             set_file_expr(callee, id);
             for a in args {
@@ -646,6 +1173,12 @@ fn set_file_expr(e: &mut Expr, id: u32) {
         ExprKind::StructLit { fields, .. } => {
             for (_, v) in fields {
                 set_file_expr(v, id);
+            }
+        }
+        ExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                set_file_expr(key, id);
+                set_file_expr(value, id);
             }
         }
         ExprKind::Try { expr } => set_file_expr(expr, id),
@@ -684,7 +1217,7 @@ fn set_file_expr(e: &mut Expr, id: u32) {
             set_file_else(else_block, id);
         }
         ExprKind::Block(b) => set_file_block(b, id),
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value, .. } => {
             set_file_expr(target, id);
             set_file_expr(value, id);
         }
@@ -739,6 +1272,7 @@ fn set_file_else(else_block: &mut Option<Box<ElseBranch>>, id: u32) {
 /// Locate the file backing `mod <name>;` and the directory for its children,
 /// plus whether it is a declaration-only `.ruai` file. Search order:
 /// `dir/name.rua`, `dir/name/mod.rua`, then the `.ruai` equivalents.
+#[cfg(test)]
 fn resolve_mod_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, bool), Diag> {
     let child_dir = dir.join(name);
     let candidates = [
@@ -780,6 +1314,7 @@ fn resolve_mod_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, bool), 
     ))
 }
 
+#[cfg(test)]
 fn resolve_library_mount(name: &str, mount: &Path) -> Result<(PathBuf, PathBuf, bool), Diag> {
     if mount.is_file() {
         if mount.extension().and_then(|extension| extension.to_str()) != Some("ruai") {
@@ -815,6 +1350,7 @@ fn resolve_library_mount(name: &str, mount: &Path) -> Result<(PathBuf, PathBuf, 
     ))
 }
 
+#[cfg(test)]
 fn resolve_library_module(
     name: &str,
     library: &[PathBuf],

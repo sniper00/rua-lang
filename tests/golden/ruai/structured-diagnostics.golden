@@ -1,4 +1,4 @@
 ruai/declaration_body_rejected/workspace/main.rua
   E0108 file=ruai/declaration_body_rejected/workspace/moon.ruai range=7..13 arguments=[line="1", message="function `answer` in a declaration file must have an empty body"]
 ruai/declaration_type_error/workspace/main.rua
-  E0200 file=ruai/declaration_type_error/workspace/main.rua range=27..36 arguments=[line="4", message="function `moon::log` expects 1 argument(s), got 2"]
+  E0200 file=ruai/declaration_type_error/workspace/main.rua range=16..25 arguments=[line="2", message="function `moon::log` expects 1 argument(s), got 2"]

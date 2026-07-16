@@ -33,26 +33,25 @@ fn folding_multiline_match_arms() {
 
 #[test]
 fn folding_import_grouping() {
-    // Consecutive `use`/`mod` statements could be grouped for folding.
+    // Consecutive `use` statements can be grouped for folding.
     let uri = uri("/test/fold_imports.rua");
     let mut srv = TestServer::new();
     srv.open(
         &uri,
-        "mod a {}\nmod b {}\nmod c {}\n\nfn main() {\n    let x = 1;\n}",
+        "use a::x;\nuse b::y;\nuse c::z;\n\nfn main() {\n    let value = 1;\n}",
     );
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let analysis = srv.snapshot();
     let source = analysis.parse(file_id).syntax_node().text().to_string();
 
-    // Consecutive `mod` declarations exist
-    let mod_count = source
+    let use_count = source
         .lines()
-        .filter(|l| l.trim_start().starts_with("mod "))
+        .filter(|line| line.trim_start().starts_with("use "))
         .count();
     assert!(
-        mod_count >= 3,
-        "should have multiple mod declarations, got {mod_count}"
+        use_count >= 3,
+        "should have multiple use declarations, got {use_count}"
     );
 }
 

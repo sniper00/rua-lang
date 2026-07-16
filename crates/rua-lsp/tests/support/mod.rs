@@ -91,13 +91,31 @@ impl TestServer {
             path,
             text,
         );
+        let project_root = self
+            .project_root
+            .expect("open file establishes project root");
+        let workspace_base = self
+            .file_ids
+            .iter()
+            .find_map(|(path, (_, id))| {
+                (*id == project_root)
+                    .then(|| path.parent().map(PathBuf::from))
+                    .flatten()
+            })
+            .expect("project root has a parent directory");
+        let declaration_base = self
+            .file_ids
+            .keys()
+            .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("ruai"))
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace_base.clone());
         change.set_project(
             ProjectId::new(0),
             ProjectData::new(
-                self.project_root
-                    .expect("open file establishes project root"),
-                [ProjectRoot::at_root(SourceRootId::new(0))],
-                [ProjectRoot::at_root(SourceRootId::new(1))],
+                project_root,
+                [ProjectRoot::new(SourceRootId::new(0), workspace_base)],
+                [ProjectRoot::new(SourceRootId::new(1), declaration_base)],
             ),
         );
         self.host.apply_change(change);
@@ -118,6 +136,9 @@ impl TestServer {
     pub fn close(&mut self, uri: &Uri) {
         let key = Self::doc_key(uri);
         if let Some((_, file_id)) = self.file_ids.remove(&key) {
+            if self.project_root == Some(file_id) {
+                self.project_root = None;
+            }
             self.open_buffers.remove(&file_id);
             let mut change = Change::new();
             change.remove_file(file_id);

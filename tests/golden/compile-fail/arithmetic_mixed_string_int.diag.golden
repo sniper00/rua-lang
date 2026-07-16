@@ -1,1 +1,1 @@
-<golden>/compile-fail/arithmetic_mixed_string_int.rua:2: cannot mix string and non-string operands in arithmetic
+<golden>/compile-fail/arithmetic_mixed_string_int.rua:2: cannot apply binary `+` to `String` and `i64`

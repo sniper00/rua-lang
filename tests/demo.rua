@@ -125,34 +125,24 @@ fn first<T>(value: T) -> T where T: Named, {
 }
 
 // ===========================================================================
-// 6. 模块系统 — 嵌套模块、use 声明
+// 6. 普通函数与调用
 // ===========================================================================
-mod math {
-    pub fn add(a: i64, b: i64) -> i64 {
-        a + b
-    }
-
-    pub fn multiply(a: i64, b: i64) -> i64 {
-        a * b
-    }
-
-    pub mod trig {
-        // 占位近似：保留参数流，便于展示模块内函数调用。
-        pub fn sin(x: f64) -> f64 {
-            x
-        }
-    }
+fn add(a: i64, b: i64) -> i64 {
+    a + b
 }
 
-mod utils {
-    pub fn greet(name: String) -> String {
-        format!("Hi, {}!", name)
-    }
+fn multiply(a: i64, b: i64) -> i64 {
+    a * b
 }
 
-use math::add;
-use math::trig::sin;
-use utils::{greet as say_hi};
+// 占位近似：保留参数流，便于展示浮点函数调用。
+fn sin(x: f64) -> f64 {
+    x
+}
+
+fn say_hi(name: String) -> String {
+    format!("Hi, {}!", name)
+}
 
 // ===========================================================================
 // 7. let 语句 — 简单绑定、类型注解、可变绑定、解构
@@ -628,8 +618,8 @@ fn main() {
     println!("generic identity={}", identity(42));
 
     // 模块
-    let sum = math::add(3, 4);
-    let product = math::multiply(5, 6);
+    let sum = add(3, 4);
+    let product = multiply(5, 6);
     let sine = sin(0.5);
     let greeting = say_hi("Bob");
     println!("modules: sum={}, product={}, sin={}, greeting={}", sum, product, sine, greeting);

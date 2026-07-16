@@ -25,6 +25,16 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "configurationDefaults": {
+      "[rua]": {
+        "editor.quickSuggestions": {
+          "other": "on",
+          "comments": "off",
+          "strings": "off"
+        },
+        "editor.suggestOnTriggerCharacters": true
+      }
+    },
     "languages": [
       {
         "id": "rua",

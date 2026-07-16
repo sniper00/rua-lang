@@ -56,6 +56,48 @@ fn hover_and_goto_work_for_unattached_workspace_file() {
 }
 
 #[test]
+fn hover_and_goto_resolve_cross_file_associated_function() {
+    let main_uri = uri("/test/main.rua");
+    let order_uri = uri("/test/domain/order.rua");
+    let (source, offset) = extract_marker(concat!(
+        "use domain::order::OrderRequest;\n",
+        "let requests = vec![OrderRequest::n$0ew(\"book-001\", 2, 10)];\n",
+    ));
+    let order_source = concat!(
+        "pub struct OrderRequest { pub sku: String, pub quantity: i64 }\n",
+        "impl OrderRequest {\n",
+        "    /// Construct an order request.\n",
+        "    pub fn new(sku: String, quantity: i64, discount: i64) -> OrderRequest {\n",
+        "        OrderRequest { sku: sku, quantity: quantity }\n",
+        "    }\n",
+        "}\n",
+    );
+    let declaration = (order_source.find("pub fn new").unwrap() + "pub fn ".len()) as u32;
+    let mut srv = TestServer::new();
+    srv.open(&main_uri, &source);
+    let order_file = srv.open(&order_uri, order_source);
+
+    let position = srv.pp_at_offset(&main_uri, offset).unwrap();
+    let analysis = srv.snapshot();
+    let hover = analysis
+        .hover(position)
+        .expect("hover on associated function");
+    assert!(
+        hover.signature().contains("fn new("),
+        "unexpected hover signature: {}",
+        hover.signature()
+    );
+    assert_eq!(hover.context(), Some("domain::order::OrderRequest"));
+    assert_eq!(hover.documentation(), Some("Construct an order request."));
+
+    let target = analysis
+        .goto_definition(position)
+        .expect("associated function definition target");
+    assert_eq!(target.target_range().file_id, order_file);
+    assert_eq!(target.target_range().range.start(), declaration);
+}
+
+#[test]
 fn demo_hover_and_goto_cover_items_members_variants_and_locals() {
     let root_uri = uri("/test/main.rua");
     let demo_uri = uri("/test/demo.rua");
@@ -169,6 +211,7 @@ fn builtin_members_hover_and_resolve_to_shared_declarations() {
     let source = concat!(
         "fn use_option(value: Option<i64>) {\n",
         "    let mapped = value.map(|item| item + 1);\n",
+        "    let required = value.expect(\"required option\");\n",
         "    let present = Option::Some(1);\n",
         "}\n",
     );
@@ -183,12 +226,18 @@ fn builtin_members_hover_and_resolve_to_shared_declarations() {
             "map",
             "Map an `Option<T>` to `Option<U>` by applying a function.",
         ),
+        (
+            "expect(\"required option\")",
+            "expect",
+            "Extract the value, panicking with `message` if `None`.",
+        ),
         ("Some(1)", "Some", ""),
     ] {
         let offset = source.find(needle).unwrap() + 1;
         let position = srv.pp_at_offset(&uri, offset).unwrap();
         let hover = analysis.hover(position).expect("builtin member hover");
         assert!(hover.signature().contains(expected_name), "{hover:?}");
+        assert_eq!(hover.context(), Some("std::option::Option"));
         if !expected_documentation.is_empty() {
             assert_eq!(hover.documentation(), Some(expected_documentation));
         }
@@ -207,10 +256,50 @@ fn builtin_members_hover_and_resolve_to_shared_declarations() {
 }
 
 #[test]
+fn optional_chain_members_hover_and_goto_the_unwrapped_type() {
+    let source = concat!(
+        "struct Profile { city: String }\n",
+        "impl Profile {\n",
+        "    /// Builds a display label.\n",
+        "    fn label(&self) -> String { self.city }\n",
+        "}\n",
+        "fn show(value: Option<Profile>) {\n",
+        "    let label = value?.label();\n",
+        "    let city = value?.city;\n",
+        "}\n",
+    );
+    let uri = uri("/test/optional_chain_navigation.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, source);
+    let analysis = srv.snapshot();
+
+    for (use_site, declaration, name_offset, expected_signature) in [
+        ("value?.label", "fn label", 3, "label"),
+        ("value?.city", "city: String", 0, "city"),
+    ] {
+        let offset = source.find(use_site).unwrap() + use_site.rfind('.').unwrap() + 2;
+        let position = srv.pp_at_offset(&uri, offset).unwrap();
+        let hover = analysis.hover(position).expect("optional member hover");
+        assert!(
+            hover.signature().contains(expected_signature),
+            "unexpected optional member hover: {hover:?}"
+        );
+        let target = analysis
+            .goto_definition(position)
+            .expect("optional member definition");
+        assert_eq!(
+            target.target_range().range.start() as usize,
+            source.find(declaration).unwrap() + name_offset
+        );
+    }
+}
+
+#[test]
 fn result_type_and_variants_hover_and_resolve_in_expressions_and_patterns() {
     let source = concat!(
         "fn load() -> Result<String, String> { Result::Ok(\"ready\") }\n",
         "fn inspect(value: Result<String, String>) {\n",
+        "    let required = value.expect(\"required result\");\n",
         "    match value {\n",
         "        Result::Ok(item) => println!(\"{}\", item),\n",
         "        Result::Err(error) => println!(\"{}\", error),\n",
@@ -248,6 +337,11 @@ fn result_type_and_variants_hover_and_resolve_in_expressions_and_patterns() {
             source.rfind("Result::Err(error)").unwrap() + 9,
             "Err",
             "Contains the error value.",
+        ),
+        (
+            source.find("expect(\"required result\")").unwrap() + 1,
+            "expect",
+            "Extract the `Ok` value, panicking with `message` and the error payload if `Err`.",
         ),
     ] {
         let position = srv.pp_at_offset(&uri, offset).unwrap();
@@ -443,6 +537,35 @@ fn hover_shows_enum_variant() {
         sig.contains("Red") || sig.contains("Color"),
         "hover on variant should mention variant or enum, got: {sig}"
     );
+}
+
+#[test]
+fn hover_shows_qualified_module_type_context_for_type_and_variant() {
+    let main_uri = uri("/test/main.rua");
+    let core_uri = uri("/test/rua_core.rua");
+    let source = concat!(
+        "fn inspect(code: rua_core::DiagnosticCode) {\n",
+        "    let selected = rua_core::DiagnosticCode::LintUnusedFunction;\n",
+        "}\n",
+    );
+    let mut srv = TestServer::new();
+    srv.open(&main_uri, source);
+    srv.open(
+        &core_uri,
+        "pub enum DiagnosticCode { LintUnusedFunction, TypeMismatch }\n",
+    );
+    let analysis = srv.snapshot();
+
+    for (needle, offset_in_needle, expected_signature) in [
+        ("DiagnosticCode)", 1, "enum DiagnosticCode"),
+        ("LintUnusedFunction", 1, "LintUnusedFunction"),
+    ] {
+        let offset = source.find(needle).unwrap() + offset_in_needle;
+        let position = srv.pp_at_offset(&main_uri, offset).unwrap();
+        let hover = analysis.hover(position).expect("qualified item hover");
+        assert_eq!(hover.context(), Some("rua_core::DiagnosticCode"));
+        assert_eq!(hover.signature(), expected_signature);
+    }
 }
 
 #[test]
@@ -775,8 +898,7 @@ fn hover_cross_file_ruai_function_uses_project_documentation() {
         &api_uri,
         "/// Reads a value from the host.\n///\n/// Returns the current value.\npub fn read_value() -> i64;",
     );
-    let (source, offset) =
-        extract_marker("mod api;\nlet value = api::read_$0value();\nprint!(value);");
+    let (source, offset) = extract_marker("let value = api::read_$0value();\nprint!(value);");
     srv.open(&main_uri, &source);
 
     let hover = srv

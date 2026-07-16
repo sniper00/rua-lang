@@ -15,13 +15,13 @@ runtime_sources = ["rua_std.lua"]
 module = "rua_std"
 export = "fmt"
 alias = "fmt"
-abi = 1
+abi = 2
 
 [runtime_helpers.number]
 module = "rua_std"
 export = "number"
 alias = "number"
-abi = 1
+abi = 2
 
 [lang_items]
 option = "Option"
@@ -29,6 +29,7 @@ option_some = "Option::Some"
 option_none = "Option::None"
 option_map = "Option::map"
 option_unwrap = "Option::unwrap"
+option_expect = "Option::expect"
 option_unwrap_or = "Option::unwrap_or"
 option_is_some = "Option::is_some"
 option_is_none = "Option::is_none"
@@ -37,6 +38,7 @@ result_ok = "Result::Ok"
 result_err = "Result::Err"
 result_map = "Result::map"
 result_unwrap = "Result::unwrap"
+result_expect = "Result::expect"
 result_unwrap_or = "Result::unwrap_or"
 result_is_ok = "Result::is_ok"
 result_is_err = "Result::is_err"
@@ -47,7 +49,7 @@ declaration = "vec.ruai"
 runtime = "rua_std"
 export = "vec"
 alias = "vec"
-abi = 1
+abi = 2
 
 [[modules]]
 name = "std::hashmap"
@@ -55,7 +57,7 @@ declaration = "hashmap.ruai"
 runtime = "rua_std"
 export = "map"
 alias = "map"
-abi = 1
+abi = 2
 
 [[modules]]
 name = "std::iter"
@@ -63,7 +65,7 @@ declaration = "iter.ruai"
 runtime = "rua_std"
 export = "iter"
 alias = "iter"
-abi = 1
+abi = 2
 
 [[modules]]
 name = "std::string"
@@ -71,7 +73,7 @@ declaration = "string.ruai"
 runtime = "rua_std"
 export = "string"
 alias = "string"
-abi = 1
+abi = 2
 dispatch = "module"
 
 [[modules]]
@@ -80,4 +82,4 @@ declaration = "result.ruai"
 runtime = "rua_std"
 export = "result"
 alias = "result"
-abi = 1
+abi = 2

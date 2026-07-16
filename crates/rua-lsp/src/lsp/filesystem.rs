@@ -54,6 +54,22 @@ pub(super) fn merge_project_configs(
             .map_err(|error| format!("parsing {}: {error}", config_path.display()))?
             .resolve(root)
             .map_err(|error| format!("resolving {}: {error}", config_path.display()))?;
+        for library in &config.lua_library {
+            if !library.declaration_root.is_dir() {
+                return Err(format!(
+                    "resolving {}: Lua library declaration_root is not a directory: {}",
+                    config_path.display(),
+                    library.declaration_root.display()
+                ));
+            }
+            if !library.runtime_root.is_dir() {
+                return Err(format!(
+                    "resolving {}: Lua library runtime_root is not a directory: {}",
+                    config_path.display(),
+                    library.runtime_root.display()
+                ));
+            }
+        }
 
         let setting_index = workspace_settings
             .iter()
@@ -591,11 +607,17 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join("moon-types")).unwrap();
+        std::fs::create_dir_all(root.join("moon-lua")).unwrap();
         std::fs::write(
             root.join(rua_project::PROJECT_CONFIG_FILE),
             r#"
             [workspace]
             library = ["types/moon.ruai"]
+
+            [[workspace.lua_library]]
+            declaration_root = "moon-types"
+            runtime_root = "moon-lua"
 
             [workspace.library_mounts]
             host = "types/host.ruai"
@@ -609,7 +631,10 @@ mod tests {
         let config_only =
             merge_project_configs(&json!({ "rua": {} }), std::slice::from_ref(&root)).unwrap();
         let setting = &config_only["rua"]["workspaceSettings"][0];
-        assert_eq!(setting["library"], json!([root.join("types/moon.ruai")]));
+        assert_eq!(
+            setting["library"],
+            json!([root.join("types/moon.ruai"), root.join("moon-types")])
+        );
         assert_eq!(
             setting["libraryMounts"]["host"],
             json!(root.join("types/host.ruai"))
@@ -635,6 +660,59 @@ mod tests {
             json!(root.join("editor-host.ruai"))
         );
         assert_eq!(setting["stdPath"], json!(root.join("std")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ruarc_lua_library_declaration_root_is_recursively_scanned() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rua-lsp-lua-library-{}-{unique}",
+            std::process::id()
+        ));
+        let declarations = root.join("types");
+        std::fs::create_dir_all(declarations.join("moon/http")).unwrap();
+        std::fs::create_dir_all(root.join("lua")).unwrap();
+        std::fs::write(
+            declarations.join("moon/http.ruai"),
+            "pub fn request_count() -> i64;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            declarations.join("moon/http/client.ruai"),
+            "extern \"lua\" { pub fn get(url: String) -> String; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(rua_project::PROJECT_CONFIG_FILE),
+            "[[workspace.lua_library]]\ndeclaration_root = \"types\"\nruntime_root = \"lua\"\n",
+        )
+        .unwrap();
+
+        let settings =
+            merge_project_configs(&json!({ "rua": {} }), std::slice::from_ref(&root)).unwrap();
+        let mut cancelled = || false;
+        let scanned = LibraryScanRequest::from_settings(&settings)
+            .unwrap()
+            .scan(&mut cancelled)
+            .unwrap();
+        let paths = scanned
+            .files
+            .iter()
+            .map(|file| file.physical_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&declarations.join("moon/http.ruai").canonicalize().unwrap()));
+        assert!(
+            paths.contains(
+                &declarations
+                    .join("moon/http/client.ruai")
+                    .canonicalize()
+                    .unwrap()
+            )
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

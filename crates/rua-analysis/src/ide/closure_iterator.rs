@@ -200,6 +200,9 @@ pub(super) fn semantic_tokens(
 
     // Emit variable/parameter declaration and reference tokens.
     for definition in def_map.definitions() {
+        if definition.file_id() != file_id {
+            continue;
+        }
         if !definition.kind().is_body_owner() {
             continue;
         }

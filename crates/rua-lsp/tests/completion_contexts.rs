@@ -126,7 +126,7 @@ fn completions_offer_builtin_generic_type_snippets() {
         ("Res", "Result", "Result<${1:T}, ${2:E}>$0"),
     ] {
         let root_uri = uri("/test/main.rua");
-        let file_uri = uri(&format!("/test/{expected}.rua"));
+        let file_uri = uri(&format!("/test/{}_completion.rua", expected.to_lowercase()));
         let (source, offset) = extract_marker(&format!("fn use_value(value: {partial}$0) {{}}"));
         let mut srv = TestServer::new();
         srv.open(&root_uri, "fn root() {}");
@@ -180,14 +180,17 @@ fn completions_at_item_level() {
 
 #[test]
 fn completions_in_module_path() {
-    let (source, offset) = extract_marker(
-        "mod math { pub fn abs(x: i64) -> i64 { if x < 0 { -x } else { x } } }\nfn main() { math::$0 }",
-    );
-    let uri = uri("/test/ctx_mod_path.rua");
+    let (source, offset) = extract_marker("fn main() { math::$0 }");
+    let main_uri = uri("/test/main.rua");
+    let math_uri = uri("/test/math.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, &source);
+    srv.open(&main_uri, &source);
+    srv.open(
+        &math_uri,
+        "pub fn abs(x: i64) -> i64 { if x < 0 { -x } else { x } }",
+    );
 
-    let pp = srv.pp_at_offset(&uri, offset).unwrap();
+    let pp = srv.pp_at_offset(&main_uri, offset).unwrap();
     let items = srv.snapshot().completions(pp);
     let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
     assert!(
@@ -198,7 +201,7 @@ fn completions_in_module_path() {
 
 #[test]
 fn completions_from_declaration_module_at_line_end() {
-    let (source, offset) = extract_marker("mod moon;\nfn main() {\n    moon::$0\n}");
+    let (source, offset) = extract_marker("fn main() {\n    moon::$0\n}");
     let main_uri = uri("/workspace/main.rua");
     let declaration_uri = uri("/workspace/moon.ruai");
     let mut srv = TestServer::new();
@@ -219,14 +222,14 @@ fn completions_from_declaration_module_at_line_end() {
 
 #[test]
 fn completions_nested_module_path() {
-    let (source, offset) = extract_marker(
-        "mod a { pub mod b { pub fn func() -> i64 { 1 } } }\nfn main() { a::b::$0 }",
-    );
-    let uri = uri("/test/ctx_nested_path.rua");
+    let (source, offset) = extract_marker("fn main() { a::b::$0 }");
+    let main_uri = uri("/test/main.rua");
+    let module_uri = uri("/test/a/b.rua");
     let mut srv = TestServer::new();
-    srv.open(&uri, &source);
+    srv.open(&main_uri, &source);
+    srv.open(&module_uri, "pub fn func() -> i64 { 1 }");
 
-    let pp = srv.pp_at_offset(&uri, offset).unwrap();
+    let pp = srv.pp_at_offset(&main_uri, offset).unwrap();
     let items = srv.snapshot().completions(pp);
     let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
     assert!(

@@ -1,1 +1,0 @@
-<golden>/compile-fail/module_import_private.rua: `value` is private to module `secrets`

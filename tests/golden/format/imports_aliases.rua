@@ -1,0 +1,9 @@
+// Grouped imports and aliases.
+
+use math::add;
+use math::trig::sin as sine;
+use text::{join, split as words};
+
+fn calculate() -> i64 {
+    add(20, 22)
+}

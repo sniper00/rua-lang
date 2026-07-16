@@ -128,27 +128,7 @@ fn workspace_symbol(map: &DefMap, definition: &Definition) -> WorkspaceSymbol {
         file_id: definition.file_id(),
         range: definition.range(),
         selection_range: definition.name_range(),
-        container_name: module_path(map, definition.module_id()),
-    }
-}
-
-fn module_path(map: &DefMap, mut module_id: ModuleId) -> Option<String> {
-    let mut names = Vec::new();
-    loop {
-        let module = map.module(module_id)?;
-        if let Some(name) = module.name() {
-            names.push(name);
-        }
-        let Some(parent) = module.parent() else {
-            break;
-        };
-        module_id = parent;
-    }
-    if names.is_empty() {
-        None
-    } else {
-        names.reverse();
-        Some(names.join("::"))
+        container_name: map.module_path(definition.module_id()),
     }
 }
 
@@ -157,11 +137,7 @@ mod tests {
     use crate::{AnalysisHost, Change, DefKind, FileId, FileKind, SourceRootId, SourceRootKind};
 
     fn analysis_with_symbols() -> (crate::Analysis, FileId, FileId, &'static str) {
-        let main_source = concat!(
-            "pub fn root_fn() {}\n",
-            "pub mod inline { pub struct Thing {} fn helper() {} }\n",
-            "mod math;\n",
-        );
+        let main_source = "pub fn root_fn() {}\n";
         let root_id = SourceRootId::new(0);
         let main_id = FileId::new(0);
         let math_id = FileId::new(1);
@@ -187,23 +163,14 @@ mod tests {
     }
 
     #[test]
-    fn document_symbols_preserve_inline_modules_without_crossing_files() {
+    fn document_symbols_do_not_cross_path_module_files() {
         let (analysis, main_id, math_id, main_source) = analysis_with_symbols();
 
         let main = analysis.document_symbols(main_id, main_id);
         assert_eq!(
             main.iter().map(|symbol| symbol.name()).collect::<Vec<_>>(),
-            ["root_fn", "inline", "math"]
+            ["root_fn"]
         );
-        assert_eq!(
-            main[1]
-                .children()
-                .iter()
-                .map(|symbol| symbol.name())
-                .collect::<Vec<_>>(),
-            ["Thing", "helper"]
-        );
-        assert!(main[2].children().is_empty());
         for symbol in &main {
             let range = symbol.selection_range();
             assert_eq!(
@@ -228,13 +195,8 @@ mod tests {
                 .iter()
                 .map(|symbol| symbol.name())
                 .collect::<Vec<_>>(),
-            ["root_fn", "inline", "Thing", "helper", "math", "Number"]
+            ["root_fn", "math", "Number"]
         );
-        let thing = symbols
-            .iter()
-            .find(|symbol| symbol.name() == "Thing")
-            .expect("inline struct symbol");
-        assert_eq!(thing.container_name(), Some("inline"));
         let number = symbols
             .iter()
             .find(|symbol| symbol.name() == "Number")
@@ -242,8 +204,8 @@ mod tests {
         assert_eq!(number.container_name(), Some("math"));
         assert_eq!(number.file_id(), math_id);
 
-        let filtered = analysis.workspace_symbols(main_id, "thing");
+        let filtered = analysis.workspace_symbols(main_id, "number");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name(), "Thing");
+        assert_eq!(filtered[0].name(), "Number");
     }
 }

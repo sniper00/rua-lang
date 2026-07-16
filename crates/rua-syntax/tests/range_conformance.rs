@@ -239,6 +239,7 @@ fn range_conformance_path_and_member_access() {
         base,
         name,
         name_span,
+        ..
     } = &args[0].kind
     else {
         panic!("compiler call argument is not a field access")

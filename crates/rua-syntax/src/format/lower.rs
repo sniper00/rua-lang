@@ -243,7 +243,6 @@ fn item_doc(it: &Item) -> Doc {
         Item::Trait(t) => trait_doc(t),
         Item::Impl(i) => impl_doc(i),
         Item::Extern(x) => extern_doc(x),
-        Item::Mod(m) => mod_doc(m),
         Item::Use(u) => Doc::text(ser_node(u.syntax())),
     }
 }
@@ -393,31 +392,6 @@ fn extern_doc(x: &ExternBlock) -> Doc {
     ])
 }
 
-fn mod_doc(m: &ModDecl) -> Doc {
-    if m.is_file() {
-        Doc::text(ser_node(m.syntax()))
-    } else {
-        let items = lower_container(
-            m.syntax(),
-            |node| {
-                if let Some(it) = node_to_item(node) {
-                    item_doc(&it)
-                } else if let Some(statement) = node_to_stmt(node) {
-                    stmt_doc(&statement)
-                } else {
-                    Doc::text(compact(node))
-                }
-            },
-            true,
-        );
-        Doc::concat([
-            Doc::text(decl_header(m.syntax())),
-            Doc::text(" "),
-            brace_block_spaced(items),
-        ])
-    }
-}
-
 // --- blocks & braces -------------------------------------------------------
 
 fn brace_block(entries: Vec<Doc>) -> Doc {
@@ -537,7 +511,10 @@ fn block_doc(b: &Block) -> Doc {
 // --- statements ------------------------------------------------------------
 
 fn is_multiline_expr(e: &Expr) -> bool {
-    matches!(e, Expr::If(_) | Expr::Match(_) | Expr::Block(_))
+    matches!(
+        e,
+        Expr::If(_) | Expr::Match(_) | Expr::Loop(_) | Expr::Block(_)
+    )
 }
 
 fn stmt_doc(s: &Stmt) -> Doc {
@@ -614,7 +591,10 @@ fn stmt_doc(s: &Stmt) -> Doc {
                 body,
             ])
         }
-        Stmt::Break(_) => Doc::text("break;"),
+        Stmt::Break(statement) => match statement.value() {
+            Some(value) => Doc::concat([Doc::text("break "), expr_inline(&value), Doc::text(";")]),
+            None => Doc::text("break;"),
+        },
         Stmt::Continue(_) => Doc::text("continue;"),
     }
 }
@@ -627,6 +607,13 @@ fn expr_doc(e: &Expr) -> Doc {
     match e {
         Expr::If(i) => if_doc(i),
         Expr::Match(m) => match_doc(m),
+        Expr::Loop(loop_expr) => Doc::concat([
+            Doc::text("loop "),
+            loop_expr
+                .body()
+                .map(|body| block_doc(&body))
+                .unwrap_or_else(|| Doc::text("{}")),
+        ]),
         Expr::Block(b) => block_doc(b),
         _ => expr_inline(e),
     }
@@ -771,7 +758,10 @@ fn expr_inline(e: &Expr) -> Doc {
         ]),
         Expr::Assign(a) => Doc::concat([
             a.target().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil),
-            Doc::text(" = "),
+            Doc::text(format!(
+                " {} ",
+                a.op().map(tok_text).unwrap_or_else(|| "=".to_string())
+            )),
             a.value().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil),
         ]),
         Expr::Range(r) => Doc::concat([
@@ -794,7 +784,7 @@ fn expr_inline(e: &Expr) -> Doc {
             let args = arg_list_doc(m.arg_list());
             Doc::concat([
                 recv,
-                Doc::text("."),
+                Doc::text(if m.is_optional() { "?." } else { "." }),
                 Doc::text(method),
                 Doc::text("("),
                 args,
@@ -803,7 +793,7 @@ fn expr_inline(e: &Expr) -> Doc {
         }
         Expr::Field(f) => Doc::concat([
             f.base().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil),
-            Doc::text("."),
+            Doc::text(if f.is_optional() { "?." } else { "." }),
             Doc::text(f.field_name().map(tok_text).unwrap_or_default()),
         ]),
         Expr::Index(i) => Doc::concat([
@@ -813,9 +803,19 @@ fn expr_inline(e: &Expr) -> Doc {
             Doc::text("]"),
         ]),
         Expr::StructLit(s) => struct_lit_doc(s),
+        Expr::Map(map) => map_doc(map),
         Expr::MacroCall(m) => macro_doc(m),
         Expr::Closure(closure) => Doc::text(ser_node(closure.syntax())),
-        Expr::If(_) | Expr::Match(_) | Expr::Block(_) => Doc::text(compact(e.syntax())),
+        Expr::If(if_expr) => if_doc(if_expr),
+        Expr::Match(match_expr) => match_doc(match_expr),
+        Expr::Loop(loop_expr) => Doc::concat([
+            Doc::text("loop "),
+            loop_expr
+                .body()
+                .map(|body| block_doc(&body))
+                .unwrap_or_else(|| Doc::text("{}")),
+        ]),
+        Expr::Block(block) => block_doc(block),
     }
 }
 
@@ -844,6 +844,23 @@ fn struct_lit_doc(s: &StructLitExpr) -> Doc {
             wrap_list("{", fields, "}", true),
         ])
     }
+}
+
+fn map_doc(map: &MapExpr) -> Doc {
+    let entries = map
+        .entries()
+        .map(|entry| {
+            Doc::concat([
+                entry.key().map(|key| expr_inline(&key)).unwrap_or(Doc::Nil),
+                Doc::text(": "),
+                entry
+                    .value()
+                    .map(|value| expr_inline(&value))
+                    .unwrap_or(Doc::Nil),
+            ])
+        })
+        .collect();
+    Doc::group(wrap_list("#{", entries, "}", true))
 }
 
 fn macro_doc(m: &MacroCallExpr) -> Doc {

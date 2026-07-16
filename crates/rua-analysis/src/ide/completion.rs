@@ -120,12 +120,12 @@ pub(crate) fn completions(db: &Arc<BaseDb>, position: ProjectPosition) -> Vec<Co
     let after_dot = ctx
         .token
         .as_ref()
-        .is_some_and(|t| t.kind() == SyntaxKind::Dot)
+        .is_some_and(|t| matches!(t.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot))
         || ctx
             .token
             .as_ref()
             .and_then(previous_significant)
-            .is_some_and(|t| t.kind() == SyntaxKind::Dot);
+            .is_some_and(|t| matches!(t.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot));
     let mut items = if after_dot {
         member_completions(&ctx)
     } else if let Some(ref tok) = ctx.token
@@ -997,11 +997,16 @@ pub(crate) fn infer_dot_receiver(
     // method call. This is how rust-analyzer does it.
     let mut node = token.parent()?;
     let receiver_range: TextRange;
+    let optional_receiver: bool;
     loop {
         let kind = node.kind();
         if kind == rua_syntax::SyntaxKind::FieldExpr
             || kind == rua_syntax::SyntaxKind::MethodCallExpr
         {
+            optional_receiver = node
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::QuestionDot);
             // Found the member access node. Get the receiver expression.
             let receiver = node.children().find(|c| {
                 matches!(
@@ -1038,7 +1043,15 @@ pub(crate) fn infer_dot_receiver(
     for (expr_id, _expr) in ctx.body.exprs() {
         let fr = ctx.source_map.expr_range(expr_id)?;
         if fr.range == receiver_range {
-            return inference.type_of_expr(expr_id).cloned();
+            let receiver = inference.type_of_expr(expr_id).cloned()?;
+            return if optional_receiver {
+                match receiver {
+                    Ty::Option(item) => Some(*item),
+                    other => Some(other),
+                }
+            } else {
+                Some(receiver)
+            };
         }
     }
     None
@@ -1601,7 +1614,7 @@ pub(crate) fn token_at_offset(node: &rua_syntax::SyntaxNode, offset: u32) -> Opt
             // If exactly at the boundary between `.` and the field/method name,
             // prefer the name token (right). This makes hover and goto-def
             // work when the cursor lands on the first character of the member.
-            if left.kind() == SyntaxKind::Dot {
+            if matches!(left.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot) {
                 Some(right)
             } else {
                 Some(left)
@@ -1786,6 +1799,11 @@ fn match_scrutinee_enum(
 /// Token kinds that indicate the cursor is in expression context.
 const EXPR_CONTEXT_TOKENS: &[SyntaxKind] = &[
     SyntaxKind::Eq,
+    SyntaxKind::PlusEq,
+    SyntaxKind::MinusEq,
+    SyntaxKind::StarEq,
+    SyntaxKind::SlashEq,
+    SyntaxKind::PercentEq,
     SyntaxKind::KwReturn,
     SyntaxKind::LParen,
     SyntaxKind::LBracket,
@@ -1804,6 +1822,8 @@ const EXPR_CONTEXT_TOKENS: &[SyntaxKind] = &[
     SyntaxKind::KwMatch,
     SyntaxKind::KwIn,
     SyntaxKind::Dot,
+    SyntaxKind::QuestionDot,
+    SyntaxKind::QuestionQuestion,
 ];
 
 /// Check whether the cursor is in a type position (after `:` in a type

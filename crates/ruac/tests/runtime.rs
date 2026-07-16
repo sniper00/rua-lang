@@ -78,6 +78,31 @@ fn compile_and_run_with_prelude(label: &str, prelude: &str, source: &str) -> (St
     (lua, output)
 }
 
+fn compile_project_and_run(
+    label: &str,
+    prelude: &str,
+    main_source: &str,
+    modules: &[(&str, &str)],
+) -> (String, Output) {
+    let temp = TempDir::new(label);
+    let main = temp.path().join("main.rua");
+    fs::write(&main, main_source).expect("write project entry");
+    for (relative, source) in modules {
+        let path = temp.path().join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create module directory");
+        }
+        fs::write(path, source).expect("write project module");
+    }
+    let root = workspace_root();
+    let lua = ruac::compile_path_with_std(&main, &root.join("crates/rua-resources/resources/std"))
+        .unwrap_or_else(|error| panic!("compile {label}: {error}"));
+    let script = temp.path().join("main.lua");
+    fs::write(&script, format!("{prelude}\n{lua}")).expect("write generated Lua");
+    let output = run_lua(&script);
+    (lua, output)
+}
+
 #[test]
 fn runtime_harness_executes_lua() {
     let temp = TempDir::new("harness");
@@ -88,10 +113,89 @@ fn runtime_harness_executes_lua() {
 }
 
 #[test]
+fn compound_assignment_and_loop_values_execute() {
+    let source = r#"
+fn index() -> i64 {
+    println!("index");
+    0
+}
+
+let mut values = vec![1];
+values[index()] += 4;
+
+let mut text = "Rua";
+text += " 5.5";
+
+let answer = loop {
+    break values[0];
+};
+
+println!("{} {}", answer, text);
+"#;
+    let (lua, output) = compile_and_run("compound-loop-value", source);
+    assert_success(&output, "index\n5 Rua 5.5\n", &lua);
+    assert_eq!(lua.matches("= index()").count(), 1, "{lua}");
+}
+
+#[test]
+fn option_coalescing_and_optional_chaining_execute_lazily() {
+    let source = r#"
+struct Profile {
+    city: String,
+}
+
+impl Profile {
+    fn label(&self, suffix: String) -> String {
+        self.city + suffix
+    }
+}
+
+fn fallback() -> String {
+    println!("fallback");
+    "!".to_string()
+}
+
+let present: Option<Profile> = Option::Some(Profile { city: "Shanghai" });
+let absent: Option<Profile> = Option::None;
+let disabled: Option<bool> = Option::Some(false);
+
+println!("{}", disabled ?? true);
+println!("{}", present?.city ?? "unknown");
+println!("{}", absent?.city ?? "unknown");
+println!("{}", present?.label("!") ?? "none");
+println!("{}", absent?.label(fallback()) ?? "none");
+"#;
+    let (lua, output) = compile_and_run("option-operators", source);
+    assert_success(&output, "false\nShanghai\nunknown\nShanghai!\nnone\n", &lua);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fallback"));
+}
+
+#[test]
+fn membership_and_map_literals_execute() {
+    let source = r#"
+let scores: HashMap<String, i64> = #{
+    "alice": 10,
+    "bob": 20,
+};
+
+println!("{}", scores.get("alice").unwrap());
+println!("{}", "alice" in scores);
+println!("{}", "carol" in scores);
+println!("{}", 2 in vec![1, 2, 3]);
+println!("{}", "ua" in "Rua");
+println!("{}", 3 in 0..5);
+println!("{}", 5 in 0..5);
+"#;
+    let (lua, output) = compile_and_run("membership-map", source);
+    assert_success(&output, "10\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\n", &lua);
+    assert!(lua.contains("map.new(2)"), "{lua}");
+}
+
+#[test]
 fn generated_artifact_checks_runtime_abi() {
     let lua = ruac::compile_str("println!(\"abi\");").unwrap();
     assert!(
-        lua.contains("assert(rua_std.ABI_VERSION == 1, \"incompatible rua_std ABI\")"),
+        lua.contains("assert(rua_std.ABI_VERSION == 2, \"incompatible rua_std ABI\")"),
         "{lua}"
     );
 }
@@ -157,7 +261,7 @@ fn provided_lua_extern_binds_the_host_global() {
 
 #[test]
 fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
-    let (lua, output) = compile_and_run_with_prelude(
+    let (lua, output) = compile_project_and_run(
         "result-extern",
         r#"
         function host_fetch(ok)
@@ -178,13 +282,6 @@ fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
         extern "lua-result" {
             fn host_fetch(ok: bool) -> Result<i64, String>;
             fn host_echo(input: Result<i64, String>) -> Result<i64, String>;
-        }
-
-        mod nested {
-            extern "lua-result" {
-                fn host_nested(value: i64) -> Result<i64, String>;
-            }
-            pub fn run(value: i64) -> Result<i64, String> { host_nested(value) }
         }
 
         match host_fetch(true) {
@@ -208,6 +305,15 @@ fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
             Err(error) => println!("{}", error),
         }
         "#,
+        &[(
+            "nested.rua",
+            r#"
+            extern "lua-result" {
+                fn host_nested(value: i64) -> Result<i64, String>;
+            }
+            pub fn run(value: i64) -> Result<i64, String> { host_nested(value) }
+            "#,
+        )],
     );
     assert_success(&output, "42\nboom\n10\necho:bad\n12\n", &lua);
     assert!(lua.contains("local function host_fetch(ok)"), "{lua}");
@@ -234,85 +340,85 @@ fn function_named_main_is_not_an_entry_point() {
 }
 
 #[test]
-fn root_and_module_initializers_preserve_source_order() {
-    let (lua, output) = compile_and_run(
+fn module_initializers_run_before_the_root_chunk() {
+    let (lua, output) = compile_project_and_run(
         "initializer-order",
+        "",
         r#"
         println!("root-before");
-        mod api {
-            println!("module");
-            pub fn answer() -> i64 { 42 }
-        }
         println!("root-after {}", api::answer());
         "#,
+        &[(
+            "api.rua",
+            r#"
+            println!("module");
+            pub fn answer() -> i64 { 42 }
+            "#,
+        )],
     );
-    assert_success(&output, "root-before\nmodule\nroot-after 42\n", &lua);
+    assert_success(&output, "module\nroot-before\nroot-after 42\n", &lua);
 }
 
 #[test]
 fn module_sibling_calls_use_resolved_target() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "module-sibling",
+        "",
         r#"
-        mod api {
-            fn add(a: i64, b: i64) -> i64 { a + b }
-            pub fn double(value: i64) -> i64 { add(value, value) }
-        }
-
         println!("{}", api::double(4));
         "#,
+        &[(
+            "api.rua",
+            r#"
+            fn add(a: i64, b: i64) -> i64 { a + b }
+            pub fn double(value: i64) -> i64 { add(value, value) }
+            "#,
+        )],
     );
     assert_success(&output, "8\n", &lua);
 }
 
 #[test]
 fn nested_module_uses_one_parent_owned_table() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "nested-module",
+        "",
         r#"
-        mod outer {
-            pub mod inner {
-                pub fn answer() -> i64 { 42 }
-            }
-        }
-
         println!("{}", outer::inner::answer());
         "#,
+        &[("outer/inner.rua", "pub fn answer() -> i64 { 42 }")],
     );
     assert_success(&output, "42\n", &lua);
 }
 
 #[test]
 fn module_local_type_uses_one_backend_place() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "module-type",
+        "",
         r#"
-        mod geo {
+        let point = geo::Point::new(2, 3);
+        println!("{}", point.x + point.y);
+        "#,
+        &[(
+            "geo.rua",
+            r#"
             pub struct Point { x: i64, y: i64 }
             impl Point {
                 pub fn new(x: i64, y: i64) -> Point { Point { x: x, y: y } }
             }
-        }
-
-        let point = geo::Point::new(2, 3);
-        println!("{}", point.x + point.y);
-        "#,
+            "#,
+        )],
     );
     assert_success(&output, "5\n", &lua);
 }
 
 #[test]
 fn variant_aliases_use_identity_in_construction_and_patterns() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "variant-alias",
+        "",
         r#"
-        mod api {
-            pub enum Event {
-                Ready,
-                Code(i64),
-                Move { x: i64 },
-            }
-        }
         use api::Event::Ready as R;
         use api::Event::Code as C;
         use api::Event::Move as M;
@@ -324,6 +430,16 @@ fn variant_aliases_use_identity_in_construction_and_patterns() {
         match code { C(value) => println!("{}", value) }
         match movement { M { x } => println!("{}", x) }
         "#,
+        &[(
+            "api.rua",
+            r#"
+            pub enum Event {
+                Ready,
+                Code(i64),
+                Move { x: i64 },
+            }
+            "#,
+        )],
     );
     assert_success(&output, "ready\n7\n5\n", &lua);
 }
@@ -403,16 +519,15 @@ fn direct_recursion_uses_local_function_without_forward_declaration() {
 
 #[test]
 fn module_function_captures_root_local_function() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "module-to-root-function",
+        "",
         r#"
-        mod api {
-            pub fn answer() -> i64 { root_answer() }
-        }
         fn root_answer() -> i64 { 42 }
 
         println!("{}", api::answer());
         "#,
+        &[("api.rua", "pub fn answer() -> i64 { root_answer() }")],
     );
     assert_success(&output, "42\n", &lua);
     let root = lua.find("local function root_answer()").unwrap();
@@ -463,6 +578,82 @@ fn option_map_inlines_without_allocating_an_unused_closure() {
     );
     assert_success(&output, "5\n", &lua);
     assert!(!lua.contains("local function __t"), "{lua}");
+}
+
+#[test]
+fn result_methods_and_map_use_array_tag_abi() {
+    let (lua, output) = compile_and_run(
+        "result-methods-array-abi",
+        r#"
+        let success: Result<i64, String> = Result::Ok(4).map(|value| value + 1);
+        let failure: Result<i64, String> = Result::Err("no").map(|value| value + 1);
+
+        println!(
+            "{} {} {} {}",
+            success.is_ok(),
+            failure.is_err(),
+            success.unwrap(),
+            failure.unwrap_or(9),
+        );
+        match failure {
+            Ok(_) => println!("wrong"),
+            Err(error) => println!("{}", error),
+        }
+        "#,
+    );
+    assert_success(&output, "true true 5 9\nno\n", &lua);
+    assert!(lua.contains("[1]"), "{lua}");
+    assert!(lua.contains("[2]"), "{lua}");
+    assert!(!lua.contains(".tag"), "{lua}");
+    assert!(!lua.contains(".value"), "{lua}");
+}
+
+#[test]
+fn option_and_result_expect_return_values_and_report_context() {
+    let (lua, output) = compile_and_run(
+        "option-result-expect-success",
+        r#"
+        let present: Option<i64> = Option::Some(7);
+        let success: Result<i64, String> = Result::Ok(9);
+        println!("{} {}", present.expect("missing option"), success.expect("load failed"));
+        "#,
+    );
+    assert_success(&output, "7 9\n", &lua);
+
+    let (lua, output) = compile_and_run(
+        "option-expect-failure",
+        r#"
+        let missing: Option<i64> = Option::None;
+        missing.expect("required configuration");
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "Option::expect unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("required configuration"),
+        "stderr:\n{}\nLua:\n{lua}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (lua, output) = compile_and_run(
+        "result-expect-failure",
+        r#"
+        let failure: Result<i64, String> = Result::Err("connection refused");
+        failure.expect("database unavailable");
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "Result::expect unexpectedly succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("database unavailable: connection refused"),
+        "stderr:\n{}\nLua:\n{lua}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -594,25 +785,33 @@ fn match_guard_failure_continues_to_later_arm() {
 
 #[test]
 fn same_named_traits_in_modules_keep_default_method_identity() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "module-trait-identity",
+        "",
         r#"
-        mod left {
-            pub trait Named { fn name(&self) -> String { "left" } }
-            pub struct Item {}
-            impl Named for Item {}
-            pub fn make() -> Item { Item {} }
-        }
-        mod right {
-            pub trait Named { fn name(&self) -> String { "right" } }
-            pub struct Item {}
-            impl Named for Item {}
-            pub fn make() -> Item { Item {} }
-        }
-
         println!("{}", left::make().name());
         println!("{}", right::make().name());
         "#,
+        &[
+            (
+                "left.rua",
+                r#"
+                pub trait Named { fn name(&self) -> String { "left" } }
+                pub struct Item {}
+                impl Named for Item {}
+                pub fn make() -> Item { Item {} }
+                "#,
+            ),
+            (
+                "right.rua",
+                r#"
+                pub trait Named { fn name(&self) -> String { "right" } }
+                pub struct Item {}
+                impl Named for Item {}
+                pub fn make() -> Item { Item {} }
+                "#,
+            ),
+        ],
     );
     assert_success(&output, "left\nright\n", &lua);
 }
@@ -642,16 +841,14 @@ println!("{}", value.repeat());
 
 #[test]
 fn module_and_local_with_same_name_get_distinct_backend_places() {
-    let (lua, output) = compile_and_run(
+    let (lua, output) = compile_project_and_run(
         "namespace-collision",
+        "",
         r#"
-mod api {
-    pub fn value() -> i64 { 40 }
-}
-
 let api = 2;
 println!("{}", api + api::value());
 "#,
+        &[("api.rua", "pub fn value() -> i64 { 40 }")],
     );
     assert_success(&output, "42\n", &lua);
 }
@@ -667,14 +864,24 @@ fn result_remains_tagged_in_vec_and_with_nil_payload() {
             Err(message) => println!("{}", message),
         }
 
-        let nullable = Ok(None);
-        match nullable {
+        let ok_nil: Result<Option<i64>, Option<String>> = Ok(None);
+        match ok_nil {
             Ok(value) => if let None = value { println!("nil-ok"); },
             Err(_) => println!("wrong"),
         }
+
+        let err_nil: Result<Option<i64>, Option<String>> = Err(None);
+        match err_nil {
+            Ok(_) => println!("wrong"),
+            Err(error) => if let None = error { println!("nil-err"); },
+        }
         "#,
     );
-    assert_success(&output, "inside\nnil-ok\n", &lua);
+    assert_success(&output, "inside\nnil-ok\nnil-err\n", &lua);
+    assert!(lua.contains("[1]"), "{lua}");
+    assert!(lua.contains("[2]"), "{lua}");
+    assert!(!lua.contains(".tag"), "{lua}");
+    assert!(!lua.contains(".value"), "{lua}");
 }
 
 #[test]
@@ -703,12 +910,16 @@ fn require_returns_public_exports_after_initialization() {
 
 #[test]
 fn require_exports_public_types_and_modules() {
-    let source = r#"
-        pub struct Point { x: i64 }
-        pub mod api { pub fn answer() -> i64 { 42 } }
-    "#;
-    let lua = ruac::compile_str(source).expect("compile public exports");
     let temp = TempDir::new("item-exports");
+    let source = "pub struct Point { x: i64 }\n";
+    let main = temp.path().join("main.rua");
+    fs::write(&main, source).unwrap();
+    fs::write(
+        temp.path().join("api.rua"),
+        "pub fn answer() -> i64 { 42 }\n",
+    )
+    .unwrap();
+    let lua = ruac::compile_path(&main).expect("compile public exports");
     let module = temp.path().join("module.lua");
     let runner = temp.path().join("runner.lua");
     fs::write(&module, &lua).unwrap();

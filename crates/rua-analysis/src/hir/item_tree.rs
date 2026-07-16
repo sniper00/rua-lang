@@ -31,12 +31,6 @@ pub enum ItemKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ModuleKind {
-    Inline,
-    File,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Visibility {
     Private,
     Public,
@@ -50,7 +44,6 @@ pub enum ItemSourceKind {
     ImplMethod,
     Extern,
     SyntheticFileChunk,
-    SyntheticInlineModuleChunk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -385,7 +378,6 @@ impl SignatureFingerprint {
             source_kind,
             signature,
             documentation,
-            module_kind,
             imports,
             children,
         } = input;
@@ -396,7 +388,6 @@ impl SignatureFingerprint {
             source_kind,
             signature,
             documentation,
-            module_kind,
             imports,
             children
                 .iter()
@@ -441,7 +432,6 @@ struct ItemFingerprintInput<'a> {
     source_kind: ItemSourceKind,
     signature: &'a ItemSignature,
     documentation: &'a Option<String>,
-    module_kind: Option<ModuleKind>,
     imports: &'a [Import],
     children: &'a [ItemTreeItem],
 }
@@ -495,7 +485,6 @@ pub struct ItemTreeItem {
     range: TextRange,
     name_range: TextRange,
     visibility: Visibility,
-    module_kind: Option<ModuleKind>,
     source_kind: ItemSourceKind,
     signature: ItemSignature,
     documentation: Option<String>,
@@ -534,10 +523,6 @@ impl ItemTreeItem {
         self.visibility
     }
 
-    pub const fn module_kind(&self) -> Option<ModuleKind> {
-        self.module_kind
-    }
-
     pub const fn source_kind(&self) -> ItemSourceKind {
         self.source_kind
     }
@@ -562,20 +547,6 @@ impl ItemTreeItem {
         &self.imports
     }
 
-    fn refresh_signature_fingerprint(&mut self) {
-        self.signature_fingerprint = SignatureFingerprint::for_item(ItemFingerprintInput {
-            name: &self.name,
-            kind: self.kind,
-            visibility: self.visibility,
-            source_kind: self.source_kind,
-            signature: &self.signature,
-            documentation: &self.documentation,
-            module_kind: self.module_kind,
-            imports: &self.imports,
-            children: &self.children,
-        });
-    }
-
     fn new(name: String, range: TextRange, name_range: TextRange, data: ItemTreeItemData) -> Self {
         let ItemTreeItemData {
             kind,
@@ -592,7 +563,6 @@ impl ItemTreeItem {
             source_kind,
             signature: &signature,
             documentation: &documentation,
-            module_kind: None,
             imports: &[],
             children: &children,
         });
@@ -602,7 +572,6 @@ impl ItemTreeItem {
             range,
             name_range,
             visibility,
-            module_kind: None,
             source_kind,
             signature,
             documentation,
@@ -659,36 +628,6 @@ impl ItemTree {
                         alias: import.alias.map(|token| token.text().to_string()),
                     }
                 })),
-                Item::Mod(item) => {
-                    let module_kind = if item.is_file() {
-                        ModuleKind::File
-                    } else {
-                        ModuleKind::Inline
-                    };
-                    let (children, module_imports) = if module_kind == ModuleKind::Inline {
-                        Self::lower_scope(item.items())
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
-                    if let Some(mut summary) = Self::named_item(
-                        &item,
-                        ItemKind::Module,
-                        visibility(item.is_pub()),
-                        ItemSourceKind::Definition,
-                        ItemSignature::None,
-                        children,
-                    ) {
-                        summary.module_kind = Some(module_kind);
-                        summary.imports = module_imports;
-                        if module_kind == ModuleKind::Inline {
-                            summary.documentation =
-                                rua_syntax::symbols::module_documentation(item.syntax())
-                                    .or(summary.documentation);
-                        }
-                        summary.refresh_signature_fingerprint();
-                        summaries.push(summary);
-                    }
-                }
                 item => summaries.extend(Self::lower_non_module_item(item)),
             }
         }
@@ -713,7 +652,7 @@ impl ItemTree {
                     .filter_map(|function| Self::lower_extern(&function, abi.clone()))
                     .collect()
             }
-            Item::Mod(_) | Item::Use(_) => Vec::new(),
+            Item::Use(_) => Vec::new(),
         }
     }
 
@@ -1334,8 +1273,7 @@ mod tests {
     use rua_syntax::parse_source_file;
 
     use super::{
-        ItemKind, ItemSignature, ItemSourceKind, ItemTree, ModuleKind, ReceiverKind, VariantKind,
-        Visibility,
+        ItemKind, ItemSignature, ItemSourceKind, ItemTree, ReceiverKind, VariantKind, Visibility,
     };
 
     #[test]
@@ -1345,8 +1283,6 @@ mod tests {
             "struct Record { value: i64 }\n",
             "pub enum State { Ready }\n",
             "trait Service { fn call(&self); }\n",
-            "pub mod nested { fn hidden_inside_module() {} }\n",
-            "mod external;\n",
             "extern \"lua\" { pub fn clock() -> i64; }\n",
         );
         let parse = parse_source_file(source);
@@ -1366,8 +1302,6 @@ mod tests {
                 ("Record", ItemKind::Struct, Visibility::Private),
                 ("State", ItemKind::Enum, Visibility::Public),
                 ("Service", ItemKind::Trait, Visibility::Private),
-                ("nested", ItemKind::Module, Visibility::Public),
-                ("external", ItemKind::Module, Visibility::Private),
                 ("clock", ItemKind::ExternFunction, Visibility::Public),
             ]
         );
@@ -1379,12 +1313,6 @@ mod tests {
             item.range().start() <= item.name_range().start()
                 && item.name_range().end() <= item.range().end()
         }));
-        let nested = &tree.items()[4];
-        assert_eq!(nested.module_kind(), Some(ModuleKind::Inline));
-        assert_eq!(nested.children().len(), 1);
-        assert_eq!(nested.children()[0].name(), "hidden_inside_module");
-        assert_eq!(tree.items()[5].module_kind(), Some(ModuleKind::File));
-        assert!(tree.items()[5].children().is_empty());
     }
 
     #[test]
@@ -1459,7 +1387,7 @@ mod tests {
     #[test]
     fn item_tree_attaches_only_semantic_documentation() {
         let parsed = parse_source_file(
-            "// ordinary\nfn plain() {}\n/// Function docs.\nfn documented() {}\nstruct Point {\n    /// X docs.\n    x: i64,\n}\nenum Color {\n    /// Red docs.\n    Red,\n}\nimpl Point {\n    /// Method docs.\n    fn x(&self) -> i64 { self.x }\n}\nmod api {\n    //! Module docs.\n    fn call() {}\n}",
+            "// ordinary\nfn plain() {}\n/// Function docs.\nfn documented() {}\nstruct Point {\n    /// X docs.\n    x: i64,\n}\nenum Color {\n    /// Red docs.\n    Red,\n}\nimpl Point {\n    /// Method docs.\n    fn x(&self) -> i64 { self.x }\n}",
         );
         assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
         let tree = ItemTree::lower(parsed.tree());
@@ -1477,8 +1405,6 @@ mod tests {
             tree.items()[4].children()[0].documentation(),
             Some("Method docs.")
         );
-        assert_eq!(tree.items()[5].documentation(), Some("Module docs."));
-
         let changed = parse_source_file("/// Changed docs.\nfn documented() {}");
         let unchanged = parse_source_file("/// Function docs.\nfn documented() {}");
         assert_ne!(
@@ -1552,14 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn item_tree_fingerprint_tracks_module_shape_and_imports() {
-        let inline = ItemTree::lower(parse_source_file("mod empty {}").tree());
-        let file = ItemTree::lower(parse_source_file("mod empty;").tree());
-        assert_ne!(
-            inline.items()[0].signature_fingerprint(),
-            file.items()[0].signature_fingerprint()
-        );
-
+    fn item_tree_fingerprint_tracks_imports() {
         let first = ItemTree::lower(parse_source_file("use api::value;").tree());
         let second = ItemTree::lower(parse_source_file("use api::value as renamed;").tree());
         assert_ne!(
@@ -1578,11 +1497,8 @@ mod tests {
     }
 
     #[test]
-    fn item_tree_lowers_imports_in_their_module_scope() {
-        let parse = parse_source_file(concat!(
-            "use math::{one, two as second};\n",
-            "mod nested { use parent::value as local; fn call() {} }\n",
-        ));
+    fn item_tree_lowers_imports() {
+        let parse = parse_source_file("use math::{one, two as second};\n");
         let tree = ItemTree::lower(parse.tree());
 
         assert_eq!(tree.imports().len(), 2);
@@ -1590,8 +1506,5 @@ mod tests {
         assert_eq!(tree.imports()[0].binding_name(), Some("one"));
         assert_eq!(tree.imports()[1].path(), ["math", "two"]);
         assert_eq!(tree.imports()[1].binding_name(), Some("second"));
-        assert_eq!(tree.items()[0].imports().len(), 1);
-        assert_eq!(tree.items()[0].imports()[0].path(), ["parent", "value"]);
-        assert_eq!(tree.items()[0].imports()[0].binding_name(), Some("local"));
     }
 }

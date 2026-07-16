@@ -107,20 +107,27 @@ fn type_hierarchy_on_function_returns_none() {
 
 #[test]
 fn type_hierarchy_isolates_same_named_traits_by_definition_identity() {
-    let uri = uri("/test/typehier_same_traits.rua");
+    let main_uri = uri("/test/main.rua");
+    let first_uri = uri("/test/first.rua");
+    let second_uri = uri("/test/second.rua");
     let mut srv = TestServer::new();
+    srv.open(&main_uri, "fn main() {}");
     srv.open(
-        &uri,
-        "mod first {\n    pub trait Marker {}\n    pub struct One {}\n    impl Marker for One {}\n}\nmod second {\n    pub trait Marker {}\n    pub struct Two {}\n    impl Marker for Two {}\n}\n",
+        &first_uri,
+        "pub trait Marker {}\npub struct One {}\nimpl Marker for One {}\n",
+    );
+    srv.open(
+        &second_uri,
+        "pub trait Marker {}\npub struct Two {}\nimpl Marker for Two {}\n",
     );
 
     let first = srv
         .snapshot()
-        .type_hierarchy_prepare(srv.pp(&uri, 1, 14).unwrap())
+        .type_hierarchy_prepare(srv.pp(&first_uri, 0, 10).unwrap())
         .unwrap();
     let second = srv
         .snapshot()
-        .type_hierarchy_prepare(srv.pp(&uri, 6, 14).unwrap())
+        .type_hierarchy_prepare(srv.pp(&second_uri, 0, 10).unwrap())
         .unwrap();
     assert_ne!(first.target, second.target);
 

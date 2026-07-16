@@ -1,7 +1,0 @@
-mod secrets {
-    fn value() -> i64 { 42 }
-}
-
-fn main() {
-    secrets::value();
-}

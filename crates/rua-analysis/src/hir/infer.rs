@@ -2,6 +2,7 @@
 
 use rua_core::{BuiltinId, BuiltinMacroLowering, builtin_macro, builtin_type, builtin_value};
 
+use super::body::MapLiteralEntry;
 use super::{
     BinaryOp, BindingId, BindingKind, Body, BodyId, BodyResolution, CallableRequirement,
     CallableSignature, CallableTy, Condition, DefId, DefKind, DefMap, Definition, Expr, ExprId,
@@ -28,6 +29,8 @@ pub enum TypeMismatchContext {
     RangeBound,
     Index,
 }
+
+type LoopBreakValues = Vec<(Option<ExprId>, Ty)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InferenceDiagnostic {
@@ -66,6 +69,13 @@ pub enum InferenceDiagnostic {
         op: BinaryOp,
     },
     InvalidTry {
+        expr: ExprId,
+        found: Ty,
+    },
+    InvalidBreakValue {
+        expr: ExprId,
+    },
+    InvalidOptionalChain {
         expr: ExprId,
         found: Ty,
     },
@@ -202,6 +212,8 @@ struct InferenceContext<'a> {
     member_resolutions: Vec<Option<MemberResolution>>,
     diagnostics: Vec<InferenceDiagnostic>,
     closure_returns: Vec<Ty>,
+    /// `Some` collects values for `loop`; `None` marks `while`/`for`.
+    loop_breaks: Vec<Option<LoopBreakValues>>,
 }
 
 /// Check whether `lhs op rhs` is clearly incompatible for arithmetic —
@@ -211,8 +223,14 @@ fn is_incompatible_arithmetic(lhs: &Ty, rhs: &Ty, op: BinaryOp) -> bool {
     if lhs.is_unknown() || lhs.is_never() || rhs.is_unknown() || rhs.is_never() {
         return false;
     }
-    if matches!(lhs, Ty::Named(_)) || matches!(rhs, Ty::Named(_)) {
-        return false; // may have operator overloading
+    if !lhs.is_concrete() || !rhs.is_concrete() {
+        return false;
+    }
+    if matches!(lhs, Ty::Named(_)) {
+        return false; // the left operand may have operator overloading
+    }
+    if matches!(rhs, Ty::Named(_)) {
+        return true;
     }
     let bad = |t: &Ty| *t == Ty::BOOL || *t == Ty::UNIT;
     if bad(lhs) || bad(rhs) {
@@ -227,13 +245,20 @@ fn is_incompatible_arithmetic(lhs: &Ty, rhs: &Ty, op: BinaryOp) -> bool {
     if lhs_str || rhs_str {
         return true; // "a" + 1, 1 + "a", etc. are all invalid
     }
-    // Mixed numeric+non-numeric (but not Named, String, Bool, Unit).
-    let lhs_num = lhs.is_numeric();
-    let rhs_num = rhs.is_numeric();
-    if lhs_num != rhs_num {
-        return true; // 1 + some_struct, etc.
+    !(lhs.is_numeric() && rhs.is_numeric())
+}
+
+fn arithmetic_trait(op: BinaryOp) -> Option<(rua_core::BuiltinTraitId, &'static str)> {
+    use rua_core::BuiltinTraitId;
+
+    match op {
+        BinaryOp::Add => Some((BuiltinTraitId::Add, "add")),
+        BinaryOp::Subtract => Some((BuiltinTraitId::Sub, "sub")),
+        BinaryOp::Multiply => Some((BuiltinTraitId::Mul, "mul")),
+        BinaryOp::Divide => Some((BuiltinTraitId::Div, "div")),
+        BinaryOp::Remainder => Some((BuiltinTraitId::Rem, "rem")),
+        _ => None,
     }
-    false
 }
 
 impl<'a> InferenceContext<'a> {
@@ -265,6 +290,7 @@ impl<'a> InferenceContext<'a> {
             member_resolutions: vec![None; body.name_refs().len()],
             diagnostics: Vec::new(),
             closure_returns: Vec::new(),
+            loop_breaks: Vec::new(),
         }
     }
 
@@ -353,16 +379,26 @@ impl<'a> InferenceContext<'a> {
                 return_type,
                 body,
             } => self.infer_closure(expr_id, &params, return_type.as_ref(), body, expected),
-            Expr::Assign { target, value } => self.infer_assign_expr(target, value),
+            Expr::Loop { body } => self.infer_loop_expr(body, expected),
+            Expr::Assign { op, target, value } => {
+                self.infer_assign_expr(expr_id, op, target, value)
+            }
             Expr::Try { expr } => self.infer_try_expr(expr, expected),
             Expr::Call { callee, args } => self.infer_call(expr_id, callee, &args, expected),
             Expr::MethodCall {
                 receiver,
                 method,
+                optional,
                 type_args,
                 args,
-            } => self.infer_method_call(expr_id, receiver, method, &type_args, &args, expected),
-            Expr::Field { base, field } => self.infer_field(base, field),
+            } => self.infer_method_call(
+                expr_id, receiver, method, optional, &type_args, &args, expected,
+            ),
+            Expr::Field {
+                base,
+                field,
+                optional,
+            } => self.infer_field(base, field, optional),
             Expr::Index { base, index } => self.infer_index_expr(base, index),
             Expr::Paren { expr } => self.infer_expr(expr, expected),
             Expr::If {
@@ -382,6 +418,7 @@ impl<'a> InferenceContext<'a> {
             Expr::StructLiteral { path, fields } => {
                 self.infer_struct_literal(&path, &fields, expected)
             }
+            Expr::MapLiteral { entries } => self.infer_map_literal(&entries, expected),
             Expr::MacroCall { macro_name, args } => self.infer_macro(macro_name, &args, expected),
             Expr::Block(block) => self.infer_block(block.statements(), block.tail(), expected),
         };
@@ -415,7 +452,23 @@ impl<'a> InferenceContext<'a> {
     fn infer_statement(&mut self, statement: &Statement) -> bool {
         match statement {
             Statement::Missing => false,
-            Statement::Break | Statement::Continue => true,
+            Statement::Break { value } => {
+                let value_ty = value
+                    .map(|value| self.infer_expr(value, None))
+                    .unwrap_or(Ty::UNIT);
+                match self.loop_breaks.last_mut() {
+                    Some(Some(values)) => values.push((*value, value_ty)),
+                    Some(None) if value.is_some() => {
+                        self.diagnostics
+                            .push(InferenceDiagnostic::InvalidBreakValue {
+                                expr: value.expect("checked as some"),
+                            });
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Statement::Continue => true,
             Statement::Let {
                 binding,
                 initializer,
@@ -460,11 +513,15 @@ impl<'a> InferenceContext<'a> {
             }
             Statement::While { condition, body } => {
                 let diverges = self.infer_condition(*condition);
+                self.loop_breaks.push(None);
                 self.infer_expr(*body, Some(&Ty::UNIT));
+                self.loop_breaks.pop();
                 diverges
             }
             Statement::Loop { body } => {
+                self.loop_breaks.push(Some(Vec::new()));
                 self.infer_expr(*body, Some(&Ty::UNIT));
+                self.loop_breaks.pop();
                 !self.expr_contains_break(*body)
             }
             Statement::For {
@@ -486,7 +543,9 @@ impl<'a> InferenceContext<'a> {
                     _ => (Ty::Unknown, false),
                 };
                 self.set_binding(*binding, item_ty);
+                self.loop_breaks.push(None);
                 self.infer_expr(*body, Some(&Ty::UNIT));
+                self.loop_breaks.pop();
                 diverges
             }
         }
@@ -723,7 +782,62 @@ impl<'a> InferenceContext<'a> {
                 if op == BinaryOp::Add && lhs_ty == Ty::STRING && rhs_ty == Ty::STRING {
                     return Ty::STRING;
                 }
-                if matches!(lhs_ty, Ty::Named(_)) || matches!(rhs_ty, Ty::Named(_)) {
+                if matches!(lhs_ty, Ty::GenericParam(_)) {
+                    let Some((trait_id, _)) = arithmetic_trait(op) else {
+                        return Ty::Unknown;
+                    };
+                    if self
+                        .member_index
+                        .implements_builtin_trait(&lhs_ty, trait_id)
+                    {
+                        return Ty::Unknown;
+                    }
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: lhs_ty,
+                        rhs: rhs_ty,
+                        op,
+                    });
+                    return Ty::Unknown;
+                }
+                if matches!(lhs_ty, Ty::Named(_)) {
+                    let resolution = arithmetic_trait(op).and_then(|(trait_id, method)| {
+                        self.member_index
+                            .resolve_builtin_trait_method(&lhs_ty, trait_id, method)
+                    });
+                    let Some(Ty::Function(callable) | Ty::Closure(callable)) =
+                        resolution.as_ref().map(MemberResolution::ty)
+                    else {
+                        self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                            expr: expr_id,
+                            lhs: lhs_ty,
+                            rhs: rhs_ty,
+                            op,
+                        });
+                        return Ty::Unknown;
+                    };
+                    if let Some(expected) = callable.params().first()
+                        && expected.is_concrete()
+                        && rhs_ty.is_concrete()
+                        && !expected.is_compatible_with(&rhs_ty)
+                    {
+                        self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                            expr: expr_id,
+                            lhs: lhs_ty,
+                            rhs: rhs_ty,
+                            op,
+                        });
+                        return Ty::Unknown;
+                    }
+                    return callable.return_ty().clone();
+                }
+                if matches!(rhs_ty, Ty::Named(_)) {
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: lhs_ty,
+                        rhs: rhs_ty,
+                        op,
+                    });
                     return Ty::Unknown;
                 }
                 if lhs_ty.is_numeric() && rhs_ty.is_numeric() {
@@ -744,18 +858,74 @@ impl<'a> InferenceContext<'a> {
                 self.expect_bool(rhs, &rhs_ty);
                 Ty::BOOL
             }
-            BinaryOp::Equal | BinaryOp::NotEqual => Ty::BOOL,
+            BinaryOp::Coalesce => match lhs_ty {
+                Ty::Option(item) => {
+                    self.report_mismatch(
+                        InferenceSource::Expr(rhs),
+                        &item,
+                        &rhs_ty,
+                        TypeMismatchContext::Branch,
+                    );
+                    item.join(&rhs_ty)
+                }
+                Ty::Unknown => rhs_ty,
+                other => {
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: other,
+                        rhs: rhs_ty,
+                        op,
+                    });
+                    Ty::Unknown
+                }
+            },
+            BinaryOp::Contains => {
+                let element = match rhs_ty.clone() {
+                    Ty::Vec(item) | Ty::Iterator(item) => Some(*item),
+                    Ty::HashMap(key, _) => Some(*key),
+                    Ty::Primitive(crate::hir::PrimitiveTy::String) => Some(Ty::STRING),
+                    Ty::Unknown => None,
+                    _ => {
+                        self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                            expr: expr_id,
+                            lhs: lhs_ty,
+                            rhs: rhs_ty,
+                            op,
+                        });
+                        return Ty::BOOL;
+                    }
+                };
+                if let Some(element) = element {
+                    self.report_mismatch(
+                        InferenceSource::Expr(lhs),
+                        &element,
+                        &lhs_ty,
+                        TypeMismatchContext::Argument { index: 0 },
+                    );
+                }
+                Ty::BOOL
+            }
+            BinaryOp::Equal | BinaryOp::NotEqual => {
+                if lhs_ty.is_concrete()
+                    && rhs_ty.is_concrete()
+                    && !lhs_ty.is_compatible_with(&rhs_ty)
+                {
+                    self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
+                        expr: expr_id,
+                        lhs: lhs_ty.clone(),
+                        rhs: rhs_ty.clone(),
+                        op,
+                    });
+                }
+                Ty::BOOL
+            }
             BinaryOp::Less
             | BinaryOp::LessOrEqual
             | BinaryOp::Greater
             | BinaryOp::GreaterOrEqual => {
-                // Ordering operators require numeric operands.
-                if !(lhs_ty.is_unknown()
-                    || rhs_ty.is_unknown()
-                    || lhs_ty.is_never()
-                    || rhs_ty.is_never()
-                    || (lhs_ty.is_numeric() && rhs_ty.is_numeric()))
-                {
+                let valid = (lhs_ty.is_numeric() && rhs_ty.is_numeric())
+                    || (lhs_ty == Ty::STRING && rhs_ty == Ty::STRING);
+                if lhs_ty.is_concrete() && rhs_ty.is_concrete() && !valid {
                     self.diagnostics.push(InferenceDiagnostic::InvalidBinary {
                         expr: expr_id,
                         lhs: lhs_ty.clone(),
@@ -784,7 +954,48 @@ impl<'a> InferenceContext<'a> {
         diverge_or(diverges, Ty::Iterator(Box::new(Ty::I64)))
     }
 
-    fn infer_assign_expr(&mut self, target: ExprId, value: ExprId) -> Ty {
+    fn infer_loop_expr(&mut self, body: ExprId, expected: Option<&Ty>) -> Ty {
+        self.loop_breaks.push(Some(Vec::new()));
+        self.infer_expr(body, Some(&Ty::UNIT));
+        let values = self.loop_breaks.pop().flatten().unwrap_or_default();
+        let mut result = Ty::Never;
+        let mut first_source = None;
+        for (source, value) in values {
+            if result.is_never() {
+                result = value;
+                first_source = source;
+                continue;
+            }
+            if !result.is_compatible_with(&value) {
+                self.diagnostics.push(InferenceDiagnostic::TypeMismatch {
+                    source: InferenceSource::Expr(source.or(first_source).unwrap_or(body)),
+                    expected: result.clone(),
+                    actual: value,
+                    context: TypeMismatchContext::Branch,
+                });
+                result = Ty::Unknown;
+            } else {
+                result = result.join(&value);
+            }
+        }
+        if let Some(expected) = expected {
+            self.report_mismatch(
+                InferenceSource::Expr(body),
+                expected,
+                &result,
+                TypeMismatchContext::Branch,
+            );
+        }
+        result
+    }
+
+    fn infer_assign_expr(
+        &mut self,
+        assignment: ExprId,
+        op: Option<BinaryOp>,
+        target: ExprId,
+        value: ExprId,
+    ) -> Ty {
         if let Some(binding_id) = self.assigned_local_binding(target)
             && let Some(binding) = self.body.binding(binding_id)
             && !binding.is_mutable()
@@ -797,7 +1008,11 @@ impl<'a> InferenceContext<'a> {
                 });
         }
         let target_ty = self.infer_expr(target, None);
-        let value_ty = self.infer_expr(value, Some(&target_ty));
+        let value_ty = if let Some(op) = op {
+            self.infer_binary(assignment, op, target, value)
+        } else {
+            self.infer_expr(value, Some(&target_ty))
+        };
         self.report_mismatch(
             InferenceSource::Expr(value),
             &target_ty,
@@ -1069,11 +1284,24 @@ impl<'a> InferenceContext<'a> {
         ty
     }
 
-    fn infer_field(&mut self, base: ExprId, field: NameRefId) -> Ty {
-        let receiver = self.infer_expr(base, None);
-        if receiver.is_never() {
+    fn infer_field(&mut self, base: ExprId, field: NameRefId, optional: bool) -> Ty {
+        let raw_receiver = self.infer_expr(base, None);
+        if raw_receiver.is_never() {
             return Ty::Never;
         }
+        let (receiver, optional_chain) = if optional {
+            match raw_receiver {
+                Ty::Option(item) => (*item, true),
+                Ty::Unknown => (Ty::Unknown, true),
+                found => {
+                    self.diagnostics
+                        .push(InferenceDiagnostic::InvalidOptionalChain { expr: base, found });
+                    (Ty::Unknown, true)
+                }
+            }
+        } else {
+            (raw_receiver, false)
+        };
         let Some(name) = self
             .body
             .name_ref(field)
@@ -1086,7 +1314,15 @@ impl<'a> InferenceContext<'a> {
         };
         let ty = resolution.ty().clone();
         self.set_member(field, resolution);
-        ty
+        if optional_chain {
+            if matches!(ty, Ty::Option(_)) {
+                ty
+            } else {
+                Ty::Option(Box::new(ty))
+            }
+        } else {
+            ty
+        }
     }
 
     fn infer_struct_literal(
@@ -1156,6 +1392,42 @@ impl<'a> InferenceContext<'a> {
         diverge_or(diverges, result)
     }
 
+    fn infer_map_literal(&mut self, entries: &[MapLiteralEntry], expected: Option<&Ty>) -> Ty {
+        let (expected_key, expected_value) = match expected {
+            Some(Ty::HashMap(key, value)) => (Some((**key).clone()), Some((**value).clone())),
+            _ => (None, None),
+        };
+        let mut key_ty = expected_key.clone().unwrap_or(Ty::Unknown);
+        let mut value_ty = expected_value.clone().unwrap_or(Ty::Unknown);
+        for entry in entries {
+            let key = self.infer_expr(entry.key(), expected_key.as_ref());
+            let value = self.infer_expr(entry.value(), expected_value.as_ref());
+            self.report_mismatch(
+                InferenceSource::Expr(entry.key()),
+                &key_ty,
+                &key,
+                TypeMismatchContext::Assignment,
+            );
+            self.report_mismatch(
+                InferenceSource::Expr(entry.value()),
+                &value_ty,
+                &value,
+                TypeMismatchContext::Assignment,
+            );
+            key_ty = if key_ty.is_unknown() {
+                key
+            } else {
+                key_ty.join(&key)
+            };
+            value_ty = if value_ty.is_unknown() {
+                value
+            } else {
+                value_ty.join(&value)
+            };
+        }
+        Ty::HashMap(Box::new(key_ty), Box::new(value_ty))
+    }
+
     fn struct_literal_target(&mut self, path: &[NameRefId]) -> Option<(Ty, Option<DefId>)> {
         if let Some(definition) = self.resolve_definition_path(path)
             && definition.kind() == DefKind::Struct
@@ -1193,98 +1465,136 @@ impl<'a> InferenceContext<'a> {
         call: ExprId,
         receiver: ExprId,
         method: NameRefId,
+        optional: bool,
         type_args: &[TypeRef],
         args: &[ExprId],
         expected: Option<&Ty>,
     ) -> Ty {
-        let receiver_ty = self.infer_expr(receiver, None);
-        if receiver_ty.is_never() {
+        let raw_receiver = self.infer_expr(receiver, None);
+        if raw_receiver.is_never() {
             for argument in args {
                 self.infer_expr(*argument, None);
             }
             return Ty::Never;
         }
-        let Some(name) = self
-            .body
-            .name_ref(method)
-            .and_then(|name_ref| name_ref.name())
-        else {
-            return self.infer_unresolved_member_call(call, args);
+        let (receiver_ty, optional_chain) = if optional {
+            match raw_receiver {
+                Ty::Option(item) => (*item, true),
+                Ty::Unknown => (Ty::Unknown, true),
+                found => {
+                    self.diagnostics
+                        .push(InferenceDiagnostic::InvalidOptionalChain {
+                            expr: receiver,
+                            found,
+                        });
+                    (Ty::Unknown, true)
+                }
+            }
+        } else {
+            (raw_receiver, false)
         };
-        if let Ty::Option(item) = &receiver_ty
-            && name == "map"
-            && let [closure] = args
-        {
-            if let Some(resolution) =
-                self.member_index
-                    .resolve_method_in(&receiver_ty, name, self.owner.id())
-            {
-                self.set_member(method, resolution);
+        let inner_expected = if optional_chain {
+            match expected {
+                Some(Ty::Option(item)) => Some((**item).clone()),
+                _ => None,
             }
-            return self.infer_option_map(call, item, *closure, expected);
-        }
-        if let Ty::Result(ok, error) = &receiver_ty
-            && name == "map"
-            && let [closure] = args
-        {
-            if let Some(resolution) =
-                self.member_index
-                    .resolve_method_in(&receiver_ty, name, self.owner.id())
+        } else {
+            expected.cloned()
+        };
+        let expected = inner_expected.as_ref();
+        let result = (|| {
+            let Some(name) = self
+                .body
+                .name_ref(method)
+                .and_then(|name_ref| name_ref.name())
+            else {
+                return self.infer_unresolved_member_call(call, args);
+            };
+            if let Ty::Option(item) = &receiver_ty
+                && name == "map"
+                && let [closure] = args
             {
-                self.set_member(method, resolution);
+                if let Some(resolution) =
+                    self.member_index
+                        .resolve_method_in(&receiver_ty, name, self.owner.id())
+                {
+                    self.set_member(method, resolution);
+                }
+                return self.infer_option_map(call, item, *closure, expected);
             }
-            return self.infer_result_map(call, ok, error, *closure, expected);
-        }
-        if let Ty::Iterator(item) = &receiver_ty
-            && let Some(result) = self.infer_iterator_adapter(call, item, name, args, expected)
-        {
-            if let Some(resolution) =
-                self.member_index
-                    .resolve_method_in(&receiver_ty, name, self.owner.id())
+            if let Ty::Result(ok, error) = &receiver_ty
+                && name == "map"
+                && let [closure] = args
             {
-                self.set_member(method, resolution);
+                if let Some(resolution) =
+                    self.member_index
+                        .resolve_method_in(&receiver_ty, name, self.owner.id())
+                {
+                    self.set_member(method, resolution);
+                }
+                return self.infer_result_map(call, ok, error, *closure, expected);
             }
-            return result;
-        }
-        let resolution = self
-            .member_index
-            .resolve_method_in(&receiver_ty, name, self.owner.id());
-        let Some(resolution) = resolution else {
-            // Fallback: Vec -> Iterator conversion methods.
-            if let Ty::Vec(item) = &receiver_ty
-                && let Some(result) = self.infer_vec_to_iterator(call, item, name, args)
-            {
-                return result;
-            }
-            // Fallback: iterator adapter methods not yet in the member index.
             if let Ty::Iterator(item) = &receiver_ty
                 && let Some(result) = self.infer_iterator_adapter(call, item, name, args, expected)
             {
+                if let Some(resolution) =
+                    self.member_index
+                        .resolve_method_in(&receiver_ty, name, self.owner.id())
+                {
+                    self.set_member(method, resolution);
+                }
                 return result;
             }
-            return self.infer_unresolved_member_call(call, args);
-        };
-        let Ty::Function(callable) = resolution.ty() else {
-            return self.infer_unresolved_member_call(call, args);
-        };
-        let callable = callable.clone();
-        let target = member_call_target(resolution.target());
-        let mut substitution = resolution.substitution().clone();
-        let requirements = resolution.requirements().to_vec();
-        for (generic, type_arg) in resolution.generic_params().iter().zip(type_args) {
-            substitution.insert(*generic, self.lower_type(self.owner, type_arg));
+            let resolution =
+                self.member_index
+                    .resolve_method_in(&receiver_ty, name, self.owner.id());
+            let Some(resolution) = resolution else {
+                // Fallback: Vec -> Iterator conversion methods.
+                if let Ty::Vec(item) = &receiver_ty
+                    && let Some(result) = self.infer_vec_to_iterator(call, item, name, args)
+                {
+                    return result;
+                }
+                // Fallback: iterator adapter methods not yet in the member index.
+                if let Ty::Iterator(item) = &receiver_ty
+                    && let Some(result) =
+                        self.infer_iterator_adapter(call, item, name, args, expected)
+                {
+                    return result;
+                }
+                return self.infer_unresolved_member_call(call, args);
+            };
+            let Ty::Function(callable) = resolution.ty() else {
+                return self.infer_unresolved_member_call(call, args);
+            };
+            let callable = callable.clone();
+            let target = member_call_target(resolution.target());
+            let mut substitution = resolution.substitution().clone();
+            let requirements = resolution.requirements().to_vec();
+            for (generic, type_arg) in resolution.generic_params().iter().zip(type_args) {
+                substitution.insert(*generic, self.lower_type(self.owner, type_arg));
+            }
+            self.set_member(method, resolution);
+            self.infer_callable_call(&mut CallContext {
+                call,
+                target,
+                callable: &callable,
+                args,
+                expected,
+                substitution,
+                requirements: &requirements,
+                variadic: false,
+            })
+        })();
+        if optional_chain {
+            if matches!(result, Ty::Option(_)) {
+                result
+            } else {
+                Ty::Option(Box::new(result))
+            }
+        } else {
+            result
         }
-        self.set_member(method, resolution);
-        self.infer_callable_call(&mut CallContext {
-            call,
-            target,
-            callable: &callable,
-            args,
-            expected,
-            substitution,
-            requirements: &requirements,
-            variadic: false,
-        })
     }
 
     fn infer_option_map(
@@ -2066,6 +2376,7 @@ impl<'a> InferenceContext<'a> {
             | Expr::Assign {
                 target: lhs,
                 value: rhs,
+                ..
             }
             | Expr::Index {
                 base: lhs,
@@ -2100,7 +2411,11 @@ impl<'a> InferenceContext<'a> {
             Expr::StructLiteral { fields, .. } => fields
                 .iter()
                 .any(|field| self.expr_contains_break(field.value())),
+            Expr::MapLiteral { entries } => entries.iter().any(|entry| {
+                self.expr_contains_break(entry.key()) || self.expr_contains_break(entry.value())
+            }),
             Expr::MacroCall { args, .. } => args.iter().any(|arg| self.expr_contains_break(*arg)),
+            Expr::Loop { .. } => false,
             Expr::Block(block) => {
                 block
                     .statements()
@@ -2122,7 +2437,7 @@ impl<'a> InferenceContext<'a> {
 
     fn statement_contains_break(&self, statement: &Statement) -> bool {
         match statement {
-            Statement::Break => true,
+            Statement::Break { .. } => true,
             Statement::Expr { expr, .. } => self.expr_contains_break(*expr),
             Statement::Let { initializer, .. } => self.expr_contains_break(*initializer),
             Statement::Return { value } => {

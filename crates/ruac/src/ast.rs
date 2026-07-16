@@ -66,7 +66,7 @@ pub enum Item {
     Impl(ImplDecl),
     Trait(TraitDecl),
     Extern(ExternBlock),
-    /// `mod name { items }` (inline module; nested modules allowed).
+    /// Compiler-internal module node synthesized from a source path.
     Mod(ModDecl),
     /// `use a::b::c;` / `use a::b as c;` / `use a::b::{c, d};`.
     Use(UseDecl),
@@ -82,8 +82,7 @@ pub struct ModDecl {
     /// Source ordering between module declarations and executable statements.
     pub source_order: Vec<ChunkEntry>,
     pub is_pub: bool,
-    /// `true` for a file module (`mod name;`) whose `items` are loaded from a
-    /// sibling `.rua` file during resolution; `false` for an inline `mod { .. }`.
+    /// `true` when this module has a physical source or declaration file.
     pub is_file: bool,
     /// `true` when the module's items came from a `.ruai` declaration file: they
     /// are registered with the checkers but emit no definitions. Referenced
@@ -308,7 +307,7 @@ pub enum Stmt {
         expr: Expr,
         body: Block,
     },
-    Break,
+    Break(Option<Expr>),
     Continue,
 }
 
@@ -361,6 +360,8 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// `loop { ... }`, whose value is supplied by `break value;`.
+    Loop(Block),
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
@@ -369,6 +370,7 @@ pub enum ExprKind {
     MethodCall {
         recv: Box<Expr>,
         method: String,
+        optional: bool,
         /// Explicit method type arguments from a turbofish, e.g. the
         /// `Vec<i64>` in `.collect::<Vec<i64>>()`.
         type_args: Vec<Type>,
@@ -380,6 +382,7 @@ pub enum ExprKind {
     Field {
         base: Box<Expr>,
         name: String,
+        optional: bool,
         /// Byte-span of the field name identifier (use site), for LSP member
         /// resolution. Not used by codegen/checks.
         name_span: SourceRange,
@@ -389,6 +392,8 @@ pub enum ExprKind {
         path: Vec<String>,
         fields: Vec<(String, Expr)>,
     },
+    /// Strongly typed `HashMap` literal: `#{ key: value, ... }`.
+    MapLit(Vec<(Expr, Expr)>),
     /// The `?` postfix operator (Result propagation; see docs §4.8).
     Try {
         expr: Box<Expr>,
@@ -428,6 +433,8 @@ pub enum ExprKind {
     },
     Block(Block),
     Assign {
+        /// `None` for `=`, otherwise the arithmetic operation in `op=`.
+        op: Option<BinOp>,
         target: Box<Expr>,
         value: Box<Expr>,
     },
@@ -503,4 +510,28 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Coalesce,
+    Contains,
+}
+
+impl BinOp {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Rem => "%",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Coalesce => "??",
+            Self::Contains => "in",
+        }
+    }
 }

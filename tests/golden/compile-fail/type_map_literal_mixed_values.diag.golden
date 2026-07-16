@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_map_literal_mixed_values.rua:4: map value must be `i64`, found `bool`

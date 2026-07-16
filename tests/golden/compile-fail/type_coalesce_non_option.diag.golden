@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_coalesce_non_option.rua:2: left operand of `??` must be `Option`, found `i64`

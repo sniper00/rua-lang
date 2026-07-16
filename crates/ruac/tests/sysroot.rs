@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::BTreeMap, fmt};
 
 use rua_project::{
-    FileId, LogicalSourcePath, ProjectId, ProjectSpec, SourceProvider, SourceRootId,
+    FileId, LibraryMount, LogicalSourcePath, ProjectId, ProjectSpec, SourceProvider, SourceRootId,
     SourceRootKind, SourceRootSpec, SourceText,
 };
 
@@ -97,25 +97,49 @@ fn cli_loads_explicit_sysroot_outside_repository_cwd() {
 }
 
 #[test]
-fn cli_discovers_ruarc_toml_and_builds_with_external_library() {
+fn cli_discovers_ruarc_toml_and_builds_with_bulk_lua_library() {
     let root = TestDir::new("external-library-config");
     let workspace = root.path().join("workspace");
-    let library = root.path().join("library");
+    let declarations = root.path().join("declarations");
+    let runtime = root.path().join("runtime");
     fs::create_dir_all(&workspace).unwrap();
-    fs::create_dir_all(&library).unwrap();
+    fs::create_dir_all(declarations.join("moon")).unwrap();
+    fs::create_dir_all(runtime.join("moon")).unwrap();
     fs::write(
         workspace.join("main.rua"),
-        "mod moon;\nlet actor: i64 = moon::query(\"bootstrap\");\n",
+        r#"let actor: i64 = moon::query("bootstrap");
+let status: String = moon::http::get("/health");
+"#,
     )
     .unwrap();
     fs::write(
-        library.join("moon.ruai"),
+        declarations.join("moon.ruai"),
         "extern \"lua\" { pub fn query(name: String) -> i64; }\n",
     )
     .unwrap();
     fs::write(
+        declarations.join("moon/http.ruai"),
+        "extern \"lua\" { pub fn get(path: String) -> String; }\n",
+    )
+    .unwrap();
+    fs::write(
+        declarations.join("moon/unused.ruai"),
+        "extern \"lua\" { pub fn never_loaded() -> i64; }\n",
+    )
+    .unwrap();
+    fs::write(
+        runtime.join("moon.lua"),
+        "return { query = function(name) assert(name == \"bootstrap\"); return 7 end }\n",
+    )
+    .unwrap();
+    fs::write(
+        runtime.join("moon/http.lua"),
+        "return { get = function(path) assert(path == \"/health\"); return \"ok\" end }\n",
+    )
+    .unwrap();
+    fs::write(
         workspace.join(rua_project::PROJECT_CONFIG_FILE),
-        "[workspace]\nlibrary = [\"../library/moon.ruai\"]\n",
+        "[[workspace.lua_library]]\ndeclaration_root = \"../declarations\"\nruntime_root = \"../runtime\"\n",
     )
     .unwrap();
 
@@ -132,8 +156,64 @@ fn cli_discovers_ruarc_toml_and_builds_with_external_library() {
         String::from_utf8_lossy(&result.stderr)
     );
     let lua = fs::read_to_string(workspace.join("main.lua")).unwrap();
-    assert!(lua.contains("local moon = require(\"moon\")"), "{lua}");
-    assert!(lua.contains("moon.query(\"bootstrap\")"), "{lua}");
+    assert!(lua.contains("require(\"moon\")"), "{lua}");
+    assert!(lua.contains("require(\"moon.http\")"), "{lua}");
+    assert!(!lua.contains("require(\"moon.unused\")"), "{lua}");
+    assert!(lua.contains(".query(\"bootstrap\")"), "{lua}");
+    assert!(lua.contains(".get(\"/health\")"), "{lua}");
+    assert!(lua.contains("../runtime/?.lua"), "{lua}");
+    let run = Command::new(std::env::var("RUA_LUA").unwrap_or_else(|_| "lua".to_string()))
+        .arg(workspace.join("main.lua"))
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}\nLua:\n{lua}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let modules_dir = workspace.join("dist");
+    let result = Command::new(env!("CARGO_BIN_EXE_ruac"))
+        .args(["build", "main.rua", "--emit", "modules", "--out-dir"])
+        .arg(&modules_dir)
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let modular_lua = fs::read_to_string(modules_dir.join("main.lua")).unwrap();
+    assert!(modular_lua.contains("package.path = "), "{modular_lua}");
+    assert!(modular_lua.contains("../runtime/?.lua"), "{modular_lua}");
+    assert!(modular_lua.contains("require(\"moon\")"), "{modular_lua}");
+    assert!(
+        modular_lua.contains("require(\"moon.http\")"),
+        "{modular_lua}"
+    );
+    assert!(
+        !modular_lua.contains("require(\"moon.unused\")"),
+        "{modular_lua}"
+    );
+    assert!(
+        modular_lua.contains(".query(\"bootstrap\")") && modular_lua.contains(".get(\"/health\")"),
+        "{modular_lua}"
+    );
+    let run = Command::new(std::env::var("RUA_LUA").unwrap_or_else(|_| "lua".to_string()))
+        .arg(modules_dir.join("main.lua"))
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}\nLua:\n{modular_lua}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 #[derive(Default)]
@@ -175,7 +255,7 @@ fn compiler_project_api_loads_modules_without_filesystem_or_dense_ids() {
     provider.files.insert(
         root,
         SourceText {
-            text: "mod api;\nlet value = api::answer();\n".to_string(),
+            text: "let value = api::answer();\n".to_string(),
         },
     );
     provider.files.insert(
@@ -217,21 +297,107 @@ fn compiler_project_api_loads_modules_without_filesystem_or_dense_ids() {
             .any(|mapping| mapping.source.file == api.index()),
         "module functions should retain FileId 97 anchors"
     );
+
+    let modules = ruac::compile_project_modules_artifact(&project, &provider)
+        .expect("compile in-memory project as Lua modules");
+    assert_eq!(modules.root_output_path, "main.lua");
+    assert_eq!(modules.modules.len(), 2);
+    assert_eq!(modules.modules[0].output_path, "main.lua");
+    assert_eq!(modules.modules[1].output_path, "api.lua");
+    assert!(
+        modules.modules[0]
+            .source_map
+            .iter()
+            .all(|mapping| mapping.source.file == root.index())
+    );
+    assert!(
+        modules.modules[1]
+            .source_map
+            .iter()
+            .all(|mapping| mapping.source.file == api.index())
+    );
+}
+
+#[test]
+fn compiler_project_api_mounts_directory_root_declaration() {
+    let root = FileId::new(21);
+    let declaration = FileId::new(22);
+    let root_path = LogicalSourcePath::new("src/main.rua").unwrap();
+    let declaration_path = LogicalSourcePath::new("deps/host/mod.ruai").unwrap();
+    let mut provider = MemorySources::default();
+    provider.files.insert(
+        root,
+        SourceText {
+            text: "let value = host::answer();\n".to_string(),
+        },
+    );
+    provider.files.insert(
+        declaration,
+        SourceText {
+            text: "pub fn answer() -> i64 {}\n".to_string(),
+        },
+    );
+    provider.paths.insert(root_path.clone(), root);
+    provider.paths.insert(declaration_path, declaration);
+    let project = ProjectSpec {
+        id: ProjectId::new(8),
+        root_file: root,
+        roots: vec![
+            SourceRootSpec {
+                id: SourceRootId::new(5),
+                kind: SourceRootKind::Workspace,
+                logical_base: LogicalSourcePath::new("src").unwrap(),
+            },
+            SourceRootSpec {
+                id: SourceRootId::new(6),
+                kind: SourceRootKind::Library,
+                logical_base: LogicalSourcePath::new("deps/host").unwrap(),
+            },
+        ],
+        libraries: vec![LibraryMount {
+            name: "host".to_string(),
+            root: SourceRootId::new(6),
+            logical_base: LogicalSourcePath::new("deps/host").unwrap(),
+        }],
+        files: provider.paths.clone(),
+    };
+
+    let lua = ruac::compile_project(&project, &provider).expect("compile mounted declaration");
+    assert!(lua.contains("require(\"host\")"), "{lua}");
+    assert!(lua.contains("host.answer()"), "{lua}");
 }
 
 #[test]
 fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     let root = FileId::new(11);
+    let flat = FileId::new(12);
+    let nested = FileId::new(13);
     let root_path = LogicalSourcePath::new("src/main.rua").unwrap();
+    let flat_path = LogicalSourcePath::new("src/foo.rua").unwrap();
+    let nested_path = LogicalSourcePath::new("src/foo/mod.rua").unwrap();
     let mut provider = MemorySources::default();
     provider.files.insert(
         root,
         SourceText {
-            text: "mod missing;\n".to_string(),
+            text: String::new(),
+        },
+    );
+    provider.files.insert(
+        flat,
+        SourceText {
+            text: String::new(),
+        },
+    );
+    provider.files.insert(
+        nested,
+        SourceText {
+            text: String::new(),
         },
     );
     provider.paths.insert(root_path.clone(), root);
-    let project = ProjectSpec {
+    provider.paths.insert(flat_path.clone(), flat);
+    provider.paths.insert(nested_path.clone(), nested);
+    let mut project = ProjectSpec {
         id: ProjectId::new(9),
         root_file: root,
         roots: vec![SourceRootSpec {
@@ -246,10 +412,12 @@ fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     let failure = ruac::compile_project_with_diagnostics(&project, &provider).unwrap_err();
     assert_eq!(
         failure.diagnostics[0].code,
-        rua_core::DiagnosticCode::NameModuleNotFound
+        rua_core::DiagnosticCode::NameAmbiguousImport
     );
     assert_eq!(failure.files[root.index() as usize], root_path.as_str());
 
+    project.files.remove(&flat_path);
+    project.files.remove(&nested_path);
     provider.files.insert(
         root,
         SourceText {

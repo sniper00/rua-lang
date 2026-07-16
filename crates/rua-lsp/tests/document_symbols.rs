@@ -5,29 +5,19 @@ mod support;
 use support::{TestServer, uri};
 
 #[test]
-fn document_symbols_include_nested_modules() {
-    let uri = uri("/test/docsym_mod.rua");
+fn document_symbols_include_top_level_items() {
+    let uri = uri("/test/docsym_items.rua");
     let mut srv = TestServer::new();
     srv.open(
         &uri,
-        "mod inner {\n    pub fn helper() -> i64 { 42 }\n    pub struct Data { val: i64 }\n}\nfn main() {}",
+        "fn helper() -> i64 { 42 }\nstruct Data { val: i64 }\nfn main() {}",
     );
 
     let file_id = srv.file_id_for_uri(&uri).unwrap();
     let symbols = srv.snapshot().document_symbols(file_id, file_id);
 
-    // Should have symbols for the module, its contents, and main
-    assert!(
-        !symbols.is_empty(),
-        "should produce symbols for module content, got {symbols:?}"
-    );
-
-    // At least one symbol should have children (the module's contents)
-    let has_children = symbols.iter().any(|s| !s.children().is_empty());
-    assert!(
-        has_children,
-        "nested module symbols should have children, got {symbols:?}"
-    );
+    let names: Vec<_> = symbols.iter().map(|symbol| symbol.name()).collect();
+    assert_eq!(names, ["helper", "Data", "main"]);
 }
 
 #[test]

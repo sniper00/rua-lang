@@ -1,0 +1,46 @@
+source_len: 114
+SourceFile 0..114
+  ExternBlock 0..44
+    KwExtern 0..6 "extern"
+    Str 7..12 "\"lua\""
+    LBrace 13..14 "{"
+    ExternFn 14..42
+      KwFn 19..21 "fn"
+      Ident 22..32 "host_value"
+      LParen 32..33 "("
+      RParen 33..34 ")"
+      Arrow 35..37 "->"
+      PathType 38..41
+        Ident 38..41 "i64"
+      Semi 41..42 ";"
+    RBrace 43..44 "}"
+  UseDecl 46..77
+    KwUse 46..49 "use"
+    Ident 50..53 "api"
+    ColonColon 53..55 "::"
+    LBrace 55..56 "{"
+    Ident 56..60 "read"
+    Comma 60..61 ","
+    Ident 62..67 "write"
+    KwAs 68..70 "as"
+    Ident 71..75 "save"
+    RBrace 75..76 "}"
+    Semi 76..77 ";"
+  FnDecl 79..113
+    KwFn 79..81 "fn"
+    Ident 82..87 "value"
+    LParen 87..88 "("
+    RParen 88..89 ")"
+    Arrow 90..92 "->"
+    PathType 93..96
+      Ident 93..96 "i64"
+    Block 96..113
+      LBrace 97..98 "{"
+      ExprStmt 99..111
+        CallExpr 99..111
+          PathExpr 99..109
+            Ident 99..109 "host_value"
+          ArgList 109..111
+            LParen 109..110 "("
+            RParen 110..111 ")"
+      RBrace 112..113 "}"

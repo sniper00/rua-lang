@@ -1,0 +1,1 @@
+<golden>/compile-fail/type_membership_element_mismatch.rua:2: `in` expects `i64`, found `String`

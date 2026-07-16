@@ -1,0 +1,15 @@
+fn index() -> i64 {
+    0
+}
+
+let mut values = vec![1];
+values[index()] += 4;
+
+let mut label = "Rua";
+label += " 5.5";
+
+let answer = loop {
+    break values[0];
+};
+
+println!("{} {}", answer, label);

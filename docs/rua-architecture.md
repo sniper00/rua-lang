@@ -47,6 +47,16 @@ strict compiler               tolerant Rowan CST + formatter
 
 两者共享 `rua-lex` token/range、`rua-core` contract、`rua-project` model，以及 accept/reject、range 和 semantic corpus；不共享 AST、recovery 或 type system。这样 `ruac` 保持小而可嵌入，IDE 同时获得稳定的增量语法树。
 
+grammar 扩展必须先进入 shared lexer，再分别进入 strict AST 与 Rowan CST。复合赋值、
+`loop` value、`??`、`?.`、`in` 和 `#{...}` 由同一 accept/format corpus 校验两条
+parser 流水线；compiler execution golden 与 native inference/LSP cursor test 再校验
+两套独立 semantic 实现没有漂移。
+
+模块图不由任一 parser 解析。`rua-project::module_path_from_relative_file` 把
+`domain/order.rua` 和 `domain/order/mod.rua` 规范化为同一 logical path；`ruac`
+扫描 filesystem 或 `ProjectSpec` 后构造 compiler-internal module node，analysis 则
+从 VFS/project root 构造相同 DefMap。源码级 `mod` 在两个 parser 中都被拒绝。
+
 ## 3. Compiler 数据流
 
 ```text
@@ -62,19 +72,43 @@ shared tokens
 
 collection 先分配 module/item identity，再解析 import、path 和 body，因此支持前向引用与递归。成功的 use site 在 codegen 前已经是 `LocalId`、`DefId`、`ModuleId`、`BuiltinId` 或其他稳定 target；type facts 同样以 identity 为 key。
 
-`BackendLayout` 唯一负责把 semantic identity 分配到 Lua place，并处理关键字、Unicode、保留前缀和清洗冲突。codegen 只消费 resolved HIR、type facts 和 layout，不按 AST 字符串、span 或未限定名称重新猜目标。
+`BackendLayout` 唯一负责把 semantic identity 分配到 Lua place，并处理关键字、Unicode、保留前缀和清洗冲突。bundle layout 把 module 映射到同一 lexical chunk 中的 table path；modules layout 把当前 module 映射到 `__rua_module`，把跨 module identity 映射到由普通 `require` 绑定的稳定 local alias。codegen 只消费 resolved HIR、type facts 和 layout，不按 AST 字符串、span 或未限定名称重新猜目标。
 
 root free function 按 resolved dependency 排序并直接输出带 EmmyLua 注解的 `local function`；直接递归沿用该形式，只有包含多个函数的强连通依赖环才生成独立的 Lua 前向声明。
 
-标准库也是输入，而不是散落在 compiler/LSP 中的成员表。`rua-resources` 用同一 schema 加载内嵌资源或显式目录：`std.toml` 列出 `.ruai` declaration、Option/Result language item、Lua runtime 包、导出子表、局部别名和可选 ABI。声明与单文件 `rua_std.lua` 位于同一目录。analysis 从 declaration 构建类型、成员、文档与 definition identity；compiler resolve 后才把标准定义 identity 连接到 runtime export。codegen 在 chunk 顶部最多输出一次 `require("rua_std")` 和一次包级 ABI 检查，再为实际使用的 export 生成 local；普通 `.ruai` library module 使用同一 import registry，但仍可映射到独立 Lua 包。只有 manifest 指定的 `Option` 与 `Result` 具有语言级表示，用户声明的同名类型仍走普通类型、trait 和 method 规则。
+标准库也是输入，而不是散落在 compiler/LSP 中的成员表。`rua-resources` 用同一 schema 加载内嵌资源或显式目录：`std.toml` 列出 `.ruai` declaration、Option/Result language item、Lua runtime 包、导出子表、局部别名和可选 ABI。声明与单文件 `rua_std.lua` 位于同一目录。analysis 从 declaration 构建类型、成员、文档与 definition identity；compiler resolve 后才把标准定义 identity 连接到 runtime export。bundle codegen 在 chunk 顶部最多输出一次 runtime import；modules codegen 为实际使用 runtime 的输出单元分别声明 import，Lua cache 保证同一包只加载一次。普通 `.ruai` library module 使用同一 import registry，但仍可映射到独立 Lua 包。只有 manifest 指定的 `Option` 与 `Result` 具有语言级表示，用户声明的同名类型仍走普通类型、trait 和 method 规则。
+
+普通 Lua library 不复制标准库的逐模块 manifest。`rua-project` 将每个
+`workspace.lua_library` 规范化为 declaration/runtime root pair，并分别合并到
+只读语义输入与 Lua 搜索路径。LSP 递归扫描 declaration root；compiler 按同一
+logical path 解析。codegen 把每个 file-backed declaration `ModuleId` 视为独立
+require boundary，完整 module path 转为点分 Lua package name；没有实体文件的目录
+只形成路径 namespace。
 
 用户 method call 同样消费 type checker 记录的 dispatch identity：具体 receiver 直接调用 owner method，泛型与 trait object 从对象 metatable 动态分派，避免实例字段遮蔽同名方法。trait/operator impl 和公开 Lua ABI 类型保留实例 metatable；私有 inherent impl 静态分派，不为实例附加 metatable。私有且无 runtime member 的 struct/enum 只生成类型注解，不分配空 class table。
 
 无 guard 且直接返回的 match 生成 `if/elseif/else`；identity 已证明穷尽时最后一臂直接作为 `else`，多分支 enum 只读取一次 tag，通用 guard match 才保留 matched state。融合 iterator 使用 identity-keyed closure substitution、直接 accumulator destination 和嵌套 filter guard，不分配闭包参数别名或恒真 active flag。未使用 initializer 只有在 type facts 证明无副作用且不会抛错时才消除；未知调用、用户 operator、索引、`?` 和潜在除零继续保留。String 长度、常量整数除余以及非负 range induction variable 对正数取余等已知 primitive operation 直接使用 Lua 表达式。
 
+脚本表达式也只消费 type facts：复合赋值先把复杂 place 的 base/index materialize
+一次；`loop` value 写入 compiler-owned destination；`??` 与 `?.` 生成显式 nil guard，
+不能用会混淆 `false` 的 Lua `or`；`in` 根据 `ContainsKind` 选择 Vec element、map key、
+string substring 或 iterator consumer；typed map literal 调用 `map.new(nrec)` 后按顺序
+insert。codegen 不根据变量名或表形状猜测其中任何一种操作。
+
+builtin Result 使用 ABI v2 `{ is_ok, payload }` array table。codegen 通过统一的
+Result tag/payload helper 生成 `[1]`/`[2]` 访问；普通 enum 继续使用命名 `tag`，两种
+表示不会因表面形状相似而混用。FFI adapter 是唯一在 Rua Result 与 Lua
+multi-return 之间转换的边界。
+
 Lua 5.5 table allocation 按可证明的容量生成：随后填充的 module/type 方法表使用 `table.create(0, nrec)`；只对保持精确长度的 Vec iterator `collect` 预分配 sequence capacity，`filter`/`filter_map` 不使用输入长度作为容量。静态 table constructor 由 Lua 自身的 `NEWTABLE` hint 负责，codegen 不额外引入函数调用。
 
 Lua IR 结构化表示 expression、place、table、call、function、statement 和 block。printer 独占括号、优先级、缩进和文本输出；source map 使用 HIR source anchor，不从生成字符串反推。
+
+modules backend 为每个 runtime `ModuleId` 生成独立 Lua IR 和 source map。每个单元
+在顶部直接 require identity-resolved dependency，然后定义、初始化并返回自己的 table；
+`.ruai` 只形成 runtime import，不产生生成文件。`runtime.lua_path`/`--lua-path`
+只负责在 root 输出中前置 Lua `package.path`。依赖图必须无环，循环依赖在生成阶段
+诊断；初始化顺序采用 Lua require 的深度优先语义。
 
 ## 4. Native analysis 数据流
 
@@ -89,7 +123,11 @@ file text/path/root/project/config/standard-library revision
   -> protocol-neutral IDE results
 ```
 
-文件和 inline module 的顶层语句 lower 到 synthetic chunk body，所以顶层 binding 参与 scope、inference、diagnostics、hover、references 和 rename。
+每个源文件的顶层语句 lower 到 synthetic chunk body，所以顶层 binding 参与 scope、inference、diagnostics、hover、references 和 rename。目录 namespace 没有独立 chunk。
+
+native inference 独立推断 `loop` break join、Option chain/coalesce、membership 与 map
+key/value，并把可选链 receiver 解包后交给 `MemberIndex`。因此 `value?.member` 与
+`value.member` 共享同一个 declaration identity，而表达式结果仍按 Option 规则包装。
 
 definition identity 携带 project context。enum variant、field、method、trait item、standard declaration 和 inline macro 都是可导航的 semantic target。`ReferenceIndex` 由 resolved occurrence 构建，区分 declaration、read、write、call、capture 和 member use；references、rename、hierarchy 与 unused diagnostics 不扫描同名文本。
 

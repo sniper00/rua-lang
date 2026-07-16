@@ -1,5 +1,3 @@
-mod geometry;
-
 fn first() -> i64 {
     geometry::area(2)
 }

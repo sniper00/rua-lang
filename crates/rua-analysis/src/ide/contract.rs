@@ -144,6 +144,7 @@ impl BuiltinDefinitionTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HoverResult {
     range: FileRange,
+    context: Option<String>,
     signature: String,
     documentation: Option<String>,
 }
@@ -152,9 +153,15 @@ impl HoverResult {
     pub fn new(range: FileRange, signature: impl Into<String>) -> Self {
         Self {
             range,
+            context: None,
             signature: signature.into(),
             documentation: None,
         }
+    }
+
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
     }
 
     pub fn with_documentation(mut self, documentation: impl Into<String>) -> Self {
@@ -170,6 +177,10 @@ impl HoverResult {
         &self.signature
     }
 
+    pub fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
     pub fn documentation(&self) -> Option<&str> {
         self.documentation.as_deref()
     }
@@ -180,20 +191,37 @@ impl HoverResult {
 pub struct TypeHint {
     position: FilePosition,
     ty: String,
-    target: Option<FileRange>,
+    label_parts: Vec<TypeHintLabelPart>,
 }
 
 impl TypeHint {
     pub fn new(position: FilePosition, ty: impl Into<String>) -> Self {
+        let ty = ty.into();
         Self {
             position,
-            ty: ty.into(),
-            target: None,
+            label_parts: vec![TypeHintLabelPart::new(ty.clone())],
+            ty,
         }
     }
 
     pub fn with_target(mut self, target: FileRange) -> Self {
-        self.target = Some(target);
+        if let Some(part) = self.label_parts.first_mut() {
+            part.target = Some(TypeHintTarget::Source(target));
+        }
+        self
+    }
+
+    pub fn with_label_parts(mut self, label_parts: Vec<TypeHintLabelPart>) -> Self {
+        if !label_parts.is_empty() {
+            debug_assert_eq!(
+                label_parts
+                    .iter()
+                    .map(TypeHintLabelPart::value)
+                    .collect::<String>(),
+                self.ty
+            );
+            self.label_parts = label_parts;
+        }
         self
     }
 
@@ -205,8 +233,104 @@ impl TypeHint {
         &self.ty
     }
 
-    pub const fn target(&self) -> Option<FileRange> {
-        self.target
+    pub fn label_parts(&self) -> &[TypeHintLabelPart] {
+        &self.label_parts
+    }
+
+    /// Compatibility accessor for callers interested in a single source target.
+    pub fn target(&self) -> Option<FileRange> {
+        match self.label_parts.first().and_then(TypeHintLabelPart::target) {
+            Some(TypeHintTarget::Source(target)) => Some(*target),
+            Some(TypeHintTarget::Builtin(_)) | None => None,
+        }
+    }
+}
+
+/// One interactive segment of a rendered type hint, such as `Option` or
+/// `Product` in `Option<Product>`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeHintLabelPart {
+    value: String,
+    tooltip: Option<TypeHintTooltip>,
+    target: Option<TypeHintTarget>,
+}
+
+impl TypeHintLabelPart {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            tooltip: None,
+            target: None,
+        }
+    }
+
+    pub fn with_tooltip(mut self, tooltip: TypeHintTooltip) -> Self {
+        self.tooltip = Some(tooltip);
+        self
+    }
+
+    pub fn with_target(mut self, target: TypeHintTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn tooltip(&self) -> Option<&TypeHintTooltip> {
+        self.tooltip.as_ref()
+    }
+
+    pub const fn target(&self) -> Option<&TypeHintTarget> {
+        self.target.as_ref()
+    }
+}
+
+/// Definition target for an interactive type-hint label segment.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypeHintTarget {
+    Source(FileRange),
+    Builtin(BuiltinDefinitionTarget),
+}
+
+/// Structured hover content attached to a type-hint label segment.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeHintTooltip {
+    context: Option<String>,
+    signature: String,
+    documentation: Option<String>,
+}
+
+impl TypeHintTooltip {
+    pub fn new(signature: impl Into<String>) -> Self {
+        Self {
+            context: None,
+            signature: signature.into(),
+            documentation: None,
+        }
+    }
+
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+
+    pub fn with_documentation(mut self, documentation: impl Into<String>) -> Self {
+        self.documentation = Some(documentation.into());
+        self
+    }
+
+    pub fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+
+    pub fn documentation(&self) -> Option<&str> {
+        self.documentation.as_deref()
     }
 }
 

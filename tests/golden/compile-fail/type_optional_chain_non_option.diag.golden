@@ -1,0 +1,2 @@
+<golden>/compile-fail/type_optional_chain_non_option.rua:6: optional chaining requires `Option`, found `Profile`
+<golden>/compile-fail/type_optional_chain_non_option.rua:6: expected return type `String`, found `Option<?>`

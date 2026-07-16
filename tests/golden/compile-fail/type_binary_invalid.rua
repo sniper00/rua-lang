@@ -1,3 +1,14 @@
-fn main() {
-    let value = true + 1;
+struct Point {
+    x: i64,
+}
+
+fn main(point: Point) {
+    let bool_add = true + 1;
+    let vec_subtract = vec![1] - vec![2];
+    let string_multiply = "left" * "right";
+    let mixed_equal = 1 == "1";
+    let mixed_not_equal = true != "true";
+    let bool_order = true < false;
+    let mixed_order = "1" >= 1;
+    let missing_add = point + 1;
 }

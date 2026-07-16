@@ -476,6 +476,45 @@ trait Arithmetic {
 }
 
 #[test]
+fn method_return_keeps_tail_after_if_initializer() {
+    const SOURCE: &str = r#"
+/// Product data returned by the infrastructure catalog.
+pub struct Product {
+    pub sku: String,
+    pub name: String,
+    pub price_cents: i64,
+}
+
+impl Product {
+    pub fn new(sku: String, name: String, price_cents: i64) -> Product {
+        Product { sku: sku, name: name, price_cents: price_cents }
+    }
+
+    /// Builds a label while demonstrating substring membership on String.
+    pub fn display_label(&self) -> String {
+        let category = if "Book" in self.name {
+            "book"
+        } else {
+            "general"
+        };
+        self.name + " [" + category + "]"
+    }
+}
+"#;
+    let fixture = fixture_with_kind(SOURCE, "display_label", DefKind::Method);
+
+    assert_eq!(
+        fixture.inference.type_of_expr(fixture.body.root_expr()),
+        Some(&Ty::STRING)
+    );
+    assert!(
+        fixture.inference.diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        fixture.inference.diagnostics()
+    );
+}
+
+#[test]
 fn generic_trait_inference_substitutes_method_generics_for_inline_and_where_bounds() {
     const SOURCE: &str = r#"
 trait Identity {
@@ -873,7 +912,7 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
         .collect::<Vec<_>>();
     assert_eq!(
         option_methods,
-        ["is_none", "is_some", "map", "unwrap", "unwrap_or"]
+        ["expect", "is_none", "is_some", "map", "unwrap", "unwrap_or"]
     );
     assert_standard_target(
         &index
@@ -895,6 +934,15 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
             .expect("Result::Err"),
         "Result",
         "Err",
+    );
+    let result_methods = index
+        .instance_candidates(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
+        .into_iter()
+        .map(|candidate| candidate.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_methods,
+        ["expect", "is_err", "is_ok", "map", "unwrap", "unwrap_or"]
     );
 }
 
@@ -967,8 +1015,6 @@ fn bad_builtin() {
 #[test]
 fn ruai_member_lookup_uses_declaration_fields_methods_and_associated_functions() {
     const MAIN: &str = r#"
-mod api;
-
 fn declaration_client() -> i64 {
     let remote = api::Remote::/*ruai_assoc*/make(7);
     let direct = remote./*ruai_field*/value;
@@ -1062,7 +1108,7 @@ impl Remote {
 
 #[test]
 fn ruai_member_lookup_cache_invalidates_on_declaration_signature_change() {
-    const MAIN: &str = "mod api; fn index_owner() {}\n";
+    const MAIN: &str = "fn index_owner() {}\n";
     const BEFORE: &str = "pub struct Remote { pub value: i64 }\n";
     const AFTER: &str = "pub struct Remote { pub value: String }\n";
     let root_id = SourceRootId::new(0);

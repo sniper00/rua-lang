@@ -112,7 +112,6 @@ ast_node!(TraitDecl = TraitDecl);
 ast_node!(ImplDecl = ImplDecl);
 ast_node!(ExternBlock = ExternBlock);
 ast_node!(ExternFn = ExternFn);
-ast_node!(ModDecl = ModDecl);
 ast_node!(UseDecl = UseDecl);
 
 impl Named for FnDecl {}
@@ -120,7 +119,6 @@ impl Named for StructDecl {}
 impl Named for EnumDecl {}
 impl Named for TraitDecl {}
 impl Named for ExternFn {}
-impl Named for ModDecl {}
 
 /// Any top-level (or module-level) item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -131,7 +129,6 @@ pub enum Item {
     Trait(TraitDecl),
     Impl(ImplDecl),
     Extern(ExternBlock),
-    Mod(ModDecl),
     Use(UseDecl),
 }
 
@@ -145,7 +142,6 @@ impl AstNode for Item {
                 | K::TraitDecl
                 | K::ImplDecl
                 | K::ExternBlock
-                | K::ModDecl
                 | K::UseDecl
         )
     }
@@ -157,7 +153,6 @@ impl AstNode for Item {
             K::TraitDecl => Item::Trait(TraitDecl { syntax: node }),
             K::ImplDecl => Item::Impl(ImplDecl { syntax: node }),
             K::ExternBlock => Item::Extern(ExternBlock { syntax: node }),
-            K::ModDecl => Item::Mod(ModDecl { syntax: node }),
             K::UseDecl => Item::Use(UseDecl { syntax: node }),
             _ => return None,
         })
@@ -170,7 +165,6 @@ impl AstNode for Item {
             Item::Trait(n) => n.syntax(),
             Item::Impl(n) => n.syntax(),
             Item::Extern(n) => n.syntax(),
-            Item::Mod(n) => n.syntax(),
             Item::Use(n) => n.syntax(),
         }
     }
@@ -714,22 +708,6 @@ impl UseImportIter {
     }
 }
 
-impl ModDecl {
-    pub fn is_pub(&self) -> bool {
-        token(&self.syntax, K::KwPub).is_some()
-    }
-    /// `true` for a file module (`mod name;`), `false` for inline `mod { .. }`.
-    pub fn is_file(&self) -> bool {
-        token(&self.syntax, K::LBrace).is_none()
-    }
-    pub fn items(&self) -> impl Iterator<Item = Item> + '_ {
-        children::<Item>(&self.syntax)
-    }
-    pub fn stmts(&self) -> impl Iterator<Item = Stmt> + '_ {
-        children::<Stmt>(&self.syntax)
-    }
-}
-
 // --- types -----------------------------------------------------------------
 
 ast_node!(PathType = PathType);
@@ -948,6 +926,12 @@ impl LoopStmt {
     }
 }
 
+impl BreakStmt {
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
 impl ForStmt {
     pub fn var(&self) -> Option<SyntaxToken> {
         name_token(&self.syntax)
@@ -984,6 +968,8 @@ ast_node!(IfExpr = IfExpr);
 ast_node!(MatchExpr = MatchExpr);
 ast_node!(MatchArm = MatchArm);
 ast_node!(StructLitExpr = StructLitExpr);
+ast_node!(MapExpr = MapExpr);
+ast_node!(MapEntry = MapEntry);
 ast_node!(FieldInit = FieldInit);
 ast_node!(MacroCallExpr = MacroCallExpr);
 ast_node!(ArgList = ArgList);
@@ -996,6 +982,7 @@ pub enum Expr {
     Unary(UnaryExpr),
     Range(RangeExpr),
     Closure(ClosureExpr),
+    Loop(LoopStmt),
     Assign(AssignExpr),
     Try(TryExpr),
     Call(CallExpr),
@@ -1008,6 +995,7 @@ pub enum Expr {
     If(IfExpr),
     Match(MatchExpr),
     StructLit(StructLitExpr),
+    Map(MapExpr),
     MacroCall(MacroCallExpr),
     Block(Block),
 }
@@ -1020,6 +1008,7 @@ impl AstNode for Expr {
                 | K::UnaryExpr
                 | K::RangeExpr
                 | K::ClosureExpr
+                | K::LoopExpr
                 | K::AssignExpr
                 | K::TryExpr
                 | K::CallExpr
@@ -1032,6 +1021,7 @@ impl AstNode for Expr {
                 | K::IfExpr
                 | K::MatchExpr
                 | K::StructLitExpr
+                | K::MapExpr
                 | K::MacroCallExpr
                 | K::Block
         )
@@ -1042,6 +1032,7 @@ impl AstNode for Expr {
             K::UnaryExpr => Expr::Unary(UnaryExpr { syntax: node }),
             K::RangeExpr => Expr::Range(RangeExpr { syntax: node }),
             K::ClosureExpr => Expr::Closure(ClosureExpr { syntax: node }),
+            K::LoopExpr => Expr::Loop(LoopStmt { syntax: node }),
             K::AssignExpr => Expr::Assign(AssignExpr { syntax: node }),
             K::TryExpr => Expr::Try(TryExpr { syntax: node }),
             K::CallExpr => Expr::Call(CallExpr { syntax: node }),
@@ -1054,6 +1045,7 @@ impl AstNode for Expr {
             K::IfExpr => Expr::If(IfExpr { syntax: node }),
             K::MatchExpr => Expr::Match(MatchExpr { syntax: node }),
             K::StructLitExpr => Expr::StructLit(StructLitExpr { syntax: node }),
+            K::MapExpr => Expr::Map(MapExpr { syntax: node }),
             K::MacroCallExpr => Expr::MacroCall(MacroCallExpr { syntax: node }),
             K::Block => Expr::Block(Block { syntax: node }),
             _ => return None,
@@ -1065,6 +1057,7 @@ impl AstNode for Expr {
             Expr::Unary(n) => n.syntax(),
             Expr::Range(n) => n.syntax(),
             Expr::Closure(n) => n.syntax(),
+            Expr::Loop(n) => n.syntax(),
             Expr::Assign(n) => n.syntax(),
             Expr::Try(n) => n.syntax(),
             Expr::Call(n) => n.syntax(),
@@ -1077,6 +1070,7 @@ impl AstNode for Expr {
             Expr::If(n) => n.syntax(),
             Expr::Match(n) => n.syntax(),
             Expr::StructLit(n) => n.syntax(),
+            Expr::Map(n) => n.syntax(),
             Expr::MacroCall(n) => n.syntax(),
             Expr::Block(n) => n.syntax(),
         }
@@ -1144,6 +1138,14 @@ impl AssignExpr {
     pub fn value(&self) -> Option<Expr> {
         nth_child::<Expr>(&self.syntax, 1)
     }
+    pub fn op(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, K::Eq)
+            .or_else(|| token(&self.syntax, K::PlusEq))
+            .or_else(|| token(&self.syntax, K::MinusEq))
+            .or_else(|| token(&self.syntax, K::StarEq))
+            .or_else(|| token(&self.syntax, K::SlashEq))
+            .or_else(|| token(&self.syntax, K::PercentEq))
+    }
 }
 
 impl TryExpr {
@@ -1165,6 +1167,9 @@ impl MethodCallExpr {
     pub fn receiver(&self) -> Option<Expr> {
         child::<Expr>(&self.syntax)
     }
+    pub fn is_optional(&self) -> bool {
+        token(&self.syntax, K::QuestionDot).is_some()
+    }
     pub fn method_name(&self) -> Option<SyntaxToken> {
         name_token(&self.syntax)
     }
@@ -1179,6 +1184,9 @@ impl MethodCallExpr {
 impl FieldExpr {
     pub fn base(&self) -> Option<Expr> {
         child::<Expr>(&self.syntax)
+    }
+    pub fn is_optional(&self) -> bool {
+        token(&self.syntax, K::QuestionDot).is_some()
     }
     pub fn field_name(&self) -> Option<SyntaxToken> {
         name_token(&self.syntax)
@@ -1332,6 +1340,22 @@ impl StructLitExpr {
     }
     pub fn fields(&self) -> impl Iterator<Item = FieldInit> + '_ {
         children::<FieldInit>(&self.syntax)
+    }
+}
+
+impl MapExpr {
+    pub fn entries(&self) -> impl Iterator<Item = MapEntry> + '_ {
+        children(&self.syntax)
+    }
+}
+
+impl MapEntry {
+    pub fn key(&self) -> Option<Expr> {
+        nth_child::<Expr>(&self.syntax, 0)
+    }
+
+    pub fn value(&self) -> Option<Expr> {
+        nth_child::<Expr>(&self.syntax, 1)
     }
 }
 
@@ -1759,6 +1783,8 @@ fn is_binop_token(kind: SyntaxKind) -> bool {
             | K::Ge
             | K::AndAnd
             | K::OrOr
+            | K::QuestionQuestion
+            | K::KwIn
     )
 }
 
@@ -2008,14 +2034,12 @@ mod tests {
         let sf = source_file(
             "pub struct S {}\n\
              pub enum E { A }\n\
-             pub trait T {}\n\
-             pub mod m {}\n",
+             pub trait T {}\n",
         );
         let items: Vec<_> = sf.items().collect();
         assert!(matches!(&items[0], Item::Struct(s) if s.is_pub()));
         assert!(matches!(&items[1], Item::Enum(e) if e.is_pub()));
         assert!(matches!(&items[2], Item::Trait(t) if t.is_pub()));
-        assert!(matches!(&items[3], Item::Mod(m) if m.is_pub()));
     }
 
     #[test]

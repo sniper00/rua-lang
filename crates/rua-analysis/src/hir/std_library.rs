@@ -387,9 +387,28 @@ mod tests {
                 "None",
                 "map",
                 "unwrap",
+                "expect",
                 "unwrap_or",
                 "is_some",
                 "is_none"
+            ]
+        );
+
+        let names = library
+            .members_for(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
+            .map(StdMember::name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "Ok",
+                "Err",
+                "map",
+                "unwrap",
+                "expect",
+                "unwrap_or",
+                "is_ok",
+                "is_err"
             ]
         );
     }

@@ -1,0 +1,7 @@
+struct Profile {
+    city: String,
+}
+
+fn invalid(profile: Profile) -> String {
+    profile?.city
+}

@@ -130,6 +130,21 @@ fn expected_path(source: &Path, kind: GoldenKind) -> PathBuf {
     source.with_extension(kind.extension())
 }
 
+fn compile_standalone(source: &Path) -> Result<String, ruac::CompileFailure> {
+    let text = fs::read_to_string(source).unwrap_or_else(|error| {
+        panic!(
+            "cannot read standalone fixture {}: {error}",
+            source.display()
+        )
+    });
+    ruac::compile_str(&text).map_err(|mut failure| {
+        if let Some(root_file) = failure.files.first_mut() {
+            *root_file = source.display().to_string();
+        }
+        failure
+    })
+}
+
 fn fixture_label(path: &Path) -> String {
     path.strip_prefix(golden_root())
         .unwrap_or(path)
@@ -342,7 +357,7 @@ fn run_compile_pass(update: bool) -> Result<(), String> {
         ));
     }
     for source in sources {
-        let actual = ruac::compile_path(&source).map_err(|error| {
+        let actual = compile_standalone(&source).map_err(|error| {
             format!(
                 "compile-pass case {} failed:\n{error}",
                 fixture_label(&source)
@@ -365,7 +380,7 @@ fn run_compile_fail(update: bool) -> Result<(), String> {
     }
     let mut structured = String::new();
     for source in sources {
-        let error = ruac::compile_path(&source).err();
+        let error = compile_standalone(&source).err();
         let Some(error) = error else {
             return Err(format!(
                 "compile-fail case {} compiled successfully",
@@ -439,7 +454,7 @@ fn run_phase4a_compile_fail(update: bool) -> Result<(), String> {
     let mut structured = String::new();
     for case in PHASE4A_ACTIVE_FAIL_CASES {
         let source = root.join(format!("{case}.rua"));
-        let error = ruac::compile_path(&source).err();
+        let error = compile_standalone(&source).err();
         let Some(error) = error else {
             return Err(format!(
                 "Phase 4A compile-fail case {} compiled successfully",
@@ -462,7 +477,7 @@ fn run_phase4a_compile_pass(update: bool) -> Result<(), String> {
     let root = golden_root().join("phase4a/compile-pass");
     for case in PHASE4A_ACTIVE_PASS_CASES {
         let source = root.join(format!("{case}.rua"));
-        let actual = ruac::compile_path(&source).map_err(|error| {
+        let actual = compile_standalone(&source).map_err(|error| {
             format!(
                 "Phase 4A compile-pass case {} failed:\n{error}",
                 fixture_label(&source)

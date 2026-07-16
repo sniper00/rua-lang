@@ -1,5 +1,3 @@
-mod schema;
-
 fn main() {
     let user = schema::default_user();
     println!("{}", user.id);

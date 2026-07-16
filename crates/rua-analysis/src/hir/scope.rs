@@ -430,7 +430,8 @@ impl<'body> ScopeBuilder<'body> {
                 );
                 self.visit_expr(*body, closure_scope, LocalUseKind::Read);
             }
-            Expr::Assign { target, value } => {
+            Expr::Loop { body } => self.visit_expr(*body, scope, LocalUseKind::Read),
+            Expr::Assign { target, value, .. } => {
                 if self.is_local_assignment_target(*target) {
                     self.visit_expr(*target, scope, LocalUseKind::Write);
                 } else {
@@ -456,7 +457,7 @@ impl<'body> ScopeBuilder<'body> {
                     self.visit_expr(*argument, scope, LocalUseKind::Read);
                 }
             }
-            Expr::Field { base, field } => {
+            Expr::Field { base, field, .. } => {
                 self.visit_expr(*base, scope, LocalUseKind::Read);
                 self.visit_non_local(*field, scope);
             }
@@ -505,6 +506,12 @@ impl<'body> ScopeBuilder<'body> {
                     self.visit_expr(field.value(), scope, LocalUseKind::Read);
                 }
             }
+            Expr::MapLiteral { entries } => {
+                for entry in entries {
+                    self.visit_expr(entry.key(), scope, LocalUseKind::Read);
+                    self.visit_expr(entry.value(), scope, LocalUseKind::Read);
+                }
+            }
             Expr::MacroCall { macro_name, args } => {
                 self.visit_non_local(*macro_name, scope);
                 for argument in args {
@@ -527,7 +534,13 @@ impl<'body> ScopeBuilder<'body> {
 
     fn visit_statement(&mut self, statement: &Statement, scope: ScopeId) -> ScopeId {
         match statement {
-            Statement::Missing | Statement::Break | Statement::Continue => scope,
+            Statement::Break { value } => {
+                if let Some(value) = value {
+                    self.visit_expr(*value, scope, LocalUseKind::Read);
+                }
+                scope
+            }
+            Statement::Missing | Statement::Continue => scope,
             Statement::Let {
                 binding,
                 initializer,

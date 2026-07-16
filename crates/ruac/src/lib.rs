@@ -39,6 +39,8 @@ pub struct CompileOptions {
     pub library: Vec<PathBuf>,
     /// Logical root module name to external `.ruai` file or module directory.
     pub library_mounts: BTreeMap<String, PathBuf>,
+    /// Directories prepended to Lua `package.path` by generated entry chunks.
+    pub lua_path: Vec<PathBuf>,
 }
 
 /// Load builtin `.ruai` declarations into a declaration-only semantic module.
@@ -79,8 +81,8 @@ pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(
     Ok(())
 }
 
-/// Compile Rua source text to Lua 5.5 source text. File modules (`mod name;`)
-/// are not available here (no base directory); use [`compile_path`] for those.
+/// Compile one standalone Rua source text to Lua 5.5 source text. Path modules
+/// require a project root, so use [`compile_path`] or [`compile_project`] for them.
 /// Uses default builtins directory resolution.
 pub fn compile_str(src: &str) -> Result<String, CompileFailure> {
     _compile_str(src, None)
@@ -162,6 +164,51 @@ pub fn compile_project_with_diagnostics<P: SourceProvider>(
     project: &ProjectSpec,
     provider: &P,
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let (typed, _, _) = check_project_with_diagnostics(project, provider)?;
+    Ok(codegen::generate_with_source_map(
+        &typed,
+        &builtins::CodegenRules::default(),
+    ))
+}
+
+/// Compile an IO-free logical project into one artifact per runtime module.
+pub fn compile_project_modules_artifact<P: SourceProvider>(
+    project: &ProjectSpec,
+    provider: &P,
+) -> Result<codegen::GeneratedLuaModules, CompileFailure> {
+    let (typed, files, root_path) = check_project_with_diagnostics(project, provider)?;
+    let root_stem = root_path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".rua"))
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            CompileFailure::single(
+                Diag::bare(
+                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    format!("root logical path `{root_path}` has no `.rua` file stem"),
+                ),
+                files.clone(),
+            )
+        })?;
+    codegen::generate_modules_with_source_maps(
+        &typed,
+        &builtins::CodegenRules::default(),
+        &format!("{root_stem}.lua"),
+        &[],
+    )
+    .map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+            files,
+        )
+    })
+}
+
+fn check_project_with_diagnostics<P: SourceProvider>(
+    project: &ProjectSpec,
+    provider: &P,
+) -> Result<(typed_ir::TypedProgram, Vec<String>, String), CompileFailure> {
     let fail = CompileFailure::single;
     let root_path = project
         .files
@@ -201,8 +248,8 @@ pub fn compile_project_with_diagnostics<P: SourceProvider>(
     program.is_decl = root_path.as_str().ends_with(".ruai");
     resolve::set_file_program(&mut program, project.root_file.index());
     let scope_dir = root_path.parent().unwrap_or_default();
-    resolve::resolve_modules_with_provider_diagnostics(
-        &mut program.items,
+    resolve::discover_modules_with_provider(
+        &mut program,
         &scope_dir,
         project,
         provider,
@@ -230,14 +277,11 @@ pub fn compile_project_with_diagnostics<P: SourceProvider>(
         }
     })?;
     let typed = typed_ir::TypedProgram::new(program, hir, info);
-    Ok(codegen::generate_with_source_map(
-        &typed,
-        &builtins::CodegenRules::default(),
-    ))
+    Ok((typed, files, root_path.to_string()))
 }
 
 fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, CompileFailure> {
-    let mut files = vec![String::new()];
+    let files = vec![String::new()];
     let mut program = parser::parse(src).map_err(|error| {
         CompileFailure::single(
             Diag::from_structured(
@@ -249,8 +293,6 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
         )
     })?;
     load_builtins(&mut program, builtins_dir)
-        .map_err(|error| CompileFailure::single(error, files.clone()))?;
-    resolve::resolve_modules(&mut program.items, None, &mut files)
         .map_err(|error| CompileFailure::single(error, files.clone()))?;
     let hir = hir::resolve(&program);
     check::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
@@ -266,8 +308,9 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
     Ok(codegen::generate(&typed, &rules))
 }
 
-/// Compile a Rua source file (resolving `mod name;` file modules relative to the
-/// file's directory) to Lua 5.5 source text. Uses default builtins resolution.
+/// Compile a Rua source tree to Lua 5.5. Every `.rua` below the entry file's
+/// directory is discovered by path; source-level `mod` declarations are
+/// rejected. Uses default builtins resolution.
 pub fn compile_path(path: &Path) -> Result<String, CompileFailure> {
     compile_path_artifact(path).map(|artifact| artifact.source)
 }
@@ -318,6 +361,7 @@ pub fn compile_path_artifact_with_std(
             std_path: Some(std_path.to_path_buf()),
             library: Vec::new(),
             library_mounts: BTreeMap::new(),
+            lua_path: Vec::new(),
         },
     )
 }
@@ -327,6 +371,63 @@ pub fn compile_path_artifact_with_options(
     path: &Path,
     options: &CompileOptions,
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let (typed, files) = check_path_with_options(path, options)?;
+    let rules = builtins::CodegenRules::default();
+    codegen::generate_with_source_map_and_lua_path(&typed, &rules, &options.lua_path).map_err(
+        |error| {
+            CompileFailure::single(
+                Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                files,
+            )
+        },
+    )
+}
+
+/// Compile a source tree into one Lua file per resolved runtime module.
+pub fn compile_path_modules_artifact(
+    path: &Path,
+) -> Result<codegen::GeneratedLuaModules, CompileFailure> {
+    compile_path_modules_artifact_with_options(path, &CompileOptions::default())
+}
+
+/// Compile a source tree into Lua modules with explicit standard/external
+/// library inputs. The root output keeps the input file stem; child outputs use
+/// their resolved logical paths (`domain::order` -> `domain/order.lua`).
+pub fn compile_path_modules_artifact_with_options(
+    path: &Path,
+    options: &CompileOptions,
+) -> Result<codegen::GeneratedLuaModules, CompileFailure> {
+    let (typed, files) = check_path_with_options(path, options)?;
+    let root_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            CompileFailure::single(
+                Diag::bare(
+                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    format!(
+                        "root source path `{}` has no UTF-8 file stem",
+                        path.display()
+                    ),
+                ),
+                files.clone(),
+            )
+        })?;
+    let root_output = format!("{root_stem}.lua");
+    let rules = builtins::CodegenRules::default();
+    codegen::generate_modules_with_source_maps(&typed, &rules, &root_output, &options.lua_path)
+        .map_err(|error| {
+            CompileFailure::single(
+                Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                files,
+            )
+        })
+}
+
+fn check_path_with_options(
+    path: &Path,
+    options: &CompileOptions,
+) -> Result<(typed_ir::TypedProgram, Vec<String>), CompileFailure> {
     let (mut program, files) =
         parse_and_load_modules_with_libraries(path, &options.library, &options.library_mounts)?;
     load_builtins(&mut program, options.std_path.as_deref())
@@ -340,9 +441,8 @@ pub fn compile_path_artifact_with_options(
         diagnostics,
         files: files.clone(),
     })?;
-    let rules = builtins::CodegenRules::default();
     let typed = typed_ir::TypedProgram::new(program, hir, info);
-    Ok(codegen::generate_with_source_map(&typed, &rules))
+    Ok((typed, files))
 }
 
 /// Parse a file and splice in its file modules, without semantic checks. Returns
@@ -385,10 +485,9 @@ fn parse_and_load_modules_with_libraries(
         .is_some_and(|extension| extension == "ruai");
     // The root file is id 0; child files are appended during resolution.
     let mut files = files;
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    resolve::resolve_modules_with_libraries(
-        &mut program.items,
-        Some(dir),
+    resolve::discover_modules_from_filesystem(
+        &mut program,
+        path,
         library,
         library_mounts,
         &mut files,
@@ -430,14 +529,9 @@ pub fn check_diagnostics(src: &str) -> (Vec<Diag>, Vec<String>) {
         return (diags, vec![String::new()]);
     }
 
-    // 2. Resolve (file modules will fail for in-memory sources — that's OK).
-    // File id 0 with an empty path: diagnostics fall back to `line: msg`.
-    let mut files = vec![String::new()];
-    if let Err(error) = resolve::resolve_modules(&mut program.items, None, &mut files) {
-        diags.push(error);
-        // Continue with what we have — structural/type checks may still find
-        // issues in the rest of the program.
-    }
+    // 2. Resolve the single in-memory module. Filesystem module discovery is
+    // intentionally available only through the path/project APIs.
+    let files = vec![String::new()];
     let hir = hir::resolve(&program);
 
     // 3. Structural checks.
