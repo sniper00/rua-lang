@@ -234,7 +234,7 @@ impl Builder<'_> {
                 let values = fields.iter().map(|field| field.value()).collect::<Vec<_>>();
                 self.expr_sequence(&values, next, loop_targets)
             }
-            Some(Expr::MacroCall { args, .. }) => self.expr_sequence(args, next, loop_targets),
+            Some(Expr::VecLiteral { elements }) => self.expr_sequence(elements, next, loop_targets),
             Some(Expr::Block(block)) => self.block(
                 expression,
                 block.statements(),

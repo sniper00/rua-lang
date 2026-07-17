@@ -629,12 +629,21 @@ fn parse_multiple_top_level_items() {
 #[test]
 fn parse_top_level_chunk_statements_between_items() {
     let source =
-        "let before = 1;\nfn value() -> i64 { 2 }\nprintln!(\"{}\", before);\nlet after = value();";
+        "let before = 1;\nfn value() -> i64 { 2 }\nprint(\"{}\", before);\nlet after = value();";
     let parsed = rua_syntax::parse_source_file(source);
     assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
     assert_eq!(parsed.tree().items().count(), 1);
     assert_eq!(parsed.tree().stmts().count(), 3);
     assert_eq!(parsed.syntax_node().text().to_string(), source);
+}
+
+#[test]
+fn removed_macro_call_syntax_reports_an_error() {
+    let parse = parse_source_file("fn main() { let values = vec![1, 2, 3]; }");
+    assert!(
+        !parse.errors().is_empty(),
+        "removed name! macro syntax must not parse successfully"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -4,4 +4,4 @@ assert(rua_std.ABI_VERSION == 2, "incompatible rua_std ABI")
 local fmt = rua_std.fmt
 
 local value = 1
-fmt.println("{}", value)
+fmt.print("{}", value)

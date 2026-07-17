@@ -244,7 +244,7 @@ fn rename_enum_variant_does_not_touch_same_named_symbols() {
 
 #[test]
 fn references_and_rename_work_for_top_level_chunk_binding() {
-    let source = "let count = 1;\nprintln!(\"{}\", count);\nlet next = count + 1;";
+    let source = "let count = 1;\nprint(\"{}\", count);\nlet next = count + 1;";
     let uri = uri("/test/rename_chunk_binding.rua");
     let mut srv = TestServer::new();
     srv.open(&uri, source);

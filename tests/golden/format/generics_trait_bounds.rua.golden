@@ -28,7 +28,7 @@ impl Shape for Circle {
     }
 
     fn name(&self) -> String {
-        format!("circle")
+        format("circle")
     }
 }
 
@@ -38,7 +38,7 @@ impl Shape for Square {
     }
 
     fn name(&self) -> String {
-        format!("square")
+        format("square")
     }
 }
 
@@ -58,7 +58,7 @@ impl Boxed for Circle {
 // A bounded generic: `T` must implement `Shape`, so `s.name()`/`s.area()` are
 // checked against the trait's signatures.
 fn describe<T: Shape>(s: T) -> String {
-    format!("{} area = {}", s.name(), s.area())
+    format("{} area = {}", s.name(), s.area())
 }
 
 // Calls the trait's generic method through a bounded generic receiver: the
@@ -69,25 +69,25 @@ fn echo<T: Boxed>(b: T, v: i64) -> i64 {
 
 // The same bound written as a `where` clause (equivalent to `<T: Shape>`).
 fn label<T>(s: T) -> String where T: Shape, {
-    format!("[{}]", s.name())
+    format("[{}]", s.name())
 }
 
 // An unbounded generic used purely structurally (identity + container).
 fn pair<T>(a: T, b: T) -> Vec<T> {
-    vec![a, b]
+    [a, b]
 }
 
 fn main() {
     let c = Circle { r: 2.0 };
     let sq = Square { s: 3.0 };
-    println!("{}", describe(c));
-    println!("{}", describe(sq));
-    println!("{}", label(Circle { r: 1.0 }));
+    print("{}", describe(c));
+    print("{}", describe(sq));
+    print("{}", label(Circle { r: 1.0 }));
 
     let nums = pair(10, 20);
-    println!("pair len = {}", nums.len());
-    println!("pair[0]  = {}", nums.get(0));
-    println!("pair[1]  = {}", nums.get(1));
+    print("pair len = {}", nums.len());
+    print("pair[0]  = {}", nums.get(0));
+    print("pair[1]  = {}", nums.get(1));
 
-    println!("echo     = {}", echo(Circle { r: 1.0 }, 7));
+    print("echo     = {}", echo(Circle { r: 1.0 }, 7));
 }

@@ -8,6 +8,7 @@ pub(super) struct LibraryConfig {
     pub(super) mounts: HashMap<String, PathBuf>,
     pub(super) bases: Vec<PathBuf>,
     pub(super) project_bases: BTreeMap<u32, Vec<PathBuf>>,
+    pub(super) project_cfg: BTreeMap<u32, rua_project::CfgOptions>,
     pub(super) files: Vec<LibraryFile>,
     pub(super) std_root: Option<PathBuf>,
     pub(super) standard_library: Option<rua_resources::StdLibrary>,
@@ -25,6 +26,7 @@ struct ProjectLibraryScanRequest {
     roots: Vec<PathBuf>,
     mounts: HashMap<String, PathBuf>,
     std_root: Option<PathBuf>,
+    cfg: rua_project::CfgOptions,
 }
 
 pub(super) fn merge_project_configs(
@@ -131,6 +133,16 @@ pub(super) fn merge_project_configs(
                 serde_json::Value::String(std_path.to_string_lossy().into()),
             );
         }
+        setting.insert(
+            "cfgFlags".to_string(),
+            serde_json::json!(config.cfg.flags().collect::<Vec<_>>()),
+        );
+        let cfg_values = config
+            .cfg
+            .values()
+            .map(|(key, values)| (key, values.iter().collect::<Vec<_>>()))
+            .collect::<BTreeMap<_, _>>();
+        setting.insert("cfgValues".to_string(), serde_json::json!(cfg_values));
     }
 
     if !workspace_settings.is_empty() {
@@ -192,6 +204,7 @@ impl LibraryScanRequest {
                             roots: parse_library_paths(setting.get("library"))?,
                             mounts: parse_mounts(setting.get("libraryMounts"))?,
                             std_root: parse_std_path(setting, Some(setting))?,
+                            cfg: parse_cfg_options(setting)?,
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()
@@ -236,12 +249,14 @@ impl LibraryScanRequest {
         let mut mounts = self.mounts;
         let (mut bases, mut files) = scan_library_inputs(&roots, &mounts, cancelled)?;
         let mut project_bases = BTreeMap::new();
+        let mut project_cfg = BTreeMap::new();
         for project in self.projects {
             let project_roots = project.roots;
             let project_mounts = project.mounts;
             let (scanned_bases, scanned_files) =
                 scan_library_inputs(&project_roots, &project_mounts, cancelled)?;
             project_bases.insert(project.project_index, scanned_bases);
+            project_cfg.insert(project.project_index, project.cfg);
             files.extend(scanned_files);
             roots.extend(project_roots);
             mounts.extend(
@@ -263,11 +278,46 @@ impl LibraryScanRequest {
             mounts,
             bases,
             project_bases,
+            project_cfg,
             files,
             std_root: self.std_root,
             standard_library,
         })
     }
+}
+
+fn parse_cfg_options(setting: &serde_json::Value) -> Result<rua_project::CfgOptions, String> {
+    let mut cfg = rua_project::CfgOptions::default();
+    if let Some(flags) = setting.get("cfgFlags") {
+        for flag in flags
+            .as_array()
+            .ok_or_else(|| "cfgFlags must be an array".to_string())?
+        {
+            cfg.insert_flag(
+                flag.as_str()
+                    .ok_or_else(|| "cfgFlags entries must be strings".to_string())?,
+            );
+        }
+    }
+    if let Some(values) = setting.get("cfgValues") {
+        for (key, entries) in values
+            .as_object()
+            .ok_or_else(|| "cfgValues must be an object".to_string())?
+        {
+            for value in entries
+                .as_array()
+                .ok_or_else(|| format!("cfgValues.{key} must be an array"))?
+            {
+                cfg.insert_value(
+                    key,
+                    value
+                        .as_str()
+                        .ok_or_else(|| format!("cfgValues.{key} entries must be strings"))?,
+                );
+            }
+        }
+    }
+    Ok(cfg)
 }
 
 fn parse_std_path(
@@ -624,6 +674,13 @@ mod tests {
 
             [runtime]
             std_path = "std"
+
+            [build]
+            features = ["http"]
+
+            [build.cfg]
+            runtime = "moon"
+            embedded = true
             "#,
         )
         .unwrap();
@@ -639,6 +696,9 @@ mod tests {
             setting["libraryMounts"]["host"],
             json!(root.join("types/host.ruai"))
         );
+        assert_eq!(setting["cfgFlags"], json!(["embedded"]));
+        assert_eq!(setting["cfgValues"]["feature"], json!(["http"]));
+        assert_eq!(setting["cfgValues"]["runtime"], json!(["moon"]));
 
         let merged = merge_project_configs(
             &json!({

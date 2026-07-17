@@ -86,7 +86,7 @@ impl Harness {
             Message::Code(code) => code,
             Message::Point { x, y: _, .. } => x,
         };
-        println!("{}", decoded);
+        print("{}", decoded);
         total + numeric + field + indexed + counted
     }
 }
@@ -241,12 +241,6 @@ impl Harness {
                 (NameRefKind::StructPath, Some("Snapshot")),
             ])
     }));
-    assert!(
-        expressions
-            .iter()
-            .any(|expr| matches!(expr, Expr::MacroCall { .. }))
-    );
-
     let statements = expressions
         .iter()
         .filter_map(|expr| match expr {

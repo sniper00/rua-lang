@@ -331,7 +331,7 @@ fn build_library(
         }
     }
 
-    for required in ["format", "number"] {
+    for required in ["number"] {
         if !manifest.runtime_helpers.contains_key(required) {
             return Err(StdError::new(format!(
                 "std.toml is missing required runtime helper `{required}`"
@@ -502,11 +502,19 @@ mod tests {
     fn embedded_manifest_loads_all_declarations() {
         let library = embedded_std().expect("embedded standard library");
         assert_eq!(library.manifest().version, 1);
-        assert_eq!(library.declarations().len(), 6);
+        assert_eq!(library.declarations().len(), 8);
         assert_eq!(library.runtime_sources().len(), 1);
         assert_eq!(library.lang_item("option"), Some("Option"));
         assert_eq!(library.lang_item("result"), Some("Result"));
-        assert_eq!(library.manifest().modules[1].alias.as_deref(), Some("map"));
+        assert_eq!(
+            library
+                .manifest()
+                .modules
+                .iter()
+                .find(|module| module.name == "std::hashmap")
+                .and_then(|module| module.alias.as_deref()),
+            Some("map")
+        );
         assert!(library.runtime_sources()[0].text().contains("return std"));
     }
 

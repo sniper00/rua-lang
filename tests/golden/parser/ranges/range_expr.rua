@@ -1,5 +1,5 @@
 fn visit() {
     for index in 1..=10 {
-        println!("{}", index);
+        print("{}", index);
     }
 }

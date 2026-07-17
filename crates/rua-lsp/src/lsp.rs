@@ -65,10 +65,10 @@ use lsp_types::{
 
 use rua_analysis::{
     AnalysisHost, BuiltinDefinitionTarget, Change, CompletionInsert, CompletionKind, DefId,
-    DefKind, FileId, FileKind, HoverResult, MacroDelimiter, NavigationTarget, ProjectData,
-    ProjectFile, ProjectId, ProjectPosition, ProjectRoot, QueryContext, ReferenceResult,
-    SemanticTokenKind, SourceChange, SourceRootId, SourceRootKind, TextRange, TypeHintTarget,
-    TypeHintTooltip, WorkspaceSymbol as AnalysisWorkspaceSymbol,
+    DefKind, FileId, FileKind, HoverResult, NavigationTarget, ProjectData, ProjectFile, ProjectId,
+    ProjectPosition, ProjectRoot, QueryContext, ReferenceResult, SemanticTokenKind, SourceChange,
+    SourceRootId, SourceRootKind, TextRange, TypeHintTarget, TypeHintTooltip,
+    WorkspaceSymbol as AnalysisWorkspaceSymbol,
 };
 use rua_syntax::LineIndex;
 
@@ -216,7 +216,8 @@ impl Server {
                         .get(project_id)
                         .cloned()
                         .unwrap_or_default(),
-                ),
+                )
+                .with_cfg(project.cfg.clone()),
             );
         }
     }
@@ -1291,7 +1292,7 @@ impl Server {
                     if !new_arms.is_empty() {
                         new_arms.push('\n');
                     }
-                    new_arms.push_str(&format!("{arm_indent}{pattern} => todo!(),"));
+                    new_arms.push_str(&format!("{arm_indent}{pattern} => todo(),"));
                     missing_count += 1;
                 }
                 if new_arms.is_empty() {
@@ -2269,6 +2270,7 @@ impl Server {
                     root_id,
                     path.parent().unwrap_or(Path::new("")),
                 )],
+                cfg: rua_project::CfgOptions::default(),
             }
         });
         self.file_projects.insert(file_id, project_id);
@@ -2416,6 +2418,11 @@ impl Server {
 
         self.library_bases = config.bases.clone();
         self.library_project_bases = config.project_bases.clone();
+        for (project_index, cfg) in &config.project_cfg {
+            if let Some(project) = self.projects.get_mut(&ProjectId::new(*project_index)) {
+                project.cfg = cfg.clone();
+            }
+        }
         if !config.roots.is_empty() || !config.mounts.is_empty() {
             let root_id = SourceRootId::new(self.next_root_id);
             self.next_root_id += 1;
@@ -3002,6 +3009,7 @@ impl Server {
                     WorkspaceProject {
                         root_file,
                         workspace_roots: vec![ProjectRoot::new(root_id, logical_base)],
+                        cfg: rua_project::CfgOptions::default(),
                     },
                 );
                 change.set_source_root(root_id, SourceRootKind::Workspace);
@@ -3135,6 +3143,7 @@ fn completion_to_lsp(
 ) -> CompletionItem {
     let kind = match item.kind() {
         CompletionKind::Keyword => Some(CompletionItemKind::KEYWORD),
+        CompletionKind::Annotation => Some(CompletionItemKind::INTERFACE),
         CompletionKind::Variable | CompletionKind::Parameter => Some(CompletionItemKind::VARIABLE),
         CompletionKind::Function => Some(CompletionItemKind::FUNCTION),
         CompletionKind::Method => Some(CompletionItemKind::METHOD),
@@ -3147,7 +3156,6 @@ fn completion_to_lsp(
         CompletionKind::Module => Some(CompletionItemKind::MODULE),
         CompletionKind::BuiltinType => Some(CompletionItemKind::STRUCT),
         CompletionKind::TypeAlias => Some(CompletionItemKind::TYPE_PARAMETER),
-        CompletionKind::Macro => Some(CompletionItemKind::FUNCTION),
     };
 
     let (insert_text, insert_text_format) = match item.insert() {
@@ -3161,14 +3169,6 @@ fn completion_to_lsp(
                     .map(|(i, p)| format!("${{{}:{}}}", i + 1, p))
                     .collect();
                 format!("{callee}({})$0", placeholders.join(", "))
-            };
-            (Some(snippet), Some(InsertTextFormat::SNIPPET))
-        }
-        Some(CompletionInsert::MacroCall { name, delimiter }) => {
-            let snippet = match delimiter {
-                MacroDelimiter::Parentheses => format!("{name}!($0)"),
-                MacroDelimiter::Brackets => format!("{name}![$0]"),
-                MacroDelimiter::Braces => format!("{name}!{{$0}}"),
             };
             (Some(snippet), Some(InsertTextFormat::SNIPPET))
         }
@@ -3219,7 +3219,8 @@ fn completion_to_lsp(
     let label_details = {
         let raw_detail = item.detail().map(|d| d.to_string());
         let detail = raw_detail.map(|d| match item.kind() {
-            CompletionKind::Field
+            CompletionKind::Annotation
+            | CompletionKind::Field
             | CompletionKind::Variable
             | CompletionKind::Parameter
             | CompletionKind::Variant
@@ -3232,11 +3233,11 @@ fn completion_to_lsp(
             CompletionKind::Method
             | CompletionKind::Function
             | CompletionKind::Keyword
-            | CompletionKind::Impl
-            | CompletionKind::Macro => format!(" {d}"),
+            | CompletionKind::Impl => format!(" {d}"),
         });
         let description = match item.kind() {
             CompletionKind::Keyword => Some("keyword".to_string()),
+            CompletionKind::Annotation => Some("annotation".to_string()),
             CompletionKind::Variable => Some("local".to_string()),
             CompletionKind::Parameter => Some("parameter".to_string()),
             CompletionKind::Function => Some("fn".to_string()),
@@ -3250,7 +3251,6 @@ fn completion_to_lsp(
             CompletionKind::Module => Some("module".to_string()),
             CompletionKind::BuiltinType => Some("built-in type".to_string()),
             CompletionKind::TypeAlias => Some("type alias".to_string()),
-            CompletionKind::Macro => Some("macro".to_string()),
         };
         if detail.is_some() || description.is_some() {
             Some(lsp_types::CompletionItemLabelDetails {
@@ -3410,6 +3410,7 @@ fn semantic_token_legend() -> SemanticTokensLegend {
             SemanticTokenModifier::DEFAULT_LIBRARY,
             SemanticTokenModifier::new("unused"),
             SemanticTokenModifier::new("mutable"),
+            SemanticTokenModifier::new("inactive"),
         ],
     }
 }
@@ -3511,6 +3512,7 @@ fn build_document_symbol_tree(
 fn to_lsp_symbol_kind(kind: DefKind) -> LspSymbolKind {
     match kind {
         DefKind::Chunk => LspSymbolKind::MODULE,
+        DefKind::Annotation => LspSymbolKind::INTERFACE,
         DefKind::Function | DefKind::ExternFunction => LspSymbolKind::FUNCTION,
         DefKind::Struct => LspSymbolKind::STRUCT,
         DefKind::Enum => LspSymbolKind::ENUM,
@@ -3768,6 +3770,7 @@ mod tests {
             WorkspaceProject {
                 root_file: file_id,
                 workspace_roots: vec![ProjectRoot::new(root, "/workspace")],
+                cfg: rua_project::CfgOptions::default(),
             },
         );
         server.file_projects.insert(file_id, ProjectId::new(0));
@@ -4447,23 +4450,6 @@ mod tests {
     }
 
     #[test]
-    fn macro_completion_has_snippet_insert_text() {
-        let m = rua_analysis::CompletionItem::new("println!", rua_analysis::CompletionKind::Macro)
-            .with_insert(rua_analysis::CompletionInsert::MacroCall {
-                name: "println".to_string(),
-                delimiter: rua_analysis::MacroDelimiter::Parentheses,
-            });
-
-        let li = empty_line_index();
-        let lsp = completion_to_lsp(&m, &li, "", FileId::new(0));
-        assert_eq!(lsp.insert_text.as_deref(), Some("println!($0)"));
-        assert_eq!(
-            lsp.insert_text_format,
-            Some(lsp_types::InsertTextFormat::SNIPPET)
-        );
-    }
-
-    #[test]
     fn function_completion_has_call_snippet() {
         let f = rua_analysis::CompletionItem::new("greet", rua_analysis::CompletionKind::Function)
             .with_insert(rua_analysis::CompletionInsert::Call {
@@ -4499,22 +4485,6 @@ mod tests {
             lsp.insert_text_format,
             Some(lsp_types::InsertTextFormat::SNIPPET)
         );
-    }
-
-    #[test]
-    fn macro_completion_filter_text_excludes_bang() {
-        let m = rua_analysis::CompletionItem::new("println!", rua_analysis::CompletionKind::Macro)
-            .with_lookup("println")
-            .with_insert(rua_analysis::CompletionInsert::MacroCall {
-                name: "println".to_string(),
-                delimiter: rua_analysis::MacroDelimiter::Parentheses,
-            });
-
-        let li = empty_line_index();
-        let lsp = completion_to_lsp(&m, &li, "", FileId::new(0));
-        assert_eq!(lsp.filter_text.as_deref(), Some("println"));
-        // label still has the bang
-        assert_eq!(lsp.label, "println!");
     }
 
     #[test]
@@ -4590,7 +4560,6 @@ mod tests {
             rua_analysis::CompletionKind::Function,
             rua_analysis::CompletionKind::Method,
             rua_analysis::CompletionKind::Keyword,
-            rua_analysis::CompletionKind::Macro,
         ] {
             let item = rua_analysis::CompletionItem::new("greet", kind)
                 .with_detail("fn greet(name: String) -> String");

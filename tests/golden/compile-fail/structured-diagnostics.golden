@@ -66,13 +66,13 @@ compile-fail/try_on_non_result.rua
   E0200 file=compile-fail/try_on_non_result.rua range=46..47 arguments=[line="3", message="`?` operator requires `Result` or `Option`, found `i64`"]
 compile-fail/type_binary_invalid.rua
   E0206 file=compile-fail/type_binary_invalid.rua range=73..81 arguments=[line="6", message="cannot apply binary `+` to `bool` and `i64`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=106..123 arguments=[line="7", message="cannot apply binary `-` to `Vec<i64>` and `Vec<i64>`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=151..167 arguments=[line="8", message="cannot apply binary `*` to `String` and `String`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=191..199 arguments=[line="9", message="cannot apply binary `==` to `i64` and `String`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=227..241 arguments=[line="10", message="cannot apply binary `!=` to `bool` and `String`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=264..276 arguments=[line="11", message="cannot apply binary `<` to `bool` and `bool`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=300..308 arguments=[line="12", message="cannot apply binary `>=` to `String` and `i64`"]
-  E0206 file=compile-fail/type_binary_invalid.rua range=332..341 arguments=[line="13", message="type `Point` does not implement operator trait `Add`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=106..115 arguments=[line="7", message="cannot apply binary `-` to `Vec<i64>` and `Vec<i64>`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=143..159 arguments=[line="8", message="cannot apply binary `*` to `String` and `String`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=183..191 arguments=[line="9", message="cannot apply binary `==` to `i64` and `String`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=219..233 arguments=[line="10", message="cannot apply binary `!=` to `bool` and `String`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=256..268 arguments=[line="11", message="cannot apply binary `<` to `bool` and `bool`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=292..300 arguments=[line="12", message="cannot apply binary `>=` to `String` and `i64`"]
+  E0206 file=compile-fail/type_binary_invalid.rua range=324..333 arguments=[line="13", message="type `Point` does not implement operator trait `Add`"]
 compile-fail/type_break_value_in_while.rua
   E0200 file=compile-fail/type_break_value_in_while.rua range=46..47 arguments=[line="3", message="`break` with a value is only allowed in `loop`"]
 compile-fail/type_coalesce_non_option.rua
@@ -84,7 +84,7 @@ compile-fail/type_let_annotation_mismatch.rua
 compile-fail/type_map_literal_mixed_values.rua
   E0200 file=compile-fail/type_map_literal_mixed_values.rua range=75..79 arguments=[line="4", message="map value must be `i64`, found `bool`"]
 compile-fail/type_membership_element_mismatch.rua
-  E0200 file=compile-fail/type_membership_element_mismatch.rua range=27..49 arguments=[line="2", message="`in` expects `i64`, found `String`"]
+  E0200 file=compile-fail/type_membership_element_mismatch.rua range=27..45 arguments=[line="2", message="`in` expects `i64`, found `String`"]
 compile-fail/type_optional_chain_non_option.rua
   E0200 file=compile-fail/type_optional_chain_non_option.rua range=83..90 arguments=[line="6", message="optional chaining requires `Option`, found `Profile`"]
   E0200 file=compile-fail/type_optional_chain_non_option.rua range=83..96 arguments=[line="6", message="expected return type `String`, found `Option<?>`"]

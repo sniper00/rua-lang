@@ -13,14 +13,14 @@ fn main() {
     scores.insert("bob", 20);
     scores.insert("alice", 15); // overwrite
 
-    println!("count = {}", scores.len());
-    println!("alice = {}", scores.get("alice"));
-    println!("has bob = {}", scores.contains_key("bob"));
+    print("count = {}", scores.len());
+    print("alice = {}", scores.get("alice"));
+    print("has bob = {}", scores.contains_key("bob"));
 
     scores.remove("bob");
-    println!("after remove, has bob = {}", scores.contains_key("bob"));
-    println!("count = {}", scores.len());
+    print("after remove, has bob = {}", scores.contains_key("bob"));
+    print("count = {}", scores.len());
 
     // extern function used directly (ambient Lua global).
-    println!("tostring(42) = {}", tostring(42));
+    print("tostring(42) = {}", tostring(42));
 }

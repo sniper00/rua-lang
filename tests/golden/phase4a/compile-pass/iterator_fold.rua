@@ -1,5 +1,5 @@
 fn main() -> i64 {
-    vec![1, 2, 3]
+    [1, 2, 3]
         .iter()
         .map(|value| value * 2)
         .fold(0, |total, value| total + value)

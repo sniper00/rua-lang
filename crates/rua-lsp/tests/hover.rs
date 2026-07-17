@@ -61,7 +61,7 @@ fn hover_and_goto_resolve_cross_file_associated_function() {
     let order_uri = uri("/test/domain/order.rua");
     let (source, offset) = extract_marker(concat!(
         "use domain::order::OrderRequest;\n",
-        "let requests = vec![OrderRequest::n$0ew(\"book-001\", 2, 10)];\n",
+        "let requests = [OrderRequest::n$0ew(\"book-001\", 2, 10)];\n",
     ));
     let order_source = concat!(
         "pub struct OrderRequest { pub sku: String, pub quantity: i64 }\n",
@@ -133,12 +133,9 @@ fn demo_hover_and_goto_cover_items_members_variants_and_locals() {
             "fn load_config(path: String) -> Result<String, String>",
             "Result",
         ),
-        (
-            "Result::Ok(value) => println!(\"result value={}\"",
-            "Result",
-        ),
-        ("Result::Ok(value) => println!(\"result value={}\"", "Ok"),
-        ("Result::Err(error) => println!(\"result error={}\"", "Err"),
+        ("Result::Ok(value) => print(\"result value={}\"", "Result"),
+        ("Result::Ok(value) => print(\"result value={}\"", "Ok"),
+        ("Result::Err(error) => print(\"result error={}\"", "Err"),
     ] {
         let fragment_start = source.rfind(fragment).unwrap();
         let symbol_offset = fragment.find(symbol).unwrap();
@@ -192,18 +189,20 @@ fn hover_method_call_includes_documentation() {
 }
 
 #[test]
-fn hover_builtin_macro_uses_shared_documentation() {
-    let (source, offset) = extract_marker("fn main() { printl$0n!(\"value {}\", 1); }");
-    let uri = uri("/test/hover_builtin_macro.rua");
+fn hover_standard_function_uses_shared_documentation() {
+    let (source, offset) = extract_marker("fn main() { pri$0nt(\"value {}\", 1); }");
+    let uri = uri("/test/hover_standard_function.rua");
     let mut srv = TestServer::new();
     srv.open(&uri, &source);
     let pp = srv.pp_at_offset(&uri, offset).unwrap();
-    let hover = srv.snapshot().hover(pp).expect("builtin macro hover");
-    assert!(hover.signature().contains("println!"));
-    assert_eq!(
-        hover.documentation(),
-        Some("Print a formatted line to standard output.")
-    );
+    let hover = srv.snapshot().hover(pp).expect("standard function hover");
+    assert!(hover.signature().contains("print"));
+    assert_eq!(hover.documentation(), Some("Print one formatted line."));
+    let target = srv
+        .snapshot()
+        .goto_builtin_definition(pp)
+        .expect("standard function definition");
+    assert_eq!(target.source_name(), "fmt.ruai");
 }
 
 #[test]
@@ -301,8 +300,8 @@ fn result_type_and_variants_hover_and_resolve_in_expressions_and_patterns() {
         "fn inspect(value: Result<String, String>) {\n",
         "    let required = value.expect(\"required result\");\n",
         "    match value {\n",
-        "        Result::Ok(item) => println!(\"{}\", item),\n",
-        "        Result::Err(error) => println!(\"{}\", error),\n",
+        "        Result::Ok(item) => print(\"{}\", item),\n",
+        "        Result::Err(error) => print(\"{}\", error),\n",
         "    }\n",
         "}\n",
     );
@@ -655,7 +654,7 @@ fn hover_shows_local_variable_type_at_use_site() {
 
 #[test]
 fn hover_shows_top_level_chunk_binding_type() {
-    let (source, offset) = extract_marker("let answer = 42;\nprintln!(\"{}\", ans$0wer);");
+    let (source, offset) = extract_marker("let answer = 42;\nprint(\"{}\", ans$0wer);");
     let uri = uri("/test/hover_chunk_binding.rua");
     let mut srv = TestServer::new();
     srv.open(&uri, &source);
@@ -898,7 +897,8 @@ fn hover_cross_file_ruai_function_uses_project_documentation() {
         &api_uri,
         "/// Reads a value from the host.\n///\n/// Returns the current value.\npub fn read_value() -> i64;",
     );
-    let (source, offset) = extract_marker("let value = api::read_$0value();\nprint!(value);");
+    let (source, offset) =
+        extract_marker("let value = api::read_$0value();\nprint(\"{}\", value);");
     srv.open(&main_uri, &source);
 
     let hover = srv

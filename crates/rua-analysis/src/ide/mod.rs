@@ -9,15 +9,20 @@ mod symbol;
 
 use std::{path::Path, sync::Arc};
 
-use rua_core::StdSymbolId;
-use rua_syntax::{Parse, ast::SourceFile};
+use rua_core::{CfgOptions, StdSymbolId, expand_cfg_attributes};
+use rua_syntax::{
+    AstNode, Named, Parse, SyntaxKind,
+    ast::{
+        Attribute as SyntaxAttribute, HasAttributes, Item as SyntaxItem, SourceFile, VariantKind,
+    },
+};
 
 use crate::{
     BaseDb,
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, DefId, DefKind, DefMap,
         Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution, MemberTarget,
-        StdLibraryIndex, StdMemberKind, StdType, Ty,
+        ResolveStrategy, StdFunction, StdLibraryIndex, StdMemberKind, StdType, Ty,
     },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
@@ -29,11 +34,11 @@ pub use crate::diagnostic::{
 pub use closure_iterator::ClosureParameterInfo;
 pub use contract::{
     BuiltinDefinitionTarget, CallHierarchyItem, CompletionInsert, CompletionItem, CompletionKind,
-    CompletionRelevance, FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter,
-    NavigationTarget, ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind,
-    ReferenceResult, RenameError, RenameTarget, SemanticToken, SemanticTokenKind,
-    SemanticTokenModifiers, SignatureHelpInfo, SourceChange, TextEdit, TextRange,
-    TypeHierarchyItem, TypeHint, TypeHintLabelPart, TypeHintTarget, TypeHintTooltip,
+    CompletionRelevance, FileEdit, FilePosition, FileRange, HoverResult, NavigationTarget,
+    ProjectFile, ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult,
+    RenameError, RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers,
+    SignatureHelpInfo, SourceChange, TextEdit, TextRange, TypeHierarchyItem, TypeHint,
+    TypeHintLabelPart, TypeHintTarget, TypeHintTooltip,
 };
 pub use symbol::{DocumentSymbol, WorkspaceSymbol};
 
@@ -87,6 +92,11 @@ struct BuiltinMemberAt {
 
 struct BuiltinTypeAt {
     standard_type: StdType,
+    range: FileRange,
+}
+
+struct StandardFunctionAt {
+    function: StdFunction,
     range: FileRange,
 }
 
@@ -288,6 +298,30 @@ impl Analysis {
         })
     }
 
+    fn standard_function_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<StandardFunctionAt> {
+        let file_id = position.position.file_id;
+        let text = self.db.file_text(file_id)?;
+        let parse = self.db.parse(file_id);
+        let offset = position.position.offset.min(text.len() as u32);
+        let token = completion::token_at_offset(parse.syntax_node(), offset)?;
+        if token.kind() != rua_syntax::SyntaxKind::Ident {
+            return None;
+        }
+        let function = query.member_index.standard_function(token.text())?.clone();
+        let range = token.text_range();
+        Some(StandardFunctionAt {
+            function,
+            range: FileRange::new(
+                file_id,
+                TextRange::new(range.start().into(), range.end().into()),
+            ),
+        })
+    }
+
     /// Test and integration helper for syntax queries during Phase 2.
     pub fn parse(&self, file_id: FileId) -> Arc<Parse<SourceFile>> {
         self.db.parse(file_id)
@@ -312,7 +346,12 @@ impl Analysis {
     }
 
     pub fn diagnostics(&self, file_id: FileId) -> Vec<Diagnostic> {
-        crate::diagnostic::fast_diagnostics(&self.db, self.db.def_map(file_id), file_id)
+        let def_map = self.db.def_map(file_id);
+        let mut diagnostics =
+            crate::diagnostic::fast_diagnostics(&self.db, def_map.clone(), file_id);
+        diagnostics.extend(self.annotation_diagnostics(file_id, &def_map, &CfgOptions::default()));
+        crate::diagnostic::normalize_diagnostics(&mut diagnostics);
+        diagnostics
     }
 
     pub fn diagnostics_in_project(&self, file: ProjectFile) -> Vec<Diagnostic> {
@@ -322,7 +361,164 @@ impl Analysis {
         if def_map.module_for_file(file.file_id).is_none() {
             return Vec::new();
         }
-        crate::diagnostic::fast_diagnostics(&self.db, def_map, file.file_id)
+        let mut diagnostics =
+            crate::diagnostic::fast_diagnostics(&self.db, def_map.clone(), file.file_id);
+        if let Some(project) = self.db.project(file.project_id) {
+            diagnostics.extend(self.annotation_diagnostics(file.file_id, &def_map, project.cfg()));
+        }
+        crate::diagnostic::normalize_diagnostics(&mut diagnostics);
+        diagnostics
+    }
+
+    fn annotation_diagnostics(
+        &self,
+        file_id: FileId,
+        def_map: &DefMap,
+        cfg: &CfgOptions,
+    ) -> Vec<Diagnostic> {
+        let Some(module) = def_map.module_for_file(file_id) else {
+            return Vec::new();
+        };
+        let parse = self.db.parse(file_id);
+        let mut diagnostics = Vec::new();
+        let mut uses =
+            std::collections::BTreeMap::<(u32, u32, DefId), (usize, bool, TextRange)>::new();
+        for attribute in parse
+            .syntax_node()
+            .descendants()
+            .filter_map(SyntaxAttribute::cast)
+        {
+            if !attribute_target_is_active(&attribute, cfg) {
+                continue;
+            }
+            let Ok(core) = attribute.to_core() else {
+                continue;
+            };
+            if matches!(
+                core.name.as_str(),
+                "cfg" | "cfg_attr" | "targets" | "retention" | "repeatable"
+            ) {
+                continue;
+            }
+            let Some(name_token) = attribute_name_tokens(&attribute).last().cloned() else {
+                continue;
+            };
+            let range = rowan_range(name_token.text_range());
+            let segments = core.name.split("::").collect::<Vec<_>>();
+            let Some(definition) =
+                def_map.resolve_path(module, &segments, ResolveStrategy::Lexical)
+            else {
+                diagnostics.push(annotation_diagnostic(
+                    file_id,
+                    range,
+                    DiagnosticCode::AnnotationUnresolved,
+                    format!("unresolved annotation `{}`", core.name),
+                ));
+                continue;
+            };
+            if definition.kind() != DefKind::Annotation {
+                diagnostics.push(annotation_diagnostic(
+                    file_id,
+                    range,
+                    DiagnosticCode::AnnotationUnresolved,
+                    format!("`{}` does not name an annotation", core.name),
+                ));
+                continue;
+            }
+            let target = completion::annotation_target_kind(&attribute);
+            if target.is_none_or(|target| {
+                !completion::annotation_schema_targets(&self.db, definition).contains(target)
+            }) {
+                diagnostics.push(annotation_diagnostic(
+                    file_id,
+                    range,
+                    DiagnosticCode::AnnotationInvalidTarget,
+                    format!("annotation `{}` cannot target this declaration", core.name),
+                ));
+                continue;
+            }
+            let Some(declaration) = completion::annotation_declaration(&self.db, definition) else {
+                continue;
+            };
+            let parameters = declaration
+                .params()
+                .filter_map(|parameter| parameter.name_text())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut provided = std::collections::BTreeSet::new();
+            let argument_ranges = attribute
+                .meta_item()
+                .into_iter()
+                .flat_map(|meta| meta.nested().collect::<Vec<_>>())
+                .map(|meta| {
+                    meta.syntax()
+                        .children_with_tokens()
+                        .filter_map(|element| element.into_token())
+                        .find(|token| !token.kind().is_trivia())
+                        .map_or(range, |token| rowan_range(token.text_range()))
+                })
+                .collect::<Vec<_>>();
+            for (index, item) in core.items.iter().enumerate() {
+                let argument_range = argument_ranges.get(index).copied().unwrap_or(range);
+                let rua_core::MetaItem::NameValue { name, .. } = item else {
+                    diagnostics.push(annotation_diagnostic(
+                        file_id,
+                        argument_range,
+                        DiagnosticCode::AnnotationInvalidArguments,
+                        format!("annotation `{}` requires named arguments", core.name),
+                    ));
+                    continue;
+                };
+                if !provided.insert(name.clone()) {
+                    diagnostics.push(annotation_diagnostic(
+                        file_id,
+                        argument_range,
+                        DiagnosticCode::AnnotationInvalidArguments,
+                        format!("duplicate annotation argument `{name}`"),
+                    ));
+                } else if !parameters.contains(name) {
+                    diagnostics.push(annotation_diagnostic(
+                        file_id,
+                        argument_range,
+                        DiagnosticCode::AnnotationInvalidArguments,
+                        format!("unknown annotation argument `{name}`"),
+                    ));
+                }
+            }
+            for missing in parameters.difference(&provided) {
+                diagnostics.push(annotation_diagnostic(
+                    file_id,
+                    range,
+                    DiagnosticCode::AnnotationInvalidArguments,
+                    format!("missing annotation argument `{missing}`"),
+                ));
+            }
+            let schema_attributes = declaration
+                .attributes()
+                .filter_map(|attribute| attribute.to_core().ok())
+                .collect::<Vec<_>>();
+            let repeatable = schema_attributes
+                .iter()
+                .any(|attribute| attribute.name == "repeatable");
+            let target_range = attribute
+                .syntax()
+                .parent()
+                .map(|target| rowan_range(target.text_range()))
+                .unwrap_or(range);
+            let key = (target_range.start(), target_range.end(), definition.id());
+            let usage = uses.entry(key).or_insert((0, repeatable, range));
+            usage.0 += 1;
+        }
+        for (_, (count, repeatable, range)) in uses {
+            if count > 1 && !repeatable {
+                diagnostics.push(annotation_diagnostic(
+                    file_id,
+                    range,
+                    DiagnosticCode::AnnotationDuplicate,
+                    "annotation is not repeatable".to_string(),
+                ));
+            }
+        }
+        diagnostics
     }
 
     pub fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
@@ -430,12 +626,23 @@ impl Analysis {
     }
 
     pub fn semantic_tokens_in_project(&self, file: ProjectFile) -> Vec<SemanticToken> {
-        self.db
+        let mut tokens = self
+            .db
             .project_def_map(file.project_id)
             .filter(|map| map.module_for_file(file.file_id).is_some())
             .map_or_else(Vec::new, |map| {
                 closure_iterator::semantic_tokens(&self.db, map, file.file_id)
-            })
+            });
+        if let Some(project) = self.db.project(file.project_id) {
+            append_inactive_semantic_tokens(
+                &self.db.parse(file.file_id),
+                file.file_id,
+                project.cfg(),
+                &mut tokens,
+            );
+        }
+        SemanticToken::normalize(&mut tokens);
+        tokens
     }
 
     /// Resolve the callable type, parameter names, and arguments for a
@@ -652,8 +859,28 @@ impl Analysis {
         let query = self.project_query_data(position)?;
         let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
-        if let Some(hover) = self.builtin_macro_hover(position) {
+        if let Some(project) = self.db.project(position.project_id)
+            && let Some(hover) = self.inactive_cfg_hover(position, project.cfg())
+        {
             return Some(hover);
+        }
+
+        if let Some((definition, range)) = self.annotation_definition_at(position, &query) {
+            let signature = completion::annotation_hover_text(&self.db, &definition);
+            let mut hover = HoverResult::new(range, signature);
+            if let Some(context) =
+                definition_hover_context(&query.def_map, &query.member_index, &definition)
+            {
+                hover = hover.with_context(context);
+            }
+            if let Some(documentation) = definition.documentation() {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
+        }
+
+        if let Some((_, usage, signature)) = self.annotation_parameter_at(position, &query) {
+            return Some(HoverResult::new(usage, signature));
         }
 
         if let Some(member) = self.builtin_member_at(position, &query) {
@@ -695,7 +922,11 @@ impl Analysis {
         // 2. Try item/definition hover.
         let def = semantics.find_def_at(position.position);
         if let Some(definition) = def {
-            let signature = item_hover_text(&definition, &query.member_index, &query.def_map);
+            let signature = if definition.kind() == DefKind::Annotation {
+                completion::annotation_hover_text(&self.db, &definition)
+            } else {
+                item_hover_text(&definition, &query.member_index, &query.def_map)
+            };
             let mut hover = HoverResult::new(
                 FileRange::new(definition.file_id(), definition.name_range()),
                 signature,
@@ -739,6 +970,18 @@ impl Analysis {
             }
         }
 
+        if let Some(standard_function) = self.standard_function_at(position, &query) {
+            let mut hover = HoverResult::new(
+                standard_function.range,
+                standard_function.function.signature(),
+            )
+            .with_context(standard_function_context(&standard_function.function));
+            if let Some(documentation) = standard_function.function.documentation() {
+                hover = hover.with_documentation(documentation);
+            }
+            return Some(hover);
+        }
+
         if let Some(standard_type) = self.builtin_type_at(position, &query) {
             let mut hover = HoverResult::new(
                 standard_type.range,
@@ -754,30 +997,62 @@ impl Analysis {
         None
     }
 
-    fn builtin_macro_hover(&self, position: ProjectPosition) -> Option<HoverResult> {
-        let file_id = position.position.file_id;
-        let text = self.db.file_text(file_id)?;
-        let bytes = text.as_bytes();
-        let offset = (position.position.offset as usize).min(bytes.len());
-        let mut start = offset;
-        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-            start -= 1;
-        }
-        let mut end = offset;
-        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-            end += 1;
-        }
-        if start == end || bytes.get(end) != Some(&b'!') {
-            return None;
-        }
-        let spec = rua_core::builtin_macro(&text[start..end])?;
-        Some(
-            HoverResult::new(
-                FileRange::new(file_id, TextRange::new(start as u32, end as u32)),
-                spec.signature,
+    fn inactive_cfg_hover(
+        &self,
+        position: ProjectPosition,
+        cfg: &CfgOptions,
+    ) -> Option<HoverResult> {
+        let parse = self.db.parse(position.position.file_id);
+        let token = completion::token_at_offset(parse.syntax_node(), position.position.offset)?;
+        for node in token.parent_ancestors().filter(|node| {
+            matches!(
+                node.kind(),
+                SyntaxKind::AnnotationDecl
+                    | SyntaxKind::FnDecl
+                    | SyntaxKind::StructDecl
+                    | SyntaxKind::EnumDecl
+                    | SyntaxKind::TraitDecl
+                    | SyntaxKind::ImplDecl
+                    | SyntaxKind::ExternBlock
+                    | SyntaxKind::UseDecl
+                    | SyntaxKind::FieldDecl
+                    | SyntaxKind::EnumVariant
+                    | SyntaxKind::TraitMethod
+                    | SyntaxKind::ExternFn
             )
-            .with_documentation(spec.documentation),
-        )
+        }) {
+            let attributes = node
+                .children()
+                .filter_map(SyntaxAttribute::cast)
+                .collect::<Vec<_>>();
+            let core = attributes
+                .iter()
+                .map(|attribute| attribute.to_core())
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let expanded = expand_cfg_attributes(&core, cfg).ok()?;
+            if expanded.active {
+                continue;
+            }
+            let predicate = attributes
+                .iter()
+                .find(|attribute| {
+                    attribute.to_core().is_ok_and(|attribute| {
+                        matches!(attribute.name.as_str(), "cfg" | "cfg_attr")
+                    })
+                })
+                .map(|attribute| attribute.syntax().text().to_string().trim().to_string())
+                .unwrap_or_else(|| "cfg".to_string());
+            let range = token.text_range();
+            return Some(HoverResult::new(
+                FileRange::new(
+                    position.position.file_id,
+                    TextRange::new(range.start().into(), range.end().into()),
+                ),
+                format!("inactive: `{predicate}` is false for the current project configuration"),
+            ));
+        }
+        None
     }
 
     /// Hover for `receiver.field` or `receiver.method()`.
@@ -856,6 +1131,16 @@ impl Analysis {
         let query = self.project_query_data(position)?;
         let semantics = Semantics::new(Arc::clone(&self.db), query.def_map.clone());
 
+        if let Some((definition, _)) = self.annotation_definition_at(position, &query) {
+            return Some(NavigationTarget::new(
+                FileRange::new(definition.file_id(), definition.name_range()),
+                None,
+            ));
+        }
+        if let Some((target, _, _)) = self.annotation_parameter_at(position, &query) {
+            return Some(NavigationTarget::new(target, None));
+        }
+
         // 1. Prefer the stable member identity recorded by inference. This
         // includes associated functions declared in `impl` blocks.
         if let Some((definition, _)) = self.definition_member_at(position, &query) {
@@ -897,6 +1182,12 @@ impl Analysis {
             return Some(BuiltinDefinitionTarget::new(
                 source.source_path,
                 source.range,
+            ));
+        }
+        if let Some(function) = self.standard_function_at(position, &query) {
+            return Some(BuiltinDefinitionTarget::new(
+                function.function.source_path(),
+                function.function.name_range(),
             ));
         }
         let standard_type = self.builtin_type_at(position, &query)?.standard_type;
@@ -981,6 +1272,9 @@ impl Analysis {
         position: ProjectPosition,
         query: &ProjectQueryData,
     ) -> Option<Definition> {
+        if let Some((definition, _)) = self.annotation_definition_at(position, query) {
+            return Some(definition);
+        }
         if let Some((definition, _)) = self.definition_member_at(position, query) {
             return Some(definition);
         }
@@ -995,6 +1289,104 @@ impl Analysis {
             return query.def_map.definition(def_id).cloned();
         }
         Semantics::new(Arc::clone(&self.db), query.def_map.clone()).find_def_at(position.position)
+    }
+
+    fn annotation_definition_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<(Definition, FileRange)> {
+        let parse = self.db.parse(position.position.file_id);
+        let root = parse.syntax_node();
+        let token = completion::token_at_offset(root, position.position.offset)?;
+        let attribute = token.parent_ancestors().find_map(SyntaxAttribute::cast)?;
+        let name_tokens = attribute_name_tokens(&attribute);
+        if !name_tokens.iter().any(|candidate| candidate == &token) {
+            return None;
+        }
+        let core = attribute.to_core().ok()?;
+        if matches!(
+            core.name.as_str(),
+            "cfg" | "cfg_attr" | "targets" | "retention" | "repeatable"
+        ) {
+            return None;
+        }
+        let module = query.def_map.module_for_file(position.position.file_id)?;
+        let segments = core.name.split("::").collect::<Vec<_>>();
+        let definition = query
+            .def_map
+            .resolve_path(module, &segments, ResolveStrategy::Lexical)?;
+        if definition.kind() != DefKind::Annotation {
+            return None;
+        }
+        let range = token.text_range();
+        Some((
+            definition.clone(),
+            FileRange::new(
+                position.position.file_id,
+                TextRange::new(range.start().into(), range.end().into()),
+            ),
+        ))
+    }
+
+    fn annotation_parameter_at(
+        &self,
+        position: ProjectPosition,
+        query: &ProjectQueryData,
+    ) -> Option<(FileRange, FileRange, String)> {
+        let parse = self.db.parse(position.position.file_id);
+        let token = completion::token_at_offset(parse.syntax_node(), position.position.offset)?;
+        let attribute = token.parent_ancestors().find_map(SyntaxAttribute::cast)?;
+        let argument = token
+            .parent_ancestors()
+            .find_map(rua_syntax::ast::MetaItem::cast)?;
+        let argument_name = argument
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|candidate| !candidate.kind().is_trivia())?;
+        if argument_name != token
+            || !argument
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|candidate| candidate.kind() == SyntaxKind::Eq)
+        {
+            return None;
+        }
+        let core = attribute.to_core().ok()?;
+        let module = query.def_map.module_for_file(position.position.file_id)?;
+        let segments = core.name.split("::").collect::<Vec<_>>();
+        let definition = query
+            .def_map
+            .resolve_path(module, &segments, ResolveStrategy::Lexical)?;
+        if definition.kind() != DefKind::Annotation {
+            return None;
+        }
+        let declaration = completion::annotation_declaration(&self.db, definition)?;
+        let parameter = declaration
+            .params()
+            .find(|parameter| parameter.name_text().as_deref() == Some(token.text()))?;
+        let parameter_name = parameter.name()?;
+        let parameter_type = parameter
+            .ty()
+            .map_or_else(|| "?".to_string(), |ty| ty.syntax().text().to_string());
+        let usage_range = token.text_range();
+        let definition_range = parameter_name.text_range();
+        Some((
+            FileRange::new(
+                definition.file_id(),
+                TextRange::new(
+                    definition_range.start().into(),
+                    definition_range.end().into(),
+                ),
+            ),
+            FileRange::new(
+                position.position.file_id,
+                TextRange::new(usage_range.start().into(), usage_range.end().into()),
+            ),
+            format!("annotation parameter {}: {parameter_type}", token.text()),
+        ))
     }
 
     /// Go to implementation(s) of a trait method.
@@ -1093,6 +1485,22 @@ impl Analysis {
         if let Some(definition) = self.definition_at(position, &query) {
             let target_id = definition.id();
             let target_file = definition.file_id();
+            if definition.kind() == DefKind::Annotation {
+                let mut results = self.annotation_references(
+                    position.project_id,
+                    &def_map,
+                    target_id,
+                    &mut is_cancelled,
+                )?;
+                if include_declaration {
+                    results.push(ReferenceResult::new(
+                        FileRange::new(target_file, definition.name_range()),
+                        ReferenceKind::Declaration,
+                    ));
+                }
+                ReferenceResult::normalize(&mut results);
+                return Some(results);
+            }
             let Some(index) = self
                 .db
                 .project_reference_index_cancellable(position.project_id, &mut is_cancelled)
@@ -1131,6 +1539,71 @@ impl Analysis {
         }
 
         Some(Vec::new())
+    }
+
+    fn annotation_references(
+        &self,
+        project_id: ProjectId,
+        def_map: &DefMap,
+        target: DefId,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Option<Vec<ReferenceResult>> {
+        let cfg = self.db.project(project_id)?.cfg();
+        let mut files = def_map
+            .modules()
+            .filter_map(|module| module.file_id())
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        let mut results = Vec::new();
+        for file_id in files {
+            if is_cancelled() {
+                return None;
+            }
+            let Some(module) = def_map.module_for_file(file_id) else {
+                continue;
+            };
+            let parse = self.db.parse(file_id);
+            for attribute in parse
+                .syntax_node()
+                .descendants()
+                .filter_map(SyntaxAttribute::cast)
+            {
+                if !attribute_target_is_active(&attribute, cfg) {
+                    continue;
+                }
+                let Ok(core) = attribute.to_core() else {
+                    continue;
+                };
+                if matches!(
+                    core.name.as_str(),
+                    "cfg" | "cfg_attr" | "targets" | "retention" | "repeatable"
+                ) {
+                    continue;
+                }
+                let segments = core.name.split("::").collect::<Vec<_>>();
+                let Some(definition) =
+                    def_map.resolve_path(module, &segments, ResolveStrategy::Lexical)
+                else {
+                    continue;
+                };
+                if definition.id() != target {
+                    continue;
+                }
+                let Some(token) = attribute_name_tokens(&attribute).last().cloned() else {
+                    continue;
+                };
+                let range = token.text_range();
+                results.push(ReferenceResult::new(
+                    FileRange::new(
+                        file_id,
+                        TextRange::new(range.start().into(), range.end().into()),
+                    ),
+                    ReferenceKind::Read,
+                ));
+            }
+        }
+        Some(results)
     }
 
     /// Check whether the symbol at the cursor can be renamed.
@@ -1410,6 +1883,222 @@ impl Analysis {
     }
 }
 
+fn append_inactive_semantic_tokens(
+    parse: &Parse<SourceFile>,
+    file_id: FileId,
+    cfg: &CfgOptions,
+    output: &mut Vec<SemanticToken>,
+) {
+    for item in parse.tree().items() {
+        if !syntax_attributes_active(item.attributes(), cfg) {
+            append_inactive_node_tokens(item.syntax(), file_id, output);
+            continue;
+        }
+        match item {
+            SyntaxItem::Struct(structure) => {
+                for field in structure
+                    .field_list()
+                    .into_iter()
+                    .flat_map(|list| list.fields().collect::<Vec<_>>())
+                {
+                    if !syntax_attributes_active(field.attributes(), cfg) {
+                        append_inactive_node_tokens(field.syntax(), file_id, output);
+                    }
+                }
+            }
+            SyntaxItem::Enum(enumeration) => {
+                for variant in enumeration
+                    .variant_list()
+                    .into_iter()
+                    .flat_map(|list| list.variants().collect::<Vec<_>>())
+                {
+                    if !syntax_attributes_active(variant.attributes(), cfg) {
+                        append_inactive_node_tokens(variant.syntax(), file_id, output);
+                        continue;
+                    }
+                    if variant.variant_kind() == VariantKind::Struct {
+                        for field in variant
+                            .field_list()
+                            .into_iter()
+                            .flat_map(|list| list.fields().collect::<Vec<_>>())
+                        {
+                            if !syntax_attributes_active(field.attributes(), cfg) {
+                                append_inactive_node_tokens(field.syntax(), file_id, output);
+                            }
+                        }
+                    }
+                }
+            }
+            SyntaxItem::Trait(trait_decl) => {
+                for method in trait_decl.methods() {
+                    if !syntax_attributes_active(method.attributes(), cfg) {
+                        append_inactive_node_tokens(method.syntax(), file_id, output);
+                    }
+                }
+            }
+            SyntaxItem::Impl(implementation) => {
+                for method in implementation.methods() {
+                    if !syntax_attributes_active(method.attributes(), cfg) {
+                        append_inactive_node_tokens(method.syntax(), file_id, output);
+                    }
+                }
+            }
+            SyntaxItem::Extern(block) => {
+                for function in block.fns() {
+                    if !syntax_attributes_active(function.attributes(), cfg) {
+                        append_inactive_node_tokens(function.syntax(), file_id, output);
+                    }
+                }
+            }
+            SyntaxItem::Annotation(_) | SyntaxItem::Fn(_) | SyntaxItem::Use(_) => {}
+        }
+    }
+}
+
+fn rowan_range(range: rowan::TextRange) -> TextRange {
+    TextRange::new(range.start().into(), range.end().into())
+}
+
+fn annotation_diagnostic(
+    file_id: FileId,
+    range: TextRange,
+    code: DiagnosticCode,
+    message: String,
+) -> Diagnostic {
+    Diagnostic::new(
+        file_id,
+        range,
+        message,
+        crate::diagnostic::DiagnosticOrigin::FastAnalysis,
+    )
+    .with_code(code)
+    .with_source(crate::diagnostic::DiagnosticSource::Type)
+}
+
+fn syntax_attributes_active(
+    attributes: impl Iterator<Item = SyntaxAttribute>,
+    cfg: &CfgOptions,
+) -> bool {
+    let attributes = attributes
+        .map(|attribute| attribute.to_core())
+        .collect::<Result<Vec<_>, _>>();
+    attributes
+        .ok()
+        .and_then(|attributes| expand_cfg_attributes(&attributes, cfg).ok())
+        .is_none_or(|expanded| expanded.active)
+}
+
+fn append_inactive_node_tokens(
+    node: &rua_syntax::SyntaxNode,
+    file_id: FileId,
+    output: &mut Vec<SemanticToken>,
+) {
+    for token in node
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+    {
+        let Some(kind) = inactive_token_kind(token.kind()) else {
+            continue;
+        };
+        let start: u32 = token.text_range().start().into();
+        let end: u32 = token.text_range().end().into();
+        if start == end {
+            continue;
+        }
+        let range = FileRange::new(file_id, TextRange::new(start, end));
+        if let Some(existing) = output
+            .iter_mut()
+            .find(|existing| existing.file_range() == range)
+        {
+            existing.add_modifiers(SemanticTokenModifiers::INACTIVE);
+        } else {
+            output.push(SemanticToken::new(
+                range,
+                kind,
+                SemanticTokenModifiers::INACTIVE,
+            ));
+        }
+    }
+}
+
+fn attribute_name_tokens(attribute: &SyntaxAttribute) -> Vec<rua_syntax::SyntaxToken> {
+    attribute.meta_item().map_or_else(Vec::new, |meta| {
+        meta.syntax()
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|candidate| !candidate.kind().is_trivia())
+            .take_while(|candidate| {
+                !matches!(candidate.kind(), SyntaxKind::Eq | SyntaxKind::LParen)
+            })
+            .collect()
+    })
+}
+
+fn attribute_target_is_active(attribute: &SyntaxAttribute, cfg: &CfgOptions) -> bool {
+    attribute
+        .syntax()
+        .parent()
+        .into_iter()
+        .chain(attribute.syntax().ancestors().skip(2))
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                SyntaxKind::AnnotationDecl
+                    | SyntaxKind::FnDecl
+                    | SyntaxKind::StructDecl
+                    | SyntaxKind::EnumDecl
+                    | SyntaxKind::TraitDecl
+                    | SyntaxKind::ImplDecl
+                    | SyntaxKind::ExternBlock
+                    | SyntaxKind::UseDecl
+                    | SyntaxKind::FieldDecl
+                    | SyntaxKind::EnumVariant
+                    | SyntaxKind::TraitMethod
+                    | SyntaxKind::ExternFn
+            )
+        })
+        .all(|node| {
+            syntax_attributes_active(node.children().filter_map(SyntaxAttribute::cast), cfg)
+        })
+}
+
+fn inactive_token_kind(kind: SyntaxKind) -> Option<SemanticTokenKind> {
+    Some(match kind {
+        SyntaxKind::Whitespace | SyntaxKind::Eof => return None,
+        SyntaxKind::LineComment | SyntaxKind::BlockComment => SemanticTokenKind::Comment,
+        SyntaxKind::Ident | SyntaxKind::KwSelf => SemanticTokenKind::Variable,
+        SyntaxKind::Str => SemanticTokenKind::String,
+        SyntaxKind::Int | SyntaxKind::Float => SemanticTokenKind::Number,
+        SyntaxKind::KwFn
+        | SyntaxKind::KwLet
+        | SyntaxKind::KwMut
+        | SyntaxKind::KwIf
+        | SyntaxKind::KwElse
+        | SyntaxKind::KwWhile
+        | SyntaxKind::KwLoop
+        | SyntaxKind::KwFor
+        | SyntaxKind::KwIn
+        | SyntaxKind::KwReturn
+        | SyntaxKind::KwBreak
+        | SyntaxKind::KwContinue
+        | SyntaxKind::KwDyn
+        | SyntaxKind::KwTrue
+        | SyntaxKind::KwFalse
+        | SyntaxKind::KwStruct
+        | SyntaxKind::KwEnum
+        | SyntaxKind::KwTrait
+        | SyntaxKind::KwImpl
+        | SyntaxKind::KwPub
+        | SyntaxKind::KwUse
+        | SyntaxKind::KwMod
+        | SyntaxKind::KwAs
+        | SyntaxKind::KwMatch
+        | SyntaxKind::KwExtern => SemanticTokenKind::Keyword,
+        kind if (kind as u16) < (SyntaxKind::SourceFile as u16) => SemanticTokenKind::Operator,
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1665,6 +2354,17 @@ fn builtin_member_context(index: &MemberIndex, id: StdSymbolId) -> Option<String
 
 fn standard_type_context(standard_type: &StdType) -> String {
     standard_context(standard_type.source_path(), standard_type.name())
+}
+
+fn standard_function_context(function: &StdFunction) -> String {
+    rua_project::module_path_from_relative_file(Path::new(function.source_path()))
+        .ok()
+        .flatten()
+        .filter(|segments| !segments.is_empty())
+        .map_or_else(
+            || "std".to_string(),
+            |segments| format!("std::{}", segments.join("::")),
+        )
 }
 
 fn standard_context(source_path: &str, owner: &str) -> String {

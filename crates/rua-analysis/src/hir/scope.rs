@@ -512,10 +512,9 @@ impl<'body> ScopeBuilder<'body> {
                     self.visit_expr(entry.value(), scope, LocalUseKind::Read);
                 }
             }
-            Expr::MacroCall { macro_name, args } => {
-                self.visit_non_local(*macro_name, scope);
-                for argument in args {
-                    self.visit_expr(*argument, scope, LocalUseKind::Read);
+            Expr::VecLiteral { elements } => {
+                for element in elements {
+                    self.visit_expr(*element, scope, LocalUseKind::Read);
                 }
             }
             Expr::Block(_) => {}

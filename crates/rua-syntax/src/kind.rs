@@ -100,6 +100,7 @@ pub enum SyntaxKind {
     /// Root node wrapping the whole file.
     SourceFile,
     // Items
+    AnnotationDecl,
     FnDecl,
     StructDecl,
     EnumDecl,
@@ -107,6 +108,9 @@ pub enum SyntaxKind {
     ImplDecl,
     UseDecl,
     ExternBlock,
+    Attribute,
+    MetaItem,
+    MetaValue,
     // Item pieces
     ParamList,
     Param,
@@ -124,6 +128,7 @@ pub enum SyntaxKind {
     RefType,
     TupleType,
     CallableType,
+    NeverType,
     TypeArgs,
     // Statements
     Block,
@@ -157,7 +162,6 @@ pub enum SyntaxKind {
     FieldInit,
     ArrayExpr,
     ClosureExpr,
-    MacroCallExpr,
     ArgList,
     // Patterns
     Pattern,

@@ -11,6 +11,6 @@ phase4a/compile-fail/iterator_non_iterable_source.rua
 phase4a/compile-fail/iterator_map_arg_not_closure.rua
   E0200 file=phase4a/compile-fail/iterator_map_arg_not_closure.rua range=34..36 arguments=[line="2", message="iterator map argument must be a closure"]
 phase4a/compile-fail/iterator_filter_not_bool.rua
-  E0200 file=phase4a/compile-fail/iterator_filter_not_bool.rua range=75..92 arguments=[line="4", message="iterator filter predicate must be `bool`, found `i64`"]
+  E0200 file=phase4a/compile-fail/iterator_filter_not_bool.rua range=71..88 arguments=[line="4", message="iterator filter predicate must be `bool`, found `i64`"]
 phase4a/compile-fail/iterator_collect_mismatch.rua
-  E0200 file=phase4a/compile-fail/iterator_collect_mismatch.rua range=29..92 arguments=[line="2", message="collect target element type `String` is incompatible with iterator item `i64`"]
+  E0200 file=phase4a/compile-fail/iterator_collect_mismatch.rua range=29..88 arguments=[line="2", message="collect target element type `String` is incompatible with iterator item `i64`"]

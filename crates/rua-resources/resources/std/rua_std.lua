@@ -7,6 +7,7 @@ local iter = {}
 local vec = {}
 local map = {}
 local string_api = {}
+local annotations = { ABI_VERSION = 1, entries = {} }
 
 std.fmt = fmt
 std.number = number
@@ -15,6 +16,47 @@ std.iter = iter
 std.vec = vec
 std.map = map
 std.string = string_api
+std.annotations = annotations
+
+local annotations_initialized = false
+
+function annotations.set_entries(entries)
+    annotations.entries = entries
+    annotations_initialized = true
+end
+
+local function ensure_annotations()
+    if annotations_initialized then return end
+    annotations_initialized = true
+    pcall(require, "rua_annotations")
+end
+
+function annotations.find(annotation)
+    ensure_annotations()
+    if type(annotation) == "table" then annotation = annotation.key end
+    local found = { n = 0 }
+    for _, entry in ipairs(annotations.entries) do
+        if entry.annotation == annotation then
+            found[found.n] = entry
+            found.n = found.n + 1
+        end
+    end
+    return vec.from_table(found)
+end
+
+function annotations.load(entry)
+    local target = require(entry.target.module)
+    local path = entry.target.path
+    local last = #path
+    if entry.target.kind == "field" or entry.target.kind == "variant_field" then
+        last = last - 1
+    end
+    for index = 1, last do target = target[path[index]] end
+    if last < #path then
+        return { owner = target, member = path[#path], kind = entry.target.kind }
+    end
+    return target
+end
 
 function fmt.format(template, ...)
     local arguments = { ... }
@@ -29,15 +71,42 @@ function fmt.format(template, ...)
 end
 
 function fmt.print(template, ...)
-    io.write(fmt.format(template, ...))
-end
-
-function fmt.println(template, ...)
     print(fmt.format(template, ...))
 end
 
-function fmt.panic(message)
-    error(message, 2)
+function fmt.panic(template, ...)
+    error(fmt.format(template, ...), 2)
+end
+
+function fmt.assert(condition, message, ...)
+    if condition then return end
+    if message == nil then error("assertion failed", 2) end
+    error(fmt.format(message, ...), 2)
+end
+
+function fmt.assert_eq(left, right)
+    if left ~= right then
+        error("assertion failed: left != right", 2)
+    end
+end
+
+function fmt.assert_ne(left, right)
+    if left == right then
+        error("assertion failed: left == right", 2)
+    end
+end
+
+
+function fmt.unreachable()
+    error("entered unreachable code", 2)
+end
+
+function fmt.unimplemented()
+    error("not implemented", 2)
+end
+
+function fmt.todo()
+    error("not yet implemented", 2)
 end
 
 function number.idiv(left, right)

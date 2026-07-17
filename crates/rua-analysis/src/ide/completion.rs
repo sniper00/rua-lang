@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
-use rua_core::{BUILTIN_MACROS, MacroDelimiter as BuiltinMacroDelimiter};
-use rua_syntax::{SyntaxKind, SyntaxToken};
+use rua_syntax::{
+    AstNode, Named, SyntaxKind, SyntaxToken,
+    ast::{AnnotationDecl, Attribute as SyntaxAttribute, HasAttributes},
+};
 
 use crate::{
     BaseDb,
@@ -18,7 +20,7 @@ use crate::{
 
 use super::{
     CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, FilePosition, FileRange,
-    MacroDelimiter, ProjectPosition,
+    ProjectPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -274,6 +276,17 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     let in_type_pos = ctx.in_type_position || token.is_some_and(is_type_position);
     let in_expr_context = token.is_some_and(is_expression_context);
 
+    if let Some(attribute) = annotation_attribute_at(ctx) {
+        if annotation_cursor_is_in_arguments(&attribute, offset) {
+            complete_annotation_arguments(ctx, &attribute, &mut items, &mut seen);
+        } else {
+            complete_annotation_names(ctx, &attribute, &mut items, &mut seen);
+        }
+        apply_replacement_ranges(&mut items, partial_range);
+        CompletionItem::normalize(&mut items);
+        return items;
+    }
+
     // Context-sensitive completions (only fire inside specific AST nodes).
     complete_match_variants(
         db,
@@ -340,13 +353,272 @@ fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
     );
     complete_builtin_types(member_index, token, &mut items, &mut seen, in_type_pos);
     complete_builtin_constructors(&mut items, &mut seen, in_type_pos);
-    complete_builtin_macros(&mut items, &mut seen, in_type_pos);
+    complete_standard_functions(member_index, &mut items, &mut seen, in_type_pos);
 
     // Post-processing.
     apply_type_compat_boost(db, def_map, position, offset, &mut items);
     apply_replacement_ranges(&mut items, partial_range);
     CompletionItem::normalize(&mut items);
     items
+}
+
+fn annotation_attribute_at(ctx: &CompletionContext<'_>) -> Option<SyntaxAttribute> {
+    ctx.token
+        .as_ref()?
+        .parent_ancestors()
+        .find_map(SyntaxAttribute::cast)
+}
+
+fn annotation_cursor_is_in_arguments(attribute: &SyntaxAttribute, offset: u32) -> bool {
+    attribute
+        .meta_item()
+        .and_then(|meta| {
+            meta.syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .find(|token| token.kind() == SyntaxKind::LParen)
+        })
+        .is_some_and(|left| u32::from(left.text_range().end()) <= offset)
+}
+
+fn complete_annotation_names(
+    ctx: &CompletionContext<'_>,
+    attribute: &SyntaxAttribute,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let target = annotation_target_kind(attribute);
+    for builtin in ["cfg", "cfg_attr"] {
+        if seen.insert(builtin.to_string()) {
+            items.push(
+                CompletionItem::new(builtin, CompletionKind::Keyword)
+                    .with_detail(format!("built-in attribute `{builtin}`")),
+            );
+        }
+    }
+    if target == Some("annotation") {
+        for builtin in ["targets", "retention", "repeatable"] {
+            if seen.insert(builtin.to_string()) {
+                items.push(
+                    CompletionItem::new(builtin, CompletionKind::Keyword)
+                        .with_detail(format!("annotation schema attribute `{builtin}`")),
+                );
+            }
+        }
+    }
+    let Some(current_module) = module_at_position(&ctx.def_map, ctx.position.file_id, ctx.offset)
+    else {
+        return;
+    };
+    for definition in ctx
+        .def_map
+        .definitions()
+        .filter(|definition| definition.kind() == DefKind::Annotation)
+    {
+        if definition.module_id() != current_module
+            && definition.visibility() != crate::hir::Visibility::Public
+        {
+            continue;
+        }
+        if let Some(target) = target
+            && !annotation_schema_targets(ctx.db, definition).contains(target)
+        {
+            continue;
+        }
+        if !seen.insert(definition.name().to_string()) {
+            continue;
+        }
+        let mut item = CompletionItem::new(definition.name(), CompletionKind::Annotation)
+            .with_detail(annotation_signature(ctx.db, definition))
+            .with_target(FileRange::new(
+                definition.file_id(),
+                definition.name_range(),
+            ));
+        if let Some(documentation) = definition.documentation() {
+            item = item.with_documentation(documentation);
+        }
+        if definition.module_id() != current_module
+            && let Some(module_name) = ctx
+                .def_map
+                .module(definition.module_id())
+                .and_then(|module| module.name())
+        {
+            item = item.with_import_path(format!("use {module_name}::{};", definition.name()));
+        }
+        items.push(item);
+    }
+}
+
+fn complete_annotation_arguments(
+    ctx: &CompletionContext<'_>,
+    attribute: &SyntaxAttribute,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let name = super::attribute_name_tokens(attribute)
+        .iter()
+        .map(|token| token.text())
+        .collect::<String>();
+    let module = match module_at_position(&ctx.def_map, ctx.position.file_id, ctx.offset) {
+        Some(module) => module,
+        None => return,
+    };
+    let segments = name.split("::").collect::<Vec<_>>();
+    let Some(definition) = ctx
+        .def_map
+        .resolve_path(module, &segments, crate::hir::ResolveStrategy::Lexical)
+        .filter(|definition| definition.kind() == DefKind::Annotation)
+    else {
+        return;
+    };
+    let provided = attribute
+        .to_core()
+        .ok()
+        .into_iter()
+        .flat_map(|attribute| attribute.items)
+        .filter_map(|item| match item {
+            rua_core::MetaItem::NameValue { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let Some(declaration) = annotation_declaration(ctx.db, definition) else {
+        return;
+    };
+    for parameter in declaration.params() {
+        let Some(name) = parameter.name_text() else {
+            continue;
+        };
+        if provided.contains(&name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        let detail = parameter.ty().map_or_else(
+            || format!("{name}: ?"),
+            |ty| format!("{name}: {}", ty.syntax().text()),
+        );
+        items.push(
+            CompletionItem::new(name.clone(), CompletionKind::Field)
+                .with_detail(detail)
+                .with_insert(CompletionInsert::Snippet(format!("{name} = $0"))),
+        );
+    }
+}
+
+pub(crate) fn annotation_target_kind(attribute: &SyntaxAttribute) -> Option<&'static str> {
+    let target = attribute.syntax().parent()?;
+    Some(match target.kind() {
+        SyntaxKind::AnnotationDecl => "annotation",
+        SyntaxKind::FnDecl => {
+            if target
+                .parent()
+                .is_some_and(|parent| parent.kind() == SyntaxKind::ImplDecl)
+            {
+                "method"
+            } else {
+                "function"
+            }
+        }
+        SyntaxKind::StructDecl => "struct",
+        SyntaxKind::EnumDecl => "enum",
+        SyntaxKind::FieldDecl => "field",
+        SyntaxKind::EnumVariant => "variant",
+        SyntaxKind::TraitMethod => "method",
+        SyntaxKind::ExternFn => "extern_function",
+        _ => return None,
+    })
+}
+
+pub(crate) fn annotation_schema_targets(
+    db: &Arc<BaseDb>,
+    definition: &Definition,
+) -> std::collections::BTreeSet<String> {
+    annotation_declaration(db, definition)
+        .into_iter()
+        .flat_map(|declaration| declaration.attributes().collect::<Vec<_>>())
+        .filter_map(|attribute| attribute.to_core().ok())
+        .find(|attribute| attribute.name == "targets")
+        .into_iter()
+        .flat_map(|attribute| attribute.items)
+        .filter_map(|item| match item {
+            rua_core::MetaItem::Word(name) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn annotation_signature(db: &Arc<BaseDb>, definition: &Definition) -> String {
+    let Some(declaration) = annotation_declaration(db, definition) else {
+        return format!("annotation {}", definition.name());
+    };
+    let parameters = declaration
+        .params()
+        .map(|parameter| {
+            let name = parameter.name_text().unwrap_or_else(|| "?".to_string());
+            let ty = parameter
+                .ty()
+                .map_or_else(|| "?".to_string(), |ty| ty.syntax().text().to_string());
+            format!("{name}: {ty}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("annotation {}({parameters})", definition.name())
+}
+
+pub(crate) fn annotation_hover_text(db: &Arc<BaseDb>, definition: &Definition) -> String {
+    let signature = annotation_signature(db, definition);
+    let Some(declaration) = annotation_declaration(db, definition) else {
+        return signature;
+    };
+    let attributes = declaration
+        .attributes()
+        .filter_map(|attribute| attribute.to_core().ok())
+        .collect::<Vec<_>>();
+    let targets = attributes
+        .iter()
+        .find(|attribute| attribute.name == "targets")
+        .into_iter()
+        .flat_map(|attribute| &attribute.items)
+        .filter_map(|item| match item {
+            rua_core::MetaItem::Word(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let retention = attributes
+        .iter()
+        .find(|attribute| attribute.name == "retention")
+        .and_then(|attribute| attribute.items.first())
+        .and_then(|item| match item {
+            rua_core::MetaItem::Word(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .unwrap_or("build");
+    let repeatable = attributes
+        .iter()
+        .any(|attribute| attribute.name == "repeatable");
+    format!(
+        "{signature}\ntargets: {}\nretention: {retention}\nrepeatable: {repeatable}",
+        if targets.is_empty() {
+            "<none>"
+        } else {
+            &targets
+        }
+    )
+}
+
+pub(crate) fn annotation_declaration(
+    db: &Arc<BaseDb>,
+    definition: &Definition,
+) -> Option<AnnotationDecl> {
+    db.parse(definition.file_id())
+        .syntax_node()
+        .descendants()
+        .filter_map(AnnotationDecl::cast)
+        .find(|declaration| {
+            declaration.name().is_some_and(|name| {
+                let range = name.text_range();
+                TextRange::new(range.start().into(), range.end().into()) == definition.name_range()
+            })
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +803,7 @@ fn complete_module_defs(
         }
         if matches!(
             definition.kind(),
-            DefKind::Chunk | DefKind::Field | DefKind::Variant
+            DefKind::Chunk | DefKind::Annotation | DefKind::Field | DefKind::Variant
         ) {
             continue;
         }
@@ -709,7 +981,8 @@ fn complete_builtin_constructors(
     }
 }
 
-fn complete_builtin_macros(
+fn complete_standard_functions(
+    member_index: &MemberIndex,
     items: &mut Vec<CompletionItem>,
     seen: &mut std::collections::HashSet<String>,
     in_type_pos: bool,
@@ -717,28 +990,29 @@ fn complete_builtin_macros(
     if in_type_pos {
         return;
     }
-    for spec in BUILTIN_MACROS {
-        if seen.insert(spec.name.to_string()) {
-            items.push(
-                CompletionItem::new(format!("{}!", spec.name), CompletionKind::Macro)
-                    .with_detail(format!("{} -> {}", spec.signature, spec.return_type))
-                    .with_documentation(spec.documentation)
-                    .with_lookup(spec.name.to_string())
-                    .with_insert(CompletionInsert::MacroCall {
-                        name: spec.name.to_string(),
-                        delimiter: macro_delimiter(spec.delimiter),
-                    })
-                    .with_relevance(CompletionRelevance::builtin_macro()),
-            );
+    for function in member_index.standard_functions() {
+        if !seen.insert(function.name().to_string()) {
+            continue;
         }
-    }
-}
-
-const fn macro_delimiter(delimiter: BuiltinMacroDelimiter) -> MacroDelimiter {
-    match delimiter {
-        BuiltinMacroDelimiter::Parentheses => MacroDelimiter::Parentheses,
-        BuiltinMacroDelimiter::Brackets => MacroDelimiter::Brackets,
-        BuiltinMacroDelimiter::Braces => MacroDelimiter::Braces,
+        let params = function
+            .params()
+            .iter()
+            .map(|(name, ty)| match name {
+                Some(name) => format!("{name}: {ty}"),
+                None => ty.clone(),
+            })
+            .collect();
+        let mut item = CompletionItem::new(function.name(), CompletionKind::Function)
+            .with_detail(function.signature())
+            .with_insert(CompletionInsert::Call {
+                callee: function.name().to_string(),
+                params,
+            })
+            .with_relevance(CompletionRelevance::builtin_const());
+        if let Some(documentation) = function.documentation() {
+            item = item.with_documentation(documentation);
+        }
+        items.push(item);
     }
 }
 
@@ -1505,6 +1779,7 @@ fn resolve_lexical_name<'map>(
 fn def_kind_to_completion_kind(kind: DefKind) -> CompletionKind {
     match kind {
         DefKind::Chunk => CompletionKind::Variable,
+        DefKind::Annotation => CompletionKind::Annotation,
         DefKind::Function | DefKind::ExternFunction | DefKind::Method => CompletionKind::Function,
         DefKind::Struct => CompletionKind::Struct,
         DefKind::Enum => CompletionKind::Enum,
@@ -1525,6 +1800,7 @@ pub(crate) fn definition_signature(
 ) -> Option<String> {
     match definition.kind() {
         DefKind::Chunk => None,
+        DefKind::Annotation => Some(format!("annotation {}", definition.name())),
         DefKind::Function | DefKind::ExternFunction | DefKind::Method => {
             member_index.callable(definition.id()).map(|callable| {
                 let params: Vec<String> =
@@ -1565,6 +1841,7 @@ pub(crate) fn definition_signature(
 
 fn definition_completion_ty(member_index: &MemberIndex, definition: &Definition) -> Option<Ty> {
     match definition.kind() {
+        DefKind::Annotation => None,
         DefKind::Function | DefKind::ExternFunction | DefKind::Method => member_index
             .callable(definition.id())
             .map(|callable| callable.return_ty().clone()),

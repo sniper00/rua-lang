@@ -1,5 +1,5 @@
 fn main() {
     for value in 42 {
-        println!("{}", value);
+        print("{}", value);
     }
 }

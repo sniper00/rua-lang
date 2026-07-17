@@ -2,7 +2,7 @@ fn index() -> i64 {
     0
 }
 
-let mut values = vec![1];
+let mut values = [1];
 values[index()] += 4;
 
 let mut label = "Rua";
@@ -12,4 +12,4 @@ let answer = loop {
     break values[0];
 };
 
-println!("{} {}", answer, label);
+print("{} {}", answer, label);

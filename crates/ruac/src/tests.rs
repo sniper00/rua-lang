@@ -5,7 +5,7 @@ fn parser_preserves_top_level_chunk_order() {
     use crate::ast::ChunkEntry;
 
     let program = crate::parser::parse(
-        "let before = 1; fn value() -> i64 { before } println!(\"{}\", value());",
+        "let before = 1; fn value() -> i64 { before } print(\"{}\", value());",
     )
     .expect("parse executable chunk");
     assert_eq!(
@@ -24,11 +24,11 @@ fn parser_preserves_top_level_chunk_order() {
 fn compound_assignment_and_loop_expression_lower_without_duplicate_lvalues() {
     let lua = compile_str(
         r#"
-        fn index() -> i64 { println!("index"); 0 }
-        let mut values = vec![1];
+        fn index() -> i64 { print("index"); 0 }
+        let mut values = [1];
         values[index()] += 4;
         let answer = loop { break values[0]; };
-        println!("{}", answer);
+        print("{}", answer);
         "#,
     )
     .expect("compile compound assignment and loop value");
@@ -47,7 +47,7 @@ fn option_coalesce_and_optional_chain_lower_with_nil_checks() {
         let profile: Option<Profile> = Option::Some(Profile { city: "Shanghai" });
         let city = profile?.city ?? "unknown";
         let label = profile?.label() ?? "none";
-        println!("{} {}", city, label);
+        print("{} {}", city, label);
         "#,
     )
     .expect("compile option operators");
@@ -62,10 +62,10 @@ fn membership_and_map_literals_lower_through_typed_runtime_operations() {
     let lua = compile_str(
         r#"
         let scores: HashMap<String, i64> = #{ "alice": 10, "bob": 20 };
-        println!("{}", "alice" in scores);
-        println!("{}", 2 in vec![1, 2, 3]);
-        println!("{}", "ua" in "Rua");
-        println!("{}", 3 in 0..5);
+        print("{}", "alice" in scores);
+        print("{}", 2 in [1, 2, 3]);
+        print("{}", "ua" in "Rua");
+        print("{}", 3 in 0..5);
         "#,
     )
     .expect("compile membership and map literal");
@@ -100,13 +100,13 @@ fn codegen_preserves_blank_lines_in_chunks_and_function_bodies() {
          }\n\
          \n\
          let value = total();\n\
-         println!(\"{}\", value);",
+         print(\"{}\", value);",
     )
     .expect("compile blank-line layout");
 
     assert!(lua.contains("    local left = 1\n\n    local right = 2\n\n    return left + right"));
     assert!(lua.contains("end\n\nlocal value = total()"));
-    assert!(lua.contains("local value = total()\nfmt.println"));
+    assert!(lua.contains("local value = total()\nfmt.print"));
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn main() {
 fn closure_typeck_uses_iterator_adapter_item_context() {
     let source = r#"
 fn main() {
-    let values = vec![1, 2, 3];
+    let values = [1, 2, 3];
     let count = values
         .iter()
         .map(|value| value + 1)
@@ -454,7 +454,7 @@ fn iterator_typeck_supports_sources_adapters_and_consumers() {
 
     let source = r#"
 fn main() {
-    let values = vec![1, 2, 3, 4];
+    let values = [1, 2, 3, 4];
     let collected = values
         .iter()
         .map(|value| value + 1)
@@ -529,7 +529,7 @@ fn main() {
 fn iterator_plan_escape_stays_lazy_as_runtime_value() {
     let source = r#"
 fn main() {
-    let values = vec![1, 2, 3];
+    let values = [1, 2, 3];
     let pending = values.iter().map(|value| value + 1).skip(1);
 }
 "#;
@@ -547,7 +547,7 @@ fn iterator_plan_records_for_range_and_vec_iter_sources() {
 
     let source = r#"
 fn main() {
-    let values = vec![1, 2];
+    let values = [1, 2];
     for left in 0..2 {}
     for right in values.iter() {}
 }
@@ -576,7 +576,7 @@ fn iterator_codegen_does_not_fall_through_to_legacy_method_calls() {
 fn iterator_codegen_fuses_adapters_into_one_vec_loop() {
     let source = r#"
 fn main() -> Vec<i64> {
-    vec![1, 2, 3, 4]
+    [1, 2, 3, 4]
         .iter()
         .map(|value| value * 2)
         .filter(|value| value > 4)
@@ -613,24 +613,24 @@ fn main() -> Vec<i64> {
 #[test]
 fn iterator_collect_preallocates_only_when_length_is_exact() {
     let exact = crate::compile_str(
-        "fn main() -> Vec<i64> { vec![1, 2, 3].iter().map(|value| value * 2).collect() }",
+        "fn main() -> Vec<i64> { [1, 2, 3].iter().map(|value| value * 2).collect() }",
     )
     .expect("compile exact-size collect");
     assert!(
-        exact.contains("local __rua_table_create = table.create"),
+        exact.contains("local tbcreate = table.create"),
         "missing Lua 5.5 capacity helper: {exact}"
     );
     assert!(
-        exact.contains("vec.from_table(__rua_table_create(") && exact.contains(".n, 2)"),
+        exact.contains("vec.from_table(tbcreate(") && exact.contains(".n, 2)"),
         "exact-size collect was not preallocated: {exact}"
     );
 
     let filtered = crate::compile_str(
-        "fn main() -> Vec<i64> { vec![1, 2, 3].iter().filter(|value| value > 1).collect() }",
+        "fn main() -> Vec<i64> { [1, 2, 3].iter().filter(|value| value > 1).collect() }",
     )
     .expect("compile filtered collect");
     assert!(
-        !filtered.contains("__rua_table_create"),
+        !filtered.contains("tbcreate"),
         "filter output length is not exact and must not reserve the source length: {filtered}"
     );
 }
@@ -638,7 +638,7 @@ fn iterator_collect_preallocates_only_when_length_is_exact() {
 #[test]
 fn unused_pure_iterator_pipeline_is_eliminated_but_trapping_expression_is_kept() {
     let iterator = crate::compile_str(
-        "fn main() { let unused = vec![1, 2, 3].iter().map(|value| value * 2).collect::<Vec<i64>>(); }",
+        "fn main() { let unused = [1, 2, 3].iter().map(|value| value * 2).collect::<Vec<i64>>(); }",
     )
     .expect("compile removable iterator");
     assert!(
@@ -662,7 +662,7 @@ fn unused_pure_iterator_pipeline_is_eliminated_but_trapping_expression_is_kept()
 fn iterator_codegen_handles_fold_filter_map_enumerate_and_early_exit() {
     let sources = [
         "fn main() -> i64 { (0..4).fold(0, |total, value| total + value) }",
-        "fn main() -> i64 { vec![1, 2].iter().filter_map(|value| Some(value)).enumerate().count() }",
+        "fn main() -> i64 { [1, 2].iter().filter_map(|value| Some(value)).enumerate().count() }",
         "fn main() -> bool { (0..4).any(|value| value == 2) }",
         "fn main() -> bool { (0..4).all(|value| value < 4) }",
         "fn main() -> Option<i64> { (0..4).find(|value| value == 2) }",
@@ -708,15 +708,15 @@ fn iterator_typeck_reports_invalid_sources_predicates_and_collects() {
             "type `i64` is not iterable",
         ),
         (
-            "fn main() { let values = vec![1]; let n = values.iter().filter(|value| value + 1).count(); }",
+            "fn main() { let values = [1]; let n = values.iter().filter(|value| value + 1).count(); }",
             "iterator filter predicate must be `bool`, found `i64`",
         ),
         (
-            "fn main() { let values = vec![1]; let out = values.iter().collect::<Vec<String>>(); }",
+            "fn main() { let values = [1]; let out = values.iter().collect::<Vec<String>>(); }",
             "collect target element type `String` is incompatible with iterator item `i64`",
         ),
         (
-            "fn main() { let values = vec![1]; let out = values.iter().map(42).count(); }",
+            "fn main() { let values = [1]; let out = values.iter().map(42).count(); }",
             "iterator map argument must be a closure",
         ),
     ];
@@ -737,7 +737,7 @@ fn iterator_typeck_allows_mutable_capture_in_consumed_plan() {
     let source = r#"
 fn main() {
     let mut total = 0;
-    let values = vec![1, 2, 3];
+    let values = [1, 2, 3];
     let count = values.iter().map(|value| {
         total = total + value;
         value
@@ -812,7 +812,7 @@ fn immutable_assignment_requires_mutable_binding_identity() {
     for source in [
         "let value = 1; value = 2;",
         "struct Point { x: i64 } let point = Point { x: 1 }; point.x = 2;",
-        "let values = vec![1]; values[0] = 2;",
+        "let values = [1]; values[0] = 2;",
         "struct Point { x: i64 } impl Point { fn update(&self) { self.x = 2; } }",
     ] {
         let diagnostics = compile_str(source).unwrap_err();
@@ -909,6 +909,15 @@ fn parse_error_reports_line() {
     assert!(
         err.contains(":"),
         "expected line-prefixed error, got: {err}"
+    );
+}
+
+#[test]
+fn removed_macro_call_syntax_is_rejected() {
+    let err = compile_str("fn main() { let values = vec![1, 2, 3]; }").unwrap_err();
+    assert!(
+        err.contains("parse") || err.contains("unexpected"),
+        "expected a parser diagnostic for removed macro syntax, got: {err}"
     );
 }
 
@@ -1216,13 +1225,13 @@ fn match_guard() {
 
 #[test]
 fn for_range_exclusive() {
-    let lua = compile("fn f() { for i in 0..10 { print!(\"{}\", i); } }");
+    let lua = compile("fn f() { for i in 0..10 { print(\"{}\", i); } }");
     assert!(lua.contains("for i = 0, 9 do"), "got: {lua}");
 }
 
 #[test]
 fn for_range_inclusive() {
-    let lua = compile("fn f() { for i in 1..=5 { print!(\"{}\", i); } }");
+    let lua = compile("fn f() { for i in 1..=5 { print(\"{}\", i); } }");
     assert!(lua.contains("for i = 1, 5 do"), "got: {lua}");
 }
 
@@ -1241,8 +1250,8 @@ fn for_over_vec() {
     let lua = compile(
         r#"
         fn f() {
-            let v = vec![1, 2, 3];
-            for x in v { print!("{}", x); }
+            let v = [1, 2, 3];
+            for x in v { print("{}", x); }
         }
     "#,
     );
@@ -1250,8 +1259,8 @@ fn for_over_vec() {
 }
 
 #[test]
-fn vec_macro_zero_based() {
-    let lua = compile("fn f() -> i64 { let v = vec![10, 20]; v[0] }");
+fn vec_literal_is_zero_based() {
+    let lua = compile("fn f() -> i64 { let v = [10, 20]; v[0] }");
     assert!(
         lua.contains("vec.from_table({ [0] = 10, 20, n = 2 })"),
         "got: {lua}"
@@ -1265,23 +1274,20 @@ fn vec_macro_zero_based() {
 
 #[test]
 fn index_expr() {
-    let lua = compile("fn f() -> i64 { let v = vec![1, 2]; let a = v[0]; a }");
+    let lua = compile("fn f() -> i64 { let v = [1, 2]; let a = v[0]; a }");
     assert!(lua.contains("local a = v[0]"), "0-based index; got: {lua}");
 }
 
 #[test]
-fn macro_println_format() {
-    let lua = compile(r#"fn main() { println!("x = {}", 42); }"#);
-    assert!(lua.contains(r#"fmt.println("x = {}", 42)"#), "got: {lua}");
+fn standard_print_formats_a_line() {
+    let lua = compile(r#"fn main() { print("x = {}", 42); }"#);
+    assert!(lua.contains(r#"fmt.print("x = {}", 42)"#), "got: {lua}");
 }
 
 #[test]
-fn macro_panic() {
-    let lua = compile(r#"fn f() { panic!("boom"); }"#);
-    assert!(
-        lua.contains("fmt.panic(fmt.format(\"boom\"))"),
-        "got: {lua}"
-    );
+fn standard_panic_is_a_never_function() {
+    let lua = compile(r#"fn f() -> i64 { panic("boom") }"#);
+    assert!(lua.contains("return fmt.panic(\"boom\")"), "got: {lua}");
 }
 
 #[test]
@@ -1296,7 +1302,7 @@ fn no_require_when_runtime_is_unused() {
 #[test]
 fn vec_method_call() {
     // `.push()` / `.len()` lower to method calls resolved by the Vec metatable.
-    let lua = compile("fn f() { let v = vec![1]; v.push(2); let n = v.len(); }");
+    let lua = compile("fn f() { let v = [1]; v.push(2); let n = v.len(); }");
     assert!(lua.contains("v:push(2)"), "got: {lua}");
     assert!(lua.contains("v:len()"), "got: {lua}");
 }
@@ -1334,6 +1340,36 @@ fn extern_variadic_parses() {
     "#,
     );
     assert!(lua.contains("format(\"{} {}\", 1, 2)"), "got: {lua}");
+}
+
+#[test]
+fn generic_extern_preserves_and_checks_type_parameters() {
+    let source = r#"
+        extern "lua" {
+            fn same<T>(left: T, right: T);
+        }
+        fn main() { same(1, 2); }
+    "#;
+    let program = crate::parser::parse(source).expect("parse generic extern");
+    let crate::ast::Item::Extern(block) = &program.items[0] else {
+        panic!("expected extern block")
+    };
+    assert_eq!(block.fns[0].generics[0].name, "T");
+    compile_str(source).expect("matching generic arguments compile");
+
+    let error = compile_str(
+        r#"
+        extern "lua" {
+            fn same<T>(left: T, right: T);
+        }
+        fn main() { same(1, "two"); }
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("argument 2") || error.contains("type mismatch"),
+        "expected generic argument mismatch, got: {error}"
+    );
 }
 
 #[test]
@@ -1401,7 +1437,7 @@ fn standard_runtime_exports_share_one_package_import() {
         r#"fn f() {
             let values = Vec::new();
             let entries = HashMap::new();
-            println!("{} {}", values.len(), entries.len());
+            print("{} {}", values.len(), entries.len());
         }"#,
     );
     assert_eq!(lua.matches("require(\"rua_std\")").count(), 1, "{lua}");
@@ -1620,9 +1656,8 @@ fn typeck_inherited_default_method_arity_checked() {
 #[test]
 fn typeck_vec_and_map_methods_not_flagged() {
     // Receiver types for Vec/HashMap are Unknown -> method calls never flagged.
-    let lua = compile(
-        "fn f() { let v = vec![1]; v.push(2); let m = HashMap::new(); m.insert(\"a\", 1); }",
-    );
+    let lua =
+        compile("fn f() { let v = [1]; v.push(2); let m = HashMap::new(); m.insert(\"a\", 1); }");
     assert!(lua.contains("v:push(2)"), "got: {lua}");
     assert!(lua.contains("m:insert"), "got: {lua}");
 }
@@ -1630,13 +1665,13 @@ fn typeck_vec_and_map_methods_not_flagged() {
 #[test]
 fn typeck_vec_element_index_type() {
     // v[0] : i64, used as an `if` condition -> non-bool error (element tracked).
-    let err = compile_str("fn f() { let v = vec![1, 2]; if v[0] { } }").unwrap_err();
+    let err = compile_str("fn f() { let v = [1, 2]; if v[0] { } }").unwrap_err();
     assert!(err.contains("`if` condition must be `bool`"), "got: {err}");
 }
 
 #[test]
 fn typeck_vec_annotation_mismatch() {
-    let err = compile_str("fn f() { let x: i64 = vec![1]; }").unwrap_err();
+    let err = compile_str("fn f() { let x: i64 = [1]; }").unwrap_err();
     assert!(err.contains("annotated as `i64`"), "got: {err}");
     assert!(err.contains("Vec<i64>"), "shows element type; got: {err}");
 }
@@ -1644,8 +1679,7 @@ fn typeck_vec_annotation_mismatch() {
 #[test]
 fn typeck_for_over_vec_binds_element() {
     // x : bool (from Vec<bool>), annotated as i64 -> mismatch.
-    let err =
-        compile_str("fn f() { let v = vec![true]; for x in v { let y: i64 = x; } }").unwrap_err();
+    let err = compile_str("fn f() { let v = [true]; for x in v { let y: i64 = x; } }").unwrap_err();
     assert!(err.contains("annotated as `i64`"), "got: {err}");
 }
 
@@ -1901,14 +1935,14 @@ fn if_let_some_binds_and_tests_nil() {
         r#"
         fn f(opt: Option<i64>) {
             if let Some(x) = opt {
-                println!("{}", x);
+                print("{}", x);
             }
         }
     "#,
     );
     assert!(lua.contains("~= nil then"), "got: {lua}");
     assert!(!lua.contains("local x ="), "got: {lua}");
-    assert!(lua.contains("fmt.println(\"{}\", opt)"), "got: {lua}");
+    assert!(lua.contains("fmt.print(\"{}\", opt)"), "got: {lua}");
 }
 
 #[test]
@@ -1931,7 +1965,7 @@ fn if_let_ok_unwraps_result() {
         r#"
         fn f(r: Result<i64, String>) {
             if let Ok(v) = r {
-                println!("{}", v);
+                print("{}", v);
             }
         }
     "#,
@@ -1949,10 +1983,10 @@ fn if_let_as_statement_needs_no_semicolon() {
         r#"
         fn f(a: Option<i64>, b: Option<i64>) {
             if let Some(x) = a {
-                println!("{}", x);
+                print("{}", x);
             }
             if let Some(y) = b {
-                println!("{}", y);
+                print("{}", y);
             }
         }
     "#,
@@ -1966,7 +2000,7 @@ fn while_let_drains_with_break() {
         r#"
         fn f(stack: Vec<i64>) {
             while let Some(x) = stack.pop() {
-                println!("{}", x);
+                print("{}", x);
             }
         }
     "#,
@@ -1986,13 +2020,10 @@ fn module_emits_one_table_identity() {
         mod math {
             pub fn add(a: i64, b: i64) -> i64 { a + b }
         }
-        fn main() { println!("{}", math::add(1, 2)); }
+        fn main() { print("{}", math::add(1, 2)); }
     "#,
     );
-    assert!(
-        lua.contains("local math = __rua_table_create(0, 1)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("local math = tbcreate(0, 1)"), "got: {lua}");
     assert!(lua.contains("function math.add(a, b)"), "got: {lua}");
     // Qualified call `math::add` lowers to `math.add`.
     assert!(lua.contains("math.add(1, 2)"), "got: {lua}");
@@ -2023,13 +2054,10 @@ fn nested_module_qualified_access() {
                 pub fn f() -> i64 { 1 }
             }
         }
-        fn main() { println!("{}", outer::inner::f()); }
+        fn main() { print("{}", outer::inner::f()); }
     "#,
     );
-    assert!(
-        lua.contains("outer.inner = __rua_table_create(0, 1)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("outer.inner = tbcreate(0, 1)"), "got: {lua}");
     assert!(lua.contains("function outer.inner.f()"), "got: {lua}");
     assert!(lua.contains("outer.inner.f()"), "got: {lua}");
 }
@@ -2041,7 +2069,7 @@ fn use_import_desugars_to_qualified_path() {
         r#"
         mod m { pub fn f() -> i64 { 1 } }
         use m::f;
-        fn main() { println!("{}", f()); }
+        fn main() { print("{}", f()); }
     "#,
     );
     assert!(lua.contains("m.f()"), "got: {lua}");
@@ -2123,14 +2151,8 @@ fn same_fn_name_across_modules_no_dup_error() {
         fn main() {}
     "#,
     );
-    assert!(
-        lua.contains("local a = __rua_table_create(0, 1)"),
-        "got: {lua}"
-    );
-    assert!(
-        lua.contains("local b = __rua_table_create(0, 1)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("local a = tbcreate(0, 1)"), "got: {lua}");
+    assert!(lua.contains("local b = tbcreate(0, 1)"), "got: {lua}");
 }
 
 #[test]
@@ -2146,15 +2168,12 @@ fn module_struct_qualified_literal_and_assoc_fn() {
         fn main() {
             let p = geo::Point::new(1.0, 2.0);
             let q = geo::Point { x: 3.0, y: 4.0 };
-            println!("{}", q.x);
+            print("{}", q.x);
         }
     "#,
     );
     // The class table has one module-owned backend place.
-    assert!(
-        lua.contains("geo.Point = __rua_table_create(0, 2)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("geo.Point = tbcreate(0, 2)"), "got: {lua}");
     assert!(lua.contains("geo.Point.__index = geo.Point"), "got: {lua}");
     assert!(lua.contains("function geo.Point.new(x, y)"), "got: {lua}");
     // Cross-module associated fn + struct literal use the qualified table.
@@ -2202,7 +2221,7 @@ fn module_method_and_self_call() {
         }
         fn main() {
             let p = geo::P { x: 9.0 };
-            println!("{}", p.get());
+            print("{}", p.get());
         }
     "#,
     );
@@ -2249,7 +2268,7 @@ fn private_fn_cross_module_rejected() {
     let err = compile_str(
         r#"
         mod m { fn secret() -> i64 { 42 } }
-        fn main() { println!("{}", m::secret()); }
+        fn main() { print("{}", m::secret()); }
     "#,
     )
     .unwrap_err();
@@ -2263,7 +2282,7 @@ fn private_submodule_cross_access_rejected() {
         mod a {
             mod b { pub fn f() -> i64 { 1 } }
         }
-        fn main() { println!("{}", a::b::f()); }
+        fn main() { print("{}", a::b::f()); }
     "#,
     )
     .unwrap_err();
@@ -2316,7 +2335,7 @@ fn pub_item_cross_module_ok() {
         mod a {
             pub mod b { pub fn f() -> i64 { 1 } }
         }
-        fn main() { println!("{}", a::b::f()); }
+        fn main() { print("{}", a::b::f()); }
     "#,
     );
     assert!(lua.contains("a.b.f()"), "got: {lua}");
@@ -2331,7 +2350,7 @@ fn root_private_item_visible_everywhere() {
         mod m {
             pub fn use_root() -> i64 { helper() }
         }
-        fn main() { println!("{}", m::use_root()); }
+        fn main() { print("{}", m::use_root()); }
     "#,
     );
     assert!(lua.contains("m.use_root()"), "got: {lua}");
@@ -2346,7 +2365,7 @@ fn private_item_same_module_ok() {
             fn secret() -> i64 { 42 }
             pub fn reveal() -> i64 { secret() }
         }
-        fn main() { println!("{}", m::reveal()); }
+        fn main() { print("{}", m::reveal()); }
     "#,
     );
     assert!(lua.contains("return m.secret()"), "got: {lua}");
@@ -2363,7 +2382,7 @@ fn use_inside_module_desugars_within_scope() {
             use util::helper as h;
             pub fn go() -> i64 { h() }
         }
-        fn main() { println!("{}", m::go()); }
+        fn main() { print("{}", m::go()); }
     "#,
     );
     assert!(lua.contains("return util.helper()"), "got: {lua}");
@@ -2381,11 +2400,11 @@ fn use_scope_does_not_leak_to_root() {
             pub mod inner { pub fn deep() -> i64 { 1 } }
         }
         fn helper() -> i64 { 42 }
-        fn main() { println!("{}", helper()); }
+        fn main() { print("{}", helper()); }
     "#,
     );
     // Root `helper()` stays bare (not rewritten to the module alias target).
-    assert!(lua.contains("fmt.println(\"{}\", helper())"), "got: {lua}");
+    assert!(lua.contains("fmt.print(\"{}\", helper())"), "got: {lua}");
 }
 
 #[test]
@@ -2397,12 +2416,12 @@ fn use_alias_shadowed_by_local_not_rewritten() {
         use m::f;
         fn main() {
             let f = 99;
-            println!("{}", f);
+            print("{}", f);
         }
     "#,
     );
     // The shadowed reference stays bare rather than becoming `m.f`.
-    assert!(lua.contains("fmt.println(\"{}\", f)"), "got: {lua}");
+    assert!(lua.contains("fmt.print(\"{}\", f)"), "got: {lua}");
 }
 
 #[test]
@@ -2444,15 +2463,12 @@ fn file_module_resolution() {
     let dir = tmp_dir("filemod");
     std::fs::write(
         dir.join("main.rua"),
-        "fn main() { println!(\"{}\", util::f()); }\n",
+        "fn main() { print(\"{}\", util::f()); }\n",
     )
     .unwrap();
     std::fs::write(dir.join("util.rua"), "pub fn f() -> i64 { 7 }\n").unwrap();
     let lua = crate::compile_path(&dir.join("main.rua")).unwrap();
-    assert!(
-        lua.contains("local util = __rua_table_create(0, 1)"),
-        "got: {lua}"
-    );
+    assert!(lua.contains("local util = tbcreate(0, 1)"), "got: {lua}");
     assert!(lua.contains("function util.f()"), "got: {lua}");
     assert!(lua.contains("util.f()"), "got: {lua}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2463,7 +2479,7 @@ fn nested_file_module_resolution() {
     let dir = tmp_dir("nested");
     std::fs::write(
         dir.join("main.rua"),
-        "fn main() { println!(\"{}\", math::trig::triple(2)); }\n",
+        "fn main() { print(\"{}\", math::trig::triple(2)); }\n",
     )
     .unwrap();
     std::fs::write(dir.join("math.rua"), "").unwrap();
@@ -2483,7 +2499,7 @@ fn directory_module_file_maps_from_its_path() {
     let dir = tmp_dir("moddir");
     std::fs::write(
         dir.join("main.rua"),
-        "fn main() { println!(\"{}\", foo::g()); }\n",
+        "fn main() { print(\"{}\", foo::g()); }\n",
     )
     .unwrap();
     std::fs::create_dir_all(dir.join("foo")).unwrap();
@@ -2526,7 +2542,7 @@ fn file_module_visibility_enforced() {
     let dir = tmp_dir("filevis");
     std::fs::write(
         dir.join("main.rua"),
-        "fn main() { println!(\"{}\", m::secret()); }\n",
+        "fn main() { print(\"{}\", m::secret()); }\n",
     )
     .unwrap();
     std::fs::write(dir.join("m.rua"), "fn secret() -> i64 { 42 }\n").unwrap();
@@ -2754,7 +2770,7 @@ fn call_site_bound_satisfied_ok() {
         r#"
         trait Animal { fn speak(&self) -> String; }
         struct Dog { n: i64 }
-        impl Animal for Dog { fn speak(&self) -> String { format!("woof") } }
+        impl Animal for Dog { fn speak(&self) -> String { format("woof") } }
         fn describe<T: Animal>(a: T) -> String { a.speak() }
         fn main() { let _ = describe(Dog { n: 1 }); }
     "#,

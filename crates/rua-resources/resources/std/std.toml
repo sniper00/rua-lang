@@ -1,6 +1,8 @@
 version = 1
 
 declarations = [
+    "annotations.ruai",
+    "fmt.ruai",
     "hashmap.ruai",
     "iter.ruai",
     "option.ruai",
@@ -10,12 +12,6 @@ declarations = [
 ]
 
 runtime_sources = ["rua_std.lua"]
-
-[runtime_helpers.format]
-module = "rua_std"
-export = "fmt"
-alias = "fmt"
-abi = 2
 
 [runtime_helpers.number]
 module = "rua_std"
@@ -42,6 +38,24 @@ result_expect = "Result::expect"
 result_unwrap_or = "Result::unwrap_or"
 result_is_ok = "Result::is_ok"
 result_is_err = "Result::is_err"
+
+[[modules]]
+name = "std::fmt"
+declaration = "fmt.ruai"
+runtime = "rua_std"
+export = "fmt"
+alias = "fmt"
+abi = 2
+dispatch = "module"
+
+[[modules]]
+name = "std::annotations"
+declaration = "annotations.ruai"
+runtime = "rua_std"
+export = "annotations"
+alias = "annotations"
+abi = 2
+dispatch = "module"
 
 [[modules]]
 name = "std::vec"

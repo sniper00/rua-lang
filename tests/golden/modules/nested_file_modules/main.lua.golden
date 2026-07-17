@@ -2,16 +2,16 @@
 local rua_std = require("rua_std")
 assert(rua_std.ABI_VERSION == 2, "incompatible rua_std ABI")
 local fmt = rua_std.fmt
-local __rua_table_create = table.create
+local tbcreate = table.create
 
 ---@class math
-local math = __rua_table_create(0, 3)
+local math = tbcreate(0, 3)
 
 ---@class math.trig
-math.trig = __rua_table_create(0, 1)
+math.trig = tbcreate(0, 1)
 
 ---@class util
-local util = __rua_table_create(0, 1)
+local util = tbcreate(0, 1)
 
 ---@return integer
 function math.add(a, b)
@@ -35,27 +35,27 @@ end
 
 local direct = math.add(2, 3)
 if direct ~= 5 then
-    fmt.panic(fmt.format("direct module call failed"))
+    fmt.panic("direct module call failed")
 end
 
 local nested = math.trig.triple(4)
 if nested ~= 12 then
-    fmt.panic(fmt.format("nested module call failed"))
+    fmt.panic("nested module call failed")
 end
 
 local imported = math.add(10, 20)
 if imported ~= 30 then
-    fmt.panic(fmt.format("imported module call failed"))
+    fmt.panic("imported module call failed")
 end
 
 local composed = math.add_then_triple(2, 3)
 if composed ~= 15 then
-    fmt.panic(fmt.format("module-local import failed"))
+    fmt.panic("module-local import failed")
 end
 
 local greeting = util.greet()
 if greeting ~= "hello" then
-    fmt.panic(fmt.format("sibling module call failed"))
+    fmt.panic("sibling module call failed")
 end
 
 return {

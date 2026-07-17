@@ -18,10 +18,9 @@ Declaration files may use an empty `{}` for function and method signatures.
 Non-empty bodies and executable file statements are rejected with
 `E0108` by both the compiler and native analysis.
 
-The `rua-analysis` VFS and LSP input layer now support external library roots,
+The `rua-analysis` VFS and LSP input layer support external library roots,
 explicit out-of-tree mounts, read-only inputs, and workspace > library > std
-priority. Those behaviors are owned by exact integration/protocol tests rather
-than the retired legacy IDE snapshot runner. Accordingly,
+priority. Exact integration and protocol tests own those behaviors.
 `library_mount_single_file` covers an adjacent `name.ruai` module, while
 `workspace_shadows_library` covers workspace source precedence over a library
 declaration with the same logical path.

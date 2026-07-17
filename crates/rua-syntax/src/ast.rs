@@ -106,6 +106,7 @@ impl SourceFile {
 }
 
 ast_node!(FnDecl = FnDecl);
+ast_node!(AnnotationDecl = AnnotationDecl);
 ast_node!(StructDecl = StructDecl);
 ast_node!(EnumDecl = EnumDecl);
 ast_node!(TraitDecl = TraitDecl);
@@ -113,8 +114,16 @@ ast_node!(ImplDecl = ImplDecl);
 ast_node!(ExternBlock = ExternBlock);
 ast_node!(ExternFn = ExternFn);
 ast_node!(UseDecl = UseDecl);
+ast_node!(Attribute = Attribute);
+ast_node!(MetaItem = MetaItem);
+ast_node!(MetaValue = MetaValue);
 
 impl Named for FnDecl {}
+impl Named for AnnotationDecl {
+    fn name(&self) -> Option<SyntaxToken> {
+        tokens(&self.syntax, K::Ident).nth(1)
+    }
+}
 impl Named for StructDecl {}
 impl Named for EnumDecl {}
 impl Named for TraitDecl {}
@@ -123,6 +132,7 @@ impl Named for ExternFn {}
 /// Any top-level (or module-level) item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Item {
+    Annotation(AnnotationDecl),
     Fn(FnDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
@@ -136,7 +146,8 @@ impl AstNode for Item {
     fn can_cast(kind: SyntaxKind) -> bool {
         matches!(
             kind,
-            K::FnDecl
+            K::AnnotationDecl
+                | K::FnDecl
                 | K::StructDecl
                 | K::EnumDecl
                 | K::TraitDecl
@@ -147,6 +158,7 @@ impl AstNode for Item {
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
         Some(match node.kind() {
+            K::AnnotationDecl => Item::Annotation(AnnotationDecl { syntax: node }),
             K::FnDecl => Item::Fn(FnDecl { syntax: node }),
             K::StructDecl => Item::Struct(StructDecl { syntax: node }),
             K::EnumDecl => Item::Enum(EnumDecl { syntax: node }),
@@ -159,6 +171,7 @@ impl AstNode for Item {
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
+            Item::Annotation(n) => n.syntax(),
             Item::Fn(n) => n.syntax(),
             Item::Struct(n) => n.syntax(),
             Item::Enum(n) => n.syntax(),
@@ -167,6 +180,173 @@ impl AstNode for Item {
             Item::Extern(n) => n.syntax(),
             Item::Use(n) => n.syntax(),
         }
+    }
+}
+
+pub trait HasAttributes: AstNode {
+    fn attributes(&self) -> impl Iterator<Item = Attribute> + '_ {
+        children::<Attribute>(self.syntax())
+    }
+}
+
+impl HasAttributes for FnDecl {}
+impl HasAttributes for AnnotationDecl {}
+impl HasAttributes for StructDecl {}
+impl HasAttributes for EnumDecl {}
+impl HasAttributes for TraitDecl {}
+impl HasAttributes for ImplDecl {}
+impl HasAttributes for ExternBlock {}
+impl HasAttributes for ExternFn {}
+impl HasAttributes for UseDecl {}
+impl HasAttributes for FieldDecl {}
+impl HasAttributes for EnumVariant {}
+impl HasAttributes for TraitMethod {}
+
+impl Item {
+    pub fn attributes(&self) -> impl Iterator<Item = Attribute> + '_ {
+        children::<Attribute>(self.syntax())
+    }
+}
+
+impl AnnotationDecl {
+    pub fn is_pub(&self) -> bool {
+        token(&self.syntax, K::KwPub).is_some()
+    }
+
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        children::<Param>(&self.syntax)
+    }
+}
+
+impl Attribute {
+    pub fn meta_item(&self) -> Option<MetaItem> {
+        child(&self.syntax)
+    }
+
+    pub fn to_core(&self) -> Result<rua_core::Attribute, String> {
+        let item = self
+            .meta_item()
+            .ok_or_else(|| "attribute is missing its meta item".to_string())?
+            .to_core()?;
+        match item {
+            rua_core::MetaItem::Word(name) => Ok(rua_core::Attribute::new(name, Vec::new())),
+            rua_core::MetaItem::List { name, items } => Ok(rua_core::Attribute::new(name, items)),
+            rua_core::MetaItem::NameValue { name, value } => Ok(rua_core::Attribute::new(
+                name,
+                vec![rua_core::MetaItem::Literal(value)],
+            )),
+            rua_core::MetaItem::Literal(_) => {
+                Err("attribute name must be an identifier".to_string())
+            }
+        }
+    }
+}
+
+impl MetaItem {
+    pub fn nested(&self) -> impl Iterator<Item = MetaItem> + '_ {
+        children::<MetaItem>(&self.syntax)
+    }
+
+    pub fn to_core(&self) -> Result<rua_core::MetaItem, String> {
+        let direct_tokens = self
+            .syntax
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !token.kind().is_trivia())
+            .collect::<Vec<_>>();
+        let first = direct_tokens
+            .first()
+            .ok_or_else(|| "empty attribute meta item".to_string())?;
+        if matches!(
+            first.kind(),
+            K::Str | K::Int | K::Float | K::KwTrue | K::KwFalse
+        ) {
+            return Ok(rua_core::MetaItem::Literal(meta_literal(first)?));
+        }
+
+        let mut name = String::new();
+        for token in &direct_tokens {
+            if matches!(token.kind(), K::Eq | K::LParen) {
+                break;
+            }
+            name.push_str(token.text());
+        }
+        if name.is_empty() {
+            return Err("attribute meta item is missing a name".to_string());
+        }
+        if direct_tokens.iter().any(|token| token.kind() == K::Eq) {
+            let value = child::<MetaValue>(&self.syntax)
+                .ok_or_else(|| format!("attribute `{name}` is missing its value"))?
+                .to_core()?;
+            return Ok(rua_core::MetaItem::NameValue { name, value });
+        }
+        let items = self
+            .nested()
+            .map(|item| item.to_core())
+            .collect::<Result<Vec<_>, _>>()?;
+        if direct_tokens.iter().any(|token| token.kind() == K::LParen) {
+            Ok(rua_core::MetaItem::List { name, items })
+        } else {
+            Ok(rua_core::MetaItem::Word(name))
+        }
+    }
+}
+
+impl MetaValue {
+    pub fn to_core(&self) -> Result<rua_core::MetaValue, String> {
+        let direct_tokens = self
+            .syntax
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| !token.kind().is_trivia())
+            .collect::<Vec<_>>();
+        let first = direct_tokens
+            .first()
+            .ok_or_else(|| "empty attribute value".to_string())?;
+        if first.kind() == K::LBracket {
+            return self
+                .syntax
+                .children()
+                .filter_map(MetaValue::cast)
+                .map(|value| value.to_core())
+                .collect::<Result<Vec<_>, _>>()
+                .map(rua_core::MetaValue::List);
+        }
+        if first.kind() == K::Ident {
+            let path = direct_tokens
+                .iter()
+                .map(|token| token.text())
+                .collect::<String>();
+            return Ok(rua_core::MetaValue::Path(path));
+        }
+        meta_literal(first)
+    }
+}
+
+fn meta_literal(token: &SyntaxToken) -> Result<rua_core::MetaValue, String> {
+    match token.kind() {
+        K::Str => token
+            .text()
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix('"'))
+            .map(|text| rua_core::MetaValue::String(text.to_string()))
+            .ok_or_else(|| "attribute string must use double quotes".to_string()),
+        K::KwTrue => Ok(rua_core::MetaValue::Bool(true)),
+        K::KwFalse => Ok(rua_core::MetaValue::Bool(false)),
+        K::Int => token
+            .text()
+            .replace('_', "")
+            .parse::<i64>()
+            .map(rua_core::MetaValue::Integer)
+            .map_err(|_| "attribute integer is outside the i64 range".to_string()),
+        K::Float => {
+            let value = token.text().replace('_', "");
+            value
+                .parse::<f64>()
+                .map(|_| rua_core::MetaValue::Float(value))
+                .map_err(|_| "invalid attribute float".to_string())
+        }
+        _ => Err("attribute value must be a literal".to_string()),
     }
 }
 
@@ -714,6 +894,7 @@ ast_node!(PathType = PathType);
 ast_node!(RefType = RefType);
 ast_node!(TupleType = TupleType);
 ast_node!(CallableType = CallableType);
+ast_node!(NeverType = NeverType);
 ast_node!(TypeArgs = TypeArgs);
 
 /// A type: `Path<..>`, `&T`, or `()`.
@@ -723,13 +904,14 @@ pub enum Type {
     Ref(RefType),
     Tuple(TupleType),
     Callable(CallableType),
+    Never(NeverType),
 }
 
 impl AstNode for Type {
     fn can_cast(kind: SyntaxKind) -> bool {
         matches!(
             kind,
-            K::PathType | K::RefType | K::TupleType | K::CallableType
+            K::PathType | K::RefType | K::TupleType | K::CallableType | K::NeverType
         )
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -738,6 +920,7 @@ impl AstNode for Type {
             K::RefType => Type::Ref(RefType { syntax: node }),
             K::TupleType => Type::Tuple(TupleType { syntax: node }),
             K::CallableType => Type::Callable(CallableType { syntax: node }),
+            K::NeverType => Type::Never(NeverType { syntax: node }),
             _ => return None,
         })
     }
@@ -747,6 +930,7 @@ impl AstNode for Type {
             Type::Ref(n) => n.syntax(),
             Type::Tuple(n) => n.syntax(),
             Type::Callable(n) => n.syntax(),
+            Type::Never(n) => n.syntax(),
         }
     }
 }
@@ -963,6 +1147,7 @@ ast_node!(FieldExpr = FieldExpr);
 ast_node!(IndexExpr = IndexExpr);
 ast_node!(PathExpr = PathExpr);
 ast_node!(LiteralExpr = LiteralExpr);
+ast_node!(ArrayExpr = ArrayExpr);
 ast_node!(ParenExpr = ParenExpr);
 ast_node!(IfExpr = IfExpr);
 ast_node!(MatchExpr = MatchExpr);
@@ -971,7 +1156,6 @@ ast_node!(StructLitExpr = StructLitExpr);
 ast_node!(MapExpr = MapExpr);
 ast_node!(MapEntry = MapEntry);
 ast_node!(FieldInit = FieldInit);
-ast_node!(MacroCallExpr = MacroCallExpr);
 ast_node!(ArgList = ArgList);
 ast_node!(Pattern = Pattern);
 
@@ -991,12 +1175,12 @@ pub enum Expr {
     Index(IndexExpr),
     Path(PathExpr),
     Literal(LiteralExpr),
+    Array(ArrayExpr),
     Paren(ParenExpr),
     If(IfExpr),
     Match(MatchExpr),
     StructLit(StructLitExpr),
     Map(MapExpr),
-    MacroCall(MacroCallExpr),
     Block(Block),
 }
 
@@ -1017,12 +1201,12 @@ impl AstNode for Expr {
                 | K::IndexExpr
                 | K::PathExpr
                 | K::LiteralExpr
+                | K::ArrayExpr
                 | K::ParenExpr
                 | K::IfExpr
                 | K::MatchExpr
                 | K::StructLitExpr
                 | K::MapExpr
-                | K::MacroCallExpr
                 | K::Block
         )
     }
@@ -1041,12 +1225,12 @@ impl AstNode for Expr {
             K::IndexExpr => Expr::Index(IndexExpr { syntax: node }),
             K::PathExpr => Expr::Path(PathExpr { syntax: node }),
             K::LiteralExpr => Expr::Literal(LiteralExpr { syntax: node }),
+            K::ArrayExpr => Expr::Array(ArrayExpr { syntax: node }),
             K::ParenExpr => Expr::Paren(ParenExpr { syntax: node }),
             K::IfExpr => Expr::If(IfExpr { syntax: node }),
             K::MatchExpr => Expr::Match(MatchExpr { syntax: node }),
             K::StructLitExpr => Expr::StructLit(StructLitExpr { syntax: node }),
             K::MapExpr => Expr::Map(MapExpr { syntax: node }),
-            K::MacroCallExpr => Expr::MacroCall(MacroCallExpr { syntax: node }),
             K::Block => Expr::Block(Block { syntax: node }),
             _ => return None,
         })
@@ -1066,12 +1250,12 @@ impl AstNode for Expr {
             Expr::Index(n) => n.syntax(),
             Expr::Path(n) => n.syntax(),
             Expr::Literal(n) => n.syntax(),
+            Expr::Array(n) => n.syntax(),
             Expr::Paren(n) => n.syntax(),
             Expr::If(n) => n.syntax(),
             Expr::Match(n) => n.syntax(),
             Expr::StructLit(n) => n.syntax(),
             Expr::Map(n) => n.syntax(),
-            Expr::MacroCall(n) => n.syntax(),
             Expr::Block(n) => n.syntax(),
         }
     }
@@ -1371,17 +1555,14 @@ impl FieldInit {
     }
 }
 
-impl MacroCallExpr {
-    pub fn name(&self) -> Option<SyntaxToken> {
-        name_token(&self.syntax)
-    }
+impl ArgList {
     pub fn args(&self) -> impl Iterator<Item = Expr> + '_ {
         children::<Expr>(&self.syntax)
     }
 }
 
-impl ArgList {
-    pub fn args(&self) -> impl Iterator<Item = Expr> + '_ {
+impl ArrayExpr {
+    pub fn elements(&self) -> impl Iterator<Item = Expr> + '_ {
         children::<Expr>(&self.syntax)
     }
 }

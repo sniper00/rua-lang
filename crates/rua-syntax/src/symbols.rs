@@ -26,6 +26,7 @@ use crate::{SyntaxElement, SyntaxNode};
 /// Grammar-level symbol kind. Maps to `lsp_types::SymbolKind` in the LSP crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
+    Annotation,
     Function,
     Struct,
     Enum,
@@ -121,6 +122,20 @@ fn collect_items(
 ) {
     for item in items {
         match item {
+            Item::Annotation(annotation) => {
+                let name = annotation.name_text().unwrap_or_default();
+                if !name.is_empty() {
+                    symbols.push(Symbol {
+                        name,
+                        kind: SymbolKind::Annotation,
+                        name_range: token_byte_range(annotation.name()),
+                        full_range: node_byte_range(annotation.syntax()),
+                        container: container.to_vec(),
+                        detail: node_signature(annotation.syntax(), None),
+                        doc: documentation(annotation.syntax()).unwrap_or_default(),
+                    });
+                }
+            }
             Item::Fn(f) => collect_fn(&f, container, symbols),
             Item::Struct(s) => collect_struct(&s, container, symbols),
             Item::Enum(e) => collect_enum(&e, container, symbols),

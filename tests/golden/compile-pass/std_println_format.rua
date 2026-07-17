@@ -1,4 +1,0 @@
-fn main() {
-    let text = format!("value = {}", 42);
-    println!("{}", text);
-}

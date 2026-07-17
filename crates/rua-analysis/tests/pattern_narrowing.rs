@@ -166,7 +166,7 @@ fn if_let_narrow() -> i64 {
 fn pattern_narrowing_while_let_narrows_loop_body() {
     const SOURCE: &str = r#"
 fn while_let_narrow() {
-    let mut items: Vec<i64> = vec![1, 2];
+    let mut items: Vec<i64> = [1, 2];
     while let Some(/*item_def*/item) = items.pop() {
         let _used: i64 = /*item_use*/item;
     }

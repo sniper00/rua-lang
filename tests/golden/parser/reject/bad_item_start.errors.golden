@@ -1,4 +1,4 @@
 tolerant:
-E0004 @4: expected item (fn/struct/enum/impl/trait/extern/use)
+E0004 @4: expected item (annotation/fn/struct/enum/impl/trait/extern/use)
 strict:
-E0001 4..7: expected item (`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`use`), found `let`
+E0001 4..7: expected item (`annotation`/`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`use`), found `let`

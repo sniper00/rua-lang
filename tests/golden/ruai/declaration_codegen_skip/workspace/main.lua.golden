@@ -6,5 +6,5 @@ local schema = require("schema")
 
 local function main()
     local user = schema.default_user()
-    fmt.println("{}", user.id)
+    fmt.print("{}", user.id)
 end

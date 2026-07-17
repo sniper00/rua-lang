@@ -1,12 +1,14 @@
 # Rua LSP 功能
 
-`rua-lsp` 是 protocol adapter；语法、名称解析、类型推断和引用索引由长期 `rua-analysis::AnalysisHost` 提供。功能按当前 server capability 与端到端测试维护，不按历史阶段编号。
+`rua-lsp` 是 protocol adapter；语法、名称解析、类型推断和引用索引由
+`rua-analysis::AnalysisHost` 提供。本文列出的能力与 server capability 和端到端测试
+保持一致。
 
 ## 1. 语言理解
 
 | 能力 | 当前行为 |
 |---|---|
-| Hover | 显示 item、local、field、method、enum variant、标准库声明和 inline macro 的签名、类型与 API 文档 |
+| Hover | 显示限定 module path、item/local/member 类型、函数签名、enum variant 值与 API 文档 |
 | Definition | 导航到 local、module item、member、associated item、`.ruai` declaration 和 enum variant |
 | Implementation | 从 trait / trait method 定位具体 impl |
 | References | 基于 resolved identity 跨文件查找，不按同名文本匹配 |
@@ -15,7 +17,7 @@
 | Symbols | document symbol tree 与 workspace symbol search |
 | Highlight | 区分当前符号的 read/write occurrence |
 
-enum variant 在 declaration、constructor、qualified path、alias 和 match pattern 中使用同一 identity。function、method、trait item、extern、`.ruai` 和 `vec!` / `print!` / `println!` / `format!` / `panic!` 的文档来自统一 semantic record。标准类型、成员和 associated function 直接从 `std.toml` 列出的 `.ruai` 构建，因此 completion、hover 和 definition 使用同一个声明 identity。
+enum variant 在 declaration、constructor、qualified path、alias 和 match pattern 中使用同一 identity。struct/enum associated function 与 method call 解析到 owner definition，支持 hover 和 definition。function、method、trait item、extern 和 `.ruai` 的文档来自统一 semantic record。标准类型、成员、associated function 以及 `Option`、`Result`、`Vec`、`HashMap`、`print`、`format`、`panic` 直接从 `std.toml` 列出的 `.ruai` 构建，因此 completion、hover 和 definition 使用同一份声明数据。
 
 ## 2. Completion 与签名
 
@@ -34,8 +36,13 @@ unknown member receiver 会返回空的 member context，避免在 `.` 后混入
 | Diagnostics | parser、name resolution、type checking、trait/module、`.ruai` 和 control-flow diagnostics |
 | Lints | unused variable、redundant `mut`、unreachable code、unused function、infinite loop |
 | Semantic tokens | full 与 range token，包含 declaration、readonly、static、async 和 unused modifier |
-| Inlay hints | inferred binding type、parameter name、closure parameter/return 和 iterator chain type |
+| Inlay hints | inferred binding type、parameter name、closure parameter/return 和 iterator chain type；类型 identity 与 hover/navigation 一致 |
 | Code lens | definition reference count 与 type/trait implementation 信息 |
+
+LSP 使用 project 的 cfg 视图：未激活声明不会污染名称解析、completion 或普通诊断，
+但源码仍以 inactive semantic token 显示，并可 hover 查看对应条件。annotation 名称、
+声明和应用使用同一 definition identity，支持 completion、hover、goto definition、
+references 与 rename；参数和 target 约束错误由 native diagnostics 报告。
 
 diagnostic 使用稳定 code 和精确 source range；human message 不作为协议分类依据。打开文档发布带 version 的结果，过期 snapshot 不会覆盖新诊断。
 
@@ -64,7 +71,8 @@ formatter 写文件时使用临时文件与原子替换；LSP formatting 返回 
 - 未在 `.ruarc.toml` 配置 `runtime.std_path` 时使用内嵌标准库；definition 会指向按版本物化的只读 `.ruai` 文件。
 - `runtime.std_path` 指向包含 `std.toml` 的目录。manifest 和 declaration 全部校验成功后才替换当前标准索引，编辑 `.ruai` 或 `std.toml` 会触发 watcher reload。
 - 一个 server 实例中的 workspace folder 必须使用相同标准库根；`workspace.library` 与 `workspace.library_mounts` 按 project 隔离。
-- workspace 根目录的 `.ruarc.toml` 与 `ruac` 共享全部项目输入；VS Code 设置只负责 language server 进程与协议 trace。
+- workspace 根目录的 `.ruarc.toml` 与 `ruac` 共享全部项目输入；VS Code 设置负责
+  language server/compiler executable、build 参数与协议 trace。
 
 VS Code 配置和启动方式见[扩展说明](../editors/vscode/README.md)。
 

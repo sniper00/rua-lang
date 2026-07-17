@@ -293,9 +293,8 @@ pub enum Expr {
     MapLiteral {
         entries: Vec<MapLiteralEntry>,
     },
-    MacroCall {
-        macro_name: NameRefId,
-        args: Vec<ExprId>,
+    VecLiteral {
+        elements: Vec<ExprId>,
     },
     Block(Block),
 }
@@ -601,7 +600,6 @@ pub enum NameRefKind {
     StructField,
     PatternPath,
     PatternField,
-    Macro,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1302,12 +1300,12 @@ impl BodyLowerer {
                     .collect();
                 Expr::MapLiteral { entries }
             }
-            AstExpr::MacroCall(expr) => {
-                let macro_name =
-                    self.alloc_name_ref_token(expr.name(), NameRefKind::Macro, expr.syntax());
-                let args = self.lower_argument_children(expr.syntax());
-                Expr::MacroCall { macro_name, args }
-            }
+            AstExpr::Array(expr) => Expr::VecLiteral {
+                elements: expr
+                    .elements()
+                    .map(|element| self.lower_expr(element))
+                    .collect(),
+            },
             AstExpr::Block(block) => return self.lower_block(block),
         };
         self.alloc_expr(lowered, range)
@@ -1558,20 +1556,6 @@ impl BodyLowerer {
         self.source_map.name_ref_ranges.push(self.file_range(range));
         self.record_source(BodySourceId::NameRef(id), range);
         id
-    }
-
-    fn alloc_name_ref_token(
-        &mut self,
-        token: Option<SyntaxToken>,
-        kind: NameRefKind,
-        parent: &SyntaxNode,
-    ) -> NameRefId {
-        match token {
-            Some(token) => {
-                self.alloc_name_ref(Some(token.text().to_string()), kind, token_range(&token))
-            }
-            None => self.alloc_name_ref(None, kind, insertion_range(parent)),
-        }
     }
 
     fn record_source(&mut self, id: BodySourceId, range: TextRange) {

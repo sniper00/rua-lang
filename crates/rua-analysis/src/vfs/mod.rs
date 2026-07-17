@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-pub use rua_core::{FileId, ProjectId, SourceRootId};
+pub use rua_core::{CfgOptions, FileId, ProjectId, SourceRootId};
 pub use rua_project::SourceRootKind;
 
 /// Logical path within a source root. Construction is lexical and performs no
@@ -91,6 +91,7 @@ pub struct ProjectData {
     root_file: FileId,
     workspace_roots: Vec<ProjectRoot>,
     dependency_roots: Vec<ProjectRoot>,
+    cfg: CfgOptions,
 }
 
 impl ProjectData {
@@ -103,7 +104,13 @@ impl ProjectData {
             root_file,
             workspace_roots: workspace_roots.into_iter().collect(),
             dependency_roots: dependency_roots.into_iter().collect(),
+            cfg: CfgOptions::default(),
         }
+    }
+
+    pub fn with_cfg(mut self, cfg: CfgOptions) -> Self {
+        self.cfg = cfg;
+        self
     }
 
     pub const fn root_file(&self) -> FileId {
@@ -120,6 +127,10 @@ impl ProjectData {
 
     pub fn roots(&self) -> impl Iterator<Item = &ProjectRoot> {
         self.workspace_roots.iter().chain(&self.dependency_roots)
+    }
+
+    pub const fn cfg(&self) -> &CfgOptions {
+        &self.cfg
     }
 }
 

@@ -2,12 +2,13 @@
 
 use std::hash::{Hash, Hasher};
 
+use rua_core::{CfgOptions, expand_cfg_attributes};
 use rua_syntax::{
     AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken,
     ast::{
-        EnumDecl, EnumVariant, ExternFn, FnDecl, GenericParams, ImplDecl, Item, Param,
-        ReceiverKind as AstReceiverKind, SourceFile, StructDecl, TraitDecl, TraitMethod, Type,
-        VariantKind as AstVariantKind, WhereClause,
+        AnnotationDecl, EnumDecl, EnumVariant, ExternFn, FnDecl, GenericParams, HasAttributes,
+        ImplDecl, Item, Param, ReceiverKind as AstReceiverKind, SourceFile, StructDecl, TraitDecl,
+        TraitMethod, Type, VariantKind as AstVariantKind, WhereClause,
     },
 };
 
@@ -16,6 +17,7 @@ use crate::vfs::FileKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ItemKind {
+    Annotation,
     Function,
     Struct,
     Field,
@@ -592,7 +594,11 @@ pub struct ItemTree {
 
 impl ItemTree {
     pub fn lower(file: &SourceFile) -> Self {
-        let (items, imports) = Self::lower_scope(file.items());
+        Self::lower_with_cfg(file, &CfgOptions::default())
+    }
+
+    pub fn lower_with_cfg(file: &SourceFile, cfg: &CfgOptions) -> Self {
+        let (items, imports) = Self::lower_scope(file.items(), cfg);
         let declaration_fingerprint = SignatureFingerprint::for_tree(&items, &imports);
         Self {
             items,
@@ -613,10 +619,16 @@ impl ItemTree {
         self.declaration_fingerprint
     }
 
-    fn lower_scope(items: impl Iterator<Item = Item>) -> (Vec<ItemTreeItem>, Vec<Import>) {
+    fn lower_scope(
+        items: impl Iterator<Item = Item>,
+        cfg: &CfgOptions,
+    ) -> (Vec<ItemTreeItem>, Vec<Import>) {
         let mut summaries = Vec::new();
         let mut imports = Vec::new();
         for item in items {
+            if !attributes_active(item.attributes(), cfg) {
+                continue;
+            }
             match item {
                 Item::Use(item) => imports.extend(item.imports().map(|import| {
                     Import {
@@ -628,32 +640,55 @@ impl ItemTree {
                         alias: import.alias.map(|token| token.text().to_string()),
                     }
                 })),
-                item => summaries.extend(Self::lower_non_module_item(item)),
+                item => summaries.extend(Self::lower_non_module_item(item, cfg)),
             }
         }
         (summaries, imports)
     }
 
-    fn lower_non_module_item(item: Item) -> Vec<ItemTreeItem> {
+    fn lower_non_module_item(item: Item, cfg: &CfgOptions) -> Vec<ItemTreeItem> {
         match item {
+            Item::Annotation(item) => Self::lower_annotation(&item).into_iter().collect(),
             Item::Fn(item) => {
                 Self::lower_function(&item, ItemKind::Function, ItemSourceKind::Definition)
                     .into_iter()
                     .collect()
             }
-            Item::Struct(item) => Self::lower_struct(&item).into_iter().collect(),
-            Item::Enum(item) => Self::lower_enum(&item).into_iter().collect(),
-            Item::Trait(item) => Self::lower_trait(&item).into_iter().collect(),
-            Item::Impl(item) => Self::lower_impl(&item).into_iter().collect(),
+            Item::Struct(item) => Self::lower_struct(&item, cfg).into_iter().collect(),
+            Item::Enum(item) => Self::lower_enum(&item, cfg).into_iter().collect(),
+            Item::Trait(item) => Self::lower_trait(&item, cfg).into_iter().collect(),
+            Item::Impl(item) => Self::lower_impl(&item, cfg).into_iter().collect(),
             Item::Extern(block) => {
                 let abi = normalized_extern_abi(block.abi());
                 block
                     .fns()
+                    .filter(|function| attributes_active(function.attributes(), cfg))
                     .filter_map(|function| Self::lower_extern(&function, abi.clone()))
                     .collect()
             }
             Item::Use(_) => Vec::new(),
         }
+    }
+
+    fn lower_annotation(item: &AnnotationDecl) -> Option<ItemTreeItem> {
+        let signature = callable_signature(CallableSignatureInput {
+            node: item.syntax(),
+            generic_params_node: None,
+            params: item.params().collect(),
+            return_type: None,
+            where_clause: None,
+            receiver: None,
+            variadic: false,
+            abi: None,
+        });
+        Self::named_item(
+            item,
+            ItemKind::Annotation,
+            visibility(item.is_pub()),
+            ItemSourceKind::Definition,
+            ItemSignature::Callable(signature),
+            Vec::new(),
+        )
     }
 
     fn lower_function(
@@ -681,11 +716,12 @@ impl ItemTree {
         )
     }
 
-    fn lower_struct(item: &StructDecl) -> Option<ItemTreeItem> {
+    fn lower_struct(item: &StructDecl, cfg: &CfgOptions) -> Option<ItemTreeItem> {
         let children = item
             .field_list()
             .into_iter()
             .flat_map(|fields| fields.fields().collect::<Vec<_>>())
+            .filter(|field| attributes_active(field.attributes(), cfg))
             .filter_map(|field| {
                 Self::named_item(
                     &field,
@@ -710,13 +746,14 @@ impl ItemTree {
         )
     }
 
-    fn lower_enum(item: &EnumDecl) -> Option<ItemTreeItem> {
+    fn lower_enum(item: &EnumDecl, cfg: &CfgOptions) -> Option<ItemTreeItem> {
         let parent_visibility = visibility(item.is_pub());
         let children = item
             .variant_list()
             .into_iter()
             .flat_map(|variants| variants.variants().collect::<Vec<_>>())
-            .filter_map(|variant| Self::lower_variant(&variant, parent_visibility))
+            .filter(|variant| attributes_active(variant.attributes(), cfg))
+            .filter_map(|variant| Self::lower_variant(&variant, parent_visibility, cfg))
             .collect();
         Self::named_item(
             item,
@@ -731,11 +768,16 @@ impl ItemTree {
         )
     }
 
-    fn lower_variant(item: &EnumVariant, variant_visibility: Visibility) -> Option<ItemTreeItem> {
+    fn lower_variant(
+        item: &EnumVariant,
+        variant_visibility: Visibility,
+        cfg: &CfgOptions,
+    ) -> Option<ItemTreeItem> {
         let children = item
             .field_list()
             .into_iter()
             .flat_map(|fields| fields.fields().collect::<Vec<_>>())
+            .filter(|field| attributes_active(field.attributes(), cfg))
             .filter_map(|field| {
                 Self::named_item(
                     &field,
@@ -764,9 +806,10 @@ impl ItemTree {
         )
     }
 
-    fn lower_trait(item: &TraitDecl) -> Option<ItemTreeItem> {
+    fn lower_trait(item: &TraitDecl, cfg: &CfgOptions) -> Option<ItemTreeItem> {
         let children = item
             .methods()
+            .filter(|method| attributes_active(method.attributes(), cfg))
             .filter_map(|method| Self::lower_trait_method(&method))
             .collect();
         Self::named_item(
@@ -808,7 +851,7 @@ impl ItemTree {
         )
     }
 
-    fn lower_impl(item: &ImplDecl) -> Option<ItemTreeItem> {
+    fn lower_impl(item: &ImplDecl, cfg: &CfgOptions) -> Option<ItemTreeItem> {
         let name_token = item.type_name()?;
         let (trait_ref, target_type) = impl_header(item);
         let name = match &trait_ref {
@@ -821,6 +864,7 @@ impl ItemTree {
         };
         let children = item
             .methods()
+            .filter(|method| attributes_active(method.attributes(), cfg))
             .filter_map(|method| {
                 Self::lower_function(&method, ItemKind::Method, ItemSourceKind::ImplMethod)
             })
@@ -894,6 +938,21 @@ impl ItemTree {
             },
         ))
     }
+}
+
+fn attributes_active(
+    attributes: impl Iterator<Item = rua_syntax::ast::Attribute>,
+    cfg: &CfgOptions,
+) -> bool {
+    let attributes = attributes
+        .map(|attribute| attribute.to_core())
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(attributes) = attributes else {
+        return true;
+    };
+    expand_cfg_attributes(&attributes, cfg)
+        .map(|expanded| expanded.active)
+        .unwrap_or(true)
 }
 
 fn visibility(is_public: bool) -> Visibility {
@@ -1270,6 +1329,7 @@ fn token_range(token: &SyntaxToken) -> TextRange {
 
 #[cfg(test)]
 mod tests {
+    use rua_core::CfgOptions;
     use rua_syntax::parse_source_file;
 
     use super::{
@@ -1506,5 +1566,32 @@ mod tests {
         assert_eq!(tree.imports()[0].binding_name(), Some("one"));
         assert_eq!(tree.imports()[1].path(), ["math", "two"]);
         assert_eq!(tree.imports()[1].binding_name(), Some("second"));
+    }
+
+    #[test]
+    fn item_tree_cfg_view_filters_items_and_members() {
+        let parse = parse_source_file(
+            r#"
+            #[cfg(feature = "server")]
+            fn server() {}
+            struct Config {
+                #[cfg(feature = "server")]
+                port: i64,
+                name: String,
+            }
+            "#,
+        );
+        assert!(parse.errors().is_empty(), "{:?}", parse.errors());
+        let default_tree = ItemTree::lower_with_cfg(parse.tree(), &CfgOptions::default());
+        assert_eq!(default_tree.items().len(), 1);
+        assert_eq!(default_tree.items()[0].name(), "Config");
+        assert_eq!(default_tree.items()[0].children().len(), 1);
+        assert_eq!(default_tree.items()[0].children()[0].name(), "name");
+
+        let mut cfg = CfgOptions::default();
+        cfg.insert_feature("server");
+        let server_tree = ItemTree::lower_with_cfg(parse.tree(), &cfg);
+        assert_eq!(server_tree.items().len(), 2);
+        assert_eq!(server_tree.items()[1].children().len(), 2);
     }
 }

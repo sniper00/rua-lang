@@ -1,6 +1,6 @@
 //! Native, error-tolerant type inference over lowered bodies.
 
-use rua_core::{BuiltinId, BuiltinMacroLowering, builtin_macro, builtin_type, builtin_value};
+use rua_core::{BuiltinId, builtin_type, builtin_value};
 
 use super::body::MapLiteralEntry;
 use super::{
@@ -419,7 +419,7 @@ impl<'a> InferenceContext<'a> {
                 self.infer_struct_literal(&path, &fields, expected)
             }
             Expr::MapLiteral { entries } => self.infer_map_literal(&entries, expected),
-            Expr::MacroCall { macro_name, args } => self.infer_macro(macro_name, &args, expected),
+            Expr::VecLiteral { elements } => self.infer_vec_literal(&elements, expected),
             Expr::Block(block) => self.infer_block(block.statements(), block.tail(), expected),
         };
         self.set_expr(expr_id, ty.clone());
@@ -1141,6 +1141,16 @@ impl<'a> InferenceContext<'a> {
             }
         }
         let Some(definition) = self.resolve_definition_path(path) else {
+            if self.is_unshadowed_path(path)
+                && let [name_ref] = path
+                && let Some(name) = self
+                    .body
+                    .name_ref(*name_ref)
+                    .and_then(|name_ref| name_ref.name())
+                && let Some(function) = self.member_index.standard_function(name)
+            {
+                return Ty::Function(function.callable());
+            }
             return self.infer_associated_path(path, expected);
         };
         match definition.kind() {
@@ -1835,6 +1845,9 @@ impl<'a> InferenceContext<'a> {
         if let Some(result) = self.infer_standard_associated_call(call, callee, args, expected) {
             return result;
         }
+        if let Some(result) = self.infer_standard_function_call(call, callee, args, expected) {
+            return result;
+        }
 
         let callee_ty = self.infer_expr(callee, None);
         let closure = self.closure_target(callee);
@@ -1916,6 +1929,38 @@ impl<'a> InferenceContext<'a> {
             requirements: &requirements,
             variadic,
         })
+    }
+
+    fn infer_standard_function_call(
+        &mut self,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Option<Ty> {
+        let Expr::Path(path) = self.body.expr(callee)? else {
+            return None;
+        };
+        if !self.is_unshadowed_path(path) {
+            return None;
+        }
+        let [name_ref] = path.as_slice() else {
+            return None;
+        };
+        let name = self.body.name_ref(*name_ref)?.name()?;
+        let function = self.member_index.standard_function(name)?.clone();
+        let callable = function.callable();
+        self.set_expr(callee, Ty::Function(callable.clone()));
+        Some(self.infer_callable_call(&mut CallContext {
+            call,
+            target: CallTarget::Builtin,
+            callable: &callable,
+            args,
+            expected,
+            substitution: Substitution::new(),
+            requirements: &[],
+            variadic: function.is_variadic(),
+        }))
     }
 
     fn infer_callable_call(&mut self, ctx: &mut CallContext<'_>) -> Ty {
@@ -2201,67 +2246,34 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
-    fn infer_macro(&mut self, name_ref: NameRefId, args: &[ExprId], expected: Option<&Ty>) -> Ty {
-        let name = self
-            .body
-            .name_ref(name_ref)
-            .and_then(|name_ref| name_ref.name())
-            .unwrap_or_default();
-        let lowering = builtin_macro(name).map(|spec| spec.lowering);
-        match lowering {
-            Some(BuiltinMacroLowering::Vec) => {
-                let expected_item = match expected {
-                    Some(Ty::Vec(item)) => Some((**item).clone()),
-                    _ => None,
-                };
-                let mut item = Ty::Never;
-                let mut diverges = false;
-                for argument in args {
-                    let actual = self.infer_expr(*argument, expected_item.as_ref());
-                    self.report_argument_mismatch(*argument, expected_item.as_ref(), &actual);
-                    diverges |= actual.is_never();
-                    let item_ty = if actual.is_unknown() {
-                        expected_item.clone().unwrap_or(Ty::Unknown)
-                    } else {
-                        actual
-                    };
-                    item = item.join(&item_ty);
-                }
-                if diverges {
-                    Ty::Never
-                } else if args.is_empty() {
-                    Ty::Vec(Box::new(expected_item.unwrap_or(Ty::Unknown)))
-                } else {
-                    Ty::Vec(Box::new(item))
-                }
+    fn infer_vec_literal(&mut self, elements: &[ExprId], expected: Option<&Ty>) -> Ty {
+        let expected_item = match expected {
+            Some(Ty::Vec(item)) => Some((**item).clone()),
+            _ => None,
+        };
+        let mut item = Ty::Never;
+        let mut established = expected_item.clone();
+        let mut diverges = false;
+        for element in elements {
+            let actual = self.infer_expr(*element, established.as_ref());
+            self.report_argument_mismatch(*element, established.as_ref(), &actual);
+            diverges |= actual.is_never();
+            if established.is_none() && actual.is_concrete() && !actual.is_never() {
+                established = Some(actual.clone());
             }
-            Some(BuiltinMacroLowering::Format) => {
-                let mut diverges = false;
-                for argument in args {
-                    diverges |= self.infer_expr(*argument, None).is_never();
-                }
-                diverge_or(diverges, Ty::STRING)
-            }
-            Some(BuiltinMacroLowering::Panic) => {
-                for argument in args {
-                    self.infer_expr(*argument, None);
-                }
-                Ty::Never
-            }
-            Some(BuiltinMacroLowering::Print | BuiltinMacroLowering::Println) => {
-                let mut diverges = false;
-                for argument in args {
-                    diverges |= self.infer_expr(*argument, None).is_never();
-                }
-                diverge_or(diverges, Ty::UNIT)
-            }
-            Some(BuiltinMacroLowering::Passthrough) | None => {
-                let mut diverges = false;
-                for argument in args {
-                    diverges |= self.infer_expr(*argument, None).is_never();
-                }
-                diverge_or(diverges, Ty::Unknown)
-            }
+            let item_ty = if actual.is_unknown() {
+                expected_item.clone().unwrap_or(Ty::Unknown)
+            } else {
+                actual
+            };
+            item = item.join(&item_ty);
+        }
+        if diverges {
+            Ty::Never
+        } else if elements.is_empty() {
+            Ty::Vec(Box::new(expected_item.unwrap_or(Ty::Unknown)))
+        } else {
+            Ty::Vec(Box::new(item))
         }
     }
 
@@ -2414,7 +2426,9 @@ impl<'a> InferenceContext<'a> {
             Expr::MapLiteral { entries } => entries.iter().any(|entry| {
                 self.expr_contains_break(entry.key()) || self.expr_contains_break(entry.value())
             }),
-            Expr::MacroCall { args, .. } => args.iter().any(|arg| self.expr_contains_break(*arg)),
+            Expr::VecLiteral { elements } => elements
+                .iter()
+                .any(|element| self.expr_contains_break(*element)),
             Expr::Loop { .. } => false,
             Expr::Block(block) => {
                 block

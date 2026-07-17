@@ -337,6 +337,7 @@ impl TypeHintTooltip {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompletionKind {
     Keyword,
+    Annotation,
     Variable,
     Parameter,
     Function,
@@ -350,7 +351,6 @@ pub enum CompletionKind {
     Module,
     TypeAlias,
     BuiltinType,
-    Macro,
 }
 
 /// Semantic insertion intent. The adapter chooses the concrete snippet syntax.
@@ -364,17 +364,6 @@ pub enum CompletionInsert {
         /// Parameter names/types for snippet placeholders (e.g. `["x: i64", "y: i64"]`).
         params: Vec<String>,
     },
-    MacroCall {
-        name: String,
-        delimiter: MacroDelimiter,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MacroDelimiter {
-    Parentheses,
-    Brackets,
-    Braces,
 }
 
 /// Orthogonal relevance score for a completion item, modelled after
@@ -511,12 +500,6 @@ impl CompletionRelevance {
     pub const fn builtin_const() -> Self {
         Self {
             base: 35,
-            ..Self::DEFAULT
-        }
-    }
-    pub const fn builtin_macro() -> Self {
-        Self {
-            base: 20,
             ..Self::DEFAULT
         }
     }
@@ -993,6 +976,7 @@ impl SemanticTokenModifiers {
     pub const DEFAULT_LIBRARY: Self = Self(1 << 3);
     pub const UNUSED: Self = Self(1 << 4);
     pub const MUTABLE: Self = Self(1 << 5);
+    pub const INACTIVE: Self = Self(1 << 6);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -1071,6 +1055,10 @@ impl SemanticToken {
 
     pub const fn is_declaration(self) -> bool {
         self.modifiers.contains(SemanticTokenModifiers::DECLARATION)
+    }
+
+    pub(crate) fn add_modifiers(&mut self, modifiers: SemanticTokenModifiers) {
+        self.modifiers = self.modifiers.union(modifiers);
     }
 
     pub fn normalize(tokens: &mut Vec<Self>) {

@@ -53,6 +53,10 @@ impl Place {
         segments.extend(self.fields.iter().cloned());
         segments
     }
+
+    pub(crate) fn fields(&self) -> &[String] {
+        &self.fields
+    }
 }
 
 impl fmt::Display for Place {
@@ -103,6 +107,9 @@ impl BackendLayout {
             };
             modules.insert(module.id, place);
         }
+        used.entry(hir.root)
+            .or_default()
+            .extend(dependency_aliases.iter().cloned());
 
         let mut definitions = BTreeMap::<DefId, Place>::new();
         let mut externs = BTreeMap::new();
@@ -127,7 +134,7 @@ impl BackendLayout {
                     externs.insert(extern_id, place.clone());
                     Some(place)
                 }
-                DefKind::Trait => None,
+                DefKind::Annotation | DefKind::Trait => None,
                 DefKind::Function | DefKind::Struct | DefKind::Enum => {
                     let field = allocate_name(
                         &mut used,
@@ -172,7 +179,7 @@ impl BackendLayout {
             locals.insert(local.id, Place::name(place));
         }
         let mut root_names = used.remove(&hir.root).unwrap_or_default();
-        root_names.extend(["rt".to_string(), "__rua_table_create".to_string()]);
+        root_names.extend(["rt".to_string(), "tbcreate".to_string()]);
         Self {
             modules,
             definitions,
@@ -185,17 +192,32 @@ impl BackendLayout {
     }
 
     /// Allocate backend places for one independently emitted Lua module.
-    /// Every Rua module, including the root, owns a table. The current unit is
-    /// named `__rua_module`; references to other units use stable local aliases
-    /// bound by ordinary Lua `require` calls.
+    /// Every Rua module, including the root, owns a table. References to other
+    /// units use stable local aliases bound by ordinary Lua `require` calls.
     pub fn for_module(program: &TypedProgram, current: ModuleId) -> Self {
+        Self::for_module_named(program, current, "__rua_module")
+    }
+
+    /// Allocate module places with an explicit current-unit table name.
+    pub fn for_module_named(
+        program: &TypedProgram,
+        current: ModuleId,
+        current_table: &str,
+    ) -> Self {
         let hir: &ResolvedHir = program.hir();
+        let flattened_types = hir
+            .modules
+            .iter()
+            .filter_map(|module| {
+                single_public_type(program, module.id).map(|definition| (module.id, definition))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut used = BTreeMap::<ModuleId, BTreeSet<String>>::new();
         let mut modules = BTreeMap::<ModuleId, Place>::new();
-        let mut dependency_aliases = BTreeSet::from(["__rua_module".to_string()]);
+        let mut dependency_aliases = BTreeSet::from([current_table.to_string()]);
         for module in &hir.modules {
             let place = if module.id == current {
-                Place::name("__rua_module".to_string())
+                Place::name(current_table.to_string())
             } else if module.is_declaration && !module.is_file {
                 let parent = module
                     .parent
@@ -236,15 +258,19 @@ impl BackendLayout {
                     externs.insert(extern_id, place.clone());
                     Some(place)
                 }
-                DefKind::Trait => None,
+                DefKind::Annotation | DefKind::Trait => None,
                 DefKind::Function | DefKind::Struct | DefKind::Enum => {
-                    let field = allocate_name(
-                        &mut used,
-                        definition.module,
-                        &definition.name,
-                        definition.id.index(),
-                    );
-                    Some(modules[&definition.module].field(field))
+                    if flattened_types.get(&definition.module) == Some(&definition.id) {
+                        Some(modules[&definition.module].clone())
+                    } else {
+                        let field = allocate_name(
+                            &mut used,
+                            definition.module,
+                            &definition.name,
+                            definition.id.index(),
+                        );
+                        Some(modules[&definition.module].field(field))
+                    }
                 }
             };
             if let Some(place) = place {
@@ -254,6 +280,9 @@ impl BackendLayout {
 
         let mut locals = BTreeMap::new();
         let mut local_names = BTreeMap::<(ModuleId, String), String>::new();
+        used.entry(current)
+            .or_default()
+            .extend(dependency_aliases.iter().cloned());
         for local in &hir.locals {
             let key = (local.module, local.name.clone());
             let place = if let Some(place) = local_names.get(&key) {
@@ -279,7 +308,7 @@ impl BackendLayout {
 
         let mut root_names = used.remove(&current).unwrap_or_default();
         root_names.extend(modules.values().map(|place| place.root.clone()));
-        root_names.extend(["rt".to_string(), "__rua_table_create".to_string()]);
+        root_names.extend(["rt".to_string(), "tbcreate".to_string()]);
         Self {
             modules,
             definitions,
@@ -344,6 +373,21 @@ impl BackendLayout {
     }
 }
 
+/// A source module with one public runtime type can use that type table as its
+/// Lua module value. Declaration modules retain their configured external ABI.
+pub(crate) fn single_public_type(program: &TypedProgram, module: ModuleId) -> Option<DefId> {
+    if program.hir().module(module).is_declaration {
+        return None;
+    }
+    let mut types = program.hir().definitions.iter().filter(|definition| {
+        definition.module == module
+            && definition.is_public
+            && matches!(definition.kind, DefKind::Struct | DefKind::Enum)
+    });
+    let only = types.next()?.id;
+    types.next().is_none().then_some(only)
+}
+
 /// Injective ASCII encoding for every source identifier. Compiler-generated
 /// names use other prefixes, so Lua keywords and user names cannot collide.
 pub fn user_identifier(name: &str) -> String {
@@ -357,6 +401,37 @@ pub fn user_identifier(name: &str) -> String {
         write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     encoded
+}
+
+/// Convert a dotted Lua module name to the PascalCase local table identifier
+/// used by the independently emitted module.
+pub fn module_table_identifier(module_name: &str) -> String {
+    let leaf = module_name.rsplit('.').next().unwrap_or(module_name);
+    let mut pascal = String::new();
+    let mut uppercase = true;
+    for character in leaf.chars() {
+        if character == '_' {
+            uppercase = true;
+        } else if uppercase {
+            pascal.extend(character.to_uppercase());
+            uppercase = false;
+        } else {
+            pascal.push(character);
+        }
+    }
+    if pascal.is_empty() {
+        pascal.push_str("Module");
+    }
+    user_identifier(&pascal)
+}
+
+/// EmmyLua class identity for an emitted module. Namespace segments retain
+/// their source spelling while the concrete module uses its PascalCase table.
+pub fn module_class_name(module_name: &str) -> String {
+    let table = module_table_identifier(module_name);
+    module_name
+        .rsplit_once('.')
+        .map_or(table.clone(), |(prefix, _)| format!("{prefix}.{table}"))
 }
 
 fn allocate_name(
@@ -382,10 +457,14 @@ fn module_dependency_alias(
 ) -> String {
     let path = segments
         .iter()
-        .map(|segment| user_identifier(segment))
+        .map(|segment| module_table_identifier(segment))
         .collect::<Vec<_>>()
-        .join("_");
-    let candidate = format!("__rua_dep_{path}");
+        .join("");
+    let candidate = if path.is_empty() {
+        "Module".to_string()
+    } else {
+        path
+    };
     if used.insert(candidate.clone()) {
         candidate
     } else {
@@ -409,6 +488,7 @@ fn is_plain_identifier(name: &str) -> bool {
         && !name.starts_with("__rua_")
         && !name.starts_with("__t")
         && name != "rt"
+        && name != "tbcreate"
 }
 
 const LUA_KEYWORDS: &[&str] = &[
@@ -440,11 +520,23 @@ mod tests {
         let mut used = BTreeSet::new();
         assert_eq!(
             module_dependency_alias(&["domain".to_string(), "order".to_string()], 3, &mut used),
-            "__rua_dep_domain_order"
+            "DomainOrder"
         );
         assert_eq!(
-            module_dependency_alias(&["domain".to_string(), "order".to_string()], 7, &mut used),
-            "__rua_dep_domain_order_7"
+            module_dependency_alias(&["domain_order".to_string()], 7, &mut used),
+            "DomainOrder_7"
         );
+    }
+
+    #[test]
+    fn module_names_use_pascal_case_and_qualified_class_identity() {
+        assert_eq!(module_table_identifier("presentation.console"), "Console");
+        assert_eq!(module_table_identifier("order_history"), "OrderHistory");
+        assert_eq!(
+            module_class_name("presentation.console"),
+            "presentation.Console"
+        );
+        assert_eq!(module_class_name("main"), "Main");
+        assert_ne!(user_identifier("tbcreate"), "tbcreate");
     }
 }

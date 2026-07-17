@@ -1,13 +1,13 @@
-source_len: 78
-SourceFile 0..78
-  FnDecl 0..77
+source_len: 75
+SourceFile 0..75
+  FnDecl 0..74
     KwFn 0..2 "fn"
     Ident 3..8 "visit"
     LParen 8..9 "("
     RParen 9..10 ")"
-    Block 10..77
+    Block 10..74
       LBrace 11..12 "{"
-      ForExpr 17..75
+      ForExpr 17..72
         KwFor 17..20 "for"
         Ident 21..26 "index"
         KwIn 27..29 "in"
@@ -17,19 +17,20 @@ SourceFile 0..78
           DotDotEq 31..34 "..="
           LiteralExpr 34..36
             Int 34..36 "10"
-        Block 36..75
+        Block 36..72
           LBrace 37..38 "{"
-          ExprStmt 47..69
-            MacroCallExpr 47..68
-              Ident 47..54 "println"
-              Not 54..55 "!"
-              LParen 55..56 "("
-              LiteralExpr 56..60
-                Str 56..60 "\"{}\""
-              Comma 60..61 ","
-              PathExpr 62..67
-                Ident 62..67 "index"
-              RParen 67..68 ")"
-            Semi 68..69 ";"
-          RBrace 74..75 "}"
-      RBrace 76..77 "}"
+          ExprStmt 47..66
+            CallExpr 47..65
+              PathExpr 47..52
+                Ident 47..52 "print"
+              ArgList 52..65
+                LParen 52..53 "("
+                LiteralExpr 53..57
+                  Str 53..57 "\"{}\""
+                Comma 57..58 ","
+                PathExpr 59..64
+                  Ident 59..64 "index"
+                RParen 64..65 ")"
+            Semi 65..66 ";"
+          RBrace 71..72 "}"
+      RBrace 73..74 "}"

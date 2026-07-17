@@ -115,7 +115,12 @@ fn collect_shapes(
                     collect_shapes(&child.items, module, hir, info);
                 }
             }
-            Item::Fn(_) | Item::Impl(_) | Item::Trait(_) | Item::Extern(_) | Item::Use(_) => {}
+            Item::Annotation(_)
+            | Item::Fn(_)
+            | Item::Impl(_)
+            | Item::Trait(_)
+            | Item::Extern(_)
+            | Item::Use(_) => {}
         }
     }
 }
@@ -325,6 +330,11 @@ fn walk_expr(info: &Info, hir: &crate::hir::ResolvedHir, e: &Expr, errs: &mut Ve
     let sp = e.span;
     match &e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                walk_expr(info, hir, element, errs);
+            }
+        }
         ExprKind::Closure { body, .. } => match body {
             ClosureBody::Expr(expr) => walk_expr(info, hir, expr, errs),
             ClosureBody::Block(block) => walk_block(info, hir, block, errs),
@@ -360,11 +370,6 @@ fn walk_expr(info: &Info, hir: &crate::hir::ResolvedHir, e: &Expr, errs: &mut Ve
         ExprKind::Range { start, end, .. } => {
             walk_expr(info, hir, start, errs);
             walk_expr(info, hir, end, errs);
-        }
-        ExprKind::MacroCall { args, .. } => {
-            for a in args {
-                walk_expr(info, hir, a, errs);
-            }
         }
         ExprKind::StructLit { fields, .. } => {
             check_struct_lit(info, hir, e, fields, sp, errs);
@@ -466,6 +471,11 @@ fn check_bounds(
                 check(&im.generics, errs);
                 for m in &im.methods {
                     check(&m.generics, errs);
+                }
+            }
+            Item::Extern(block) => {
+                for function in &block.fns {
+                    check(&function.generics, errs);
                 }
             }
             Item::Mod(m) => {

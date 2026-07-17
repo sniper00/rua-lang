@@ -46,7 +46,7 @@ fn is_ident(byte: u8) -> bool {
 fn closure_iterator_ide_exposes_types_and_structural_tokens() {
     let source = concat!(
         "fn main() -> i64 {\n",
-        "  let values = vec![1, 2, 3];\n",
+        "  let values = [1, 2, 3];\n",
         "  (0..3).map(|value| value + 1).filter(|item| item > 1).count()\n",
         "}\n",
     );
@@ -86,7 +86,7 @@ fn closure_iterator_ide_exposes_types_and_structural_tokens() {
 fn closure_iterator_ide_supports_goto_completion_references_and_rename() {
     let source = concat!(
         "fn main() {\n",
-        "  let values = vec![1, 2, 3];\n",
+        "  let values = [1, 2, 3];\n",
         "  let count = values.iter().map(|item| item + 1).count();\n",
         "}\n",
     );
@@ -130,7 +130,7 @@ fn closure_iterator_ide_supports_goto_completion_references_and_rename() {
 fn closure_iterator_ide_reconciles_fast_and_compiler_diagnostics() {
     let source = concat!(
         "fn main() {\n",
-        "  let values = vec![1, 2, 3];\n",
+        "  let values = [1, 2, 3];\n",
         "  let count = values.iter().filter(|value| value + 1).count();\n",
         "}\n",
     );

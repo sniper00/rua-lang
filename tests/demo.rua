@@ -105,7 +105,7 @@ impl Named for Person {
 
 impl Greet for Person {
     fn hello(&self) -> String {
-        format!("Hello, {}!", self.name)
+        format("Hello, {}!", self.name)
     }
 }
 
@@ -141,7 +141,7 @@ fn sin(x: f64) -> f64 {
 }
 
 fn say_hi(name: String) -> String {
-    format!("Hi, {}!", name)
+    format("Hi, {}!", name)
 }
 
 // ===========================================================================
@@ -162,7 +162,7 @@ fn demo_let() -> i64 {
     let x = x + 1;
     let x = x * 2;
 
-    println!("inferred values: bool={}, float={}, text={}", inferred_bool, inferred_float, text);
+    print("inferred values: bool={}, float={}, text={}", inferred_bool, inferred_float, text);
     simple + typed + mutable + x
 }
 
@@ -178,7 +178,7 @@ fn demo_control_flow(n: i64) -> i64 {
     } else {
         "zero"
     };
-    println!("control-flow sign={}", sign);
+    print("control-flow sign={}", sign);
 
     // if/else 作为值
     let abs = if n >= 0 {
@@ -236,7 +236,7 @@ fn describe_color(c: Color) -> String {
         Color::Red => "red",
         Color::Green => "green",
         Color::Blue => "blue",
-        Color::Rgb(r, g, b) => format!("rgb({}, {}, {})", r, g, b),
+        Color::Rgb(r, g, b) => format("rgb({}, {}, {})", r, g, b),
     }
 }
 
@@ -339,7 +339,7 @@ fn demo_expressions() -> i64 {
     let point_label_len = p.label.len();
 
     // 方法调用链
-    let mut c = Container { value: vec![1, 2, 3] };
+    let mut c = Container { value: [1, 2, 3] };
     c.value.push(4);
     let container_len = c.value.len();
 
@@ -379,7 +379,7 @@ fn demo_expressions() -> i64 {
 // 13. 迭代器 — map/filter/fold/find/any/all/collect
 // ===========================================================================
 fn demo_iterators() -> i64 {
-    let values = vec![1, 2, 3, 4, 5];
+    let values = [1, 2, 3, 4, 5];
 
     let doubled: Vec<i64> = values.iter().map(| x | x * 2).filter(| x | x> 5).collect();
 
@@ -439,7 +439,7 @@ fn demo_literals() -> String {
     let path = "c:\\tmp\\rua";
     let unicode = "你好世界";
 
-    format!(
+    format(
         "literals: {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}",
         zero,
         integer,
@@ -524,7 +524,7 @@ fn load_config(path: String) -> Result<String, String> {
     if path == "" {
         Result::Err("empty path".to_string())
     } else {
-        Result::Ok(format!("config from {}", path))
+        Result::Ok(format("config from {}", path))
     }
 }
 
@@ -578,7 +578,7 @@ fn demo_arithmetic() -> i64 {
     // 字符串拼接（合法）
     let greeting = "hello" + " " + "world";
 
-    println!("arithmetic: float={}, mixed={}, greeting={}", float_sum, mixed, greeting);
+    print("arithmetic: float={}, mixed={}, greeting={}", float_sum, mixed, greeting);
     int_sum
 }
 
@@ -592,7 +592,7 @@ fn main() {
 
     let mut p = Point::new(3, 4, "moving");
     p.translate(1, 2);
-    println!("points: origin distance={}, moved=({}, {})", dist, p.x, p.y);
+    print("points: origin distance={}, moved=({}, {})", dist, p.x, p.y);
 
     // 枚举 + match
     let red = Color::Red;
@@ -602,62 +602,62 @@ fn main() {
 
     let msg = Message::Move { x: 10, y: 20 };
     let message_score = classify_message(msg);
-    println!("enums: red={}, rgb={}, message={}", red_name, rgb_name, message_score);
+    print("enums: red={}, rgb={}, message={}", red_name, rgb_name, message_score);
 
     // trait + impl
     let alice = Person { name: "Alice" };
     let alice_name = label(alice);
     let same_alice = first(alice);
-    println!(
+    print(
         "traits: name={}, hello={}, bye={}, dyn={}",
         alice_name,
         same_alice.hello(),
         alice.bye(),
         greet_someone(alice),
     );
-    println!("generic identity={}", identity(42));
+    print("generic identity={}", identity(42));
 
     // 模块
     let sum = add(3, 4);
     let product = multiply(5, 6);
     let sine = sin(0.5);
     let greeting = say_hi("Bob");
-    println!("modules: sum={}, product={}, sin={}, greeting={}", sum, product, sine, greeting);
+    print("modules: sum={}, product={}, sin={}, greeting={}", sum, product, sine, greeting);
 
     // let 绑定
-    println!("let score={}", demo_let());
+    print("let score={}", demo_let());
 
     // 控制流
-    println!("control-flow score={}", demo_control_flow(42));
+    print("control-flow score={}", demo_control_flow(42));
 
     // 迭代器
-    println!("iterator score={}", demo_iterators());
+    print("iterator score={}", demo_iterators());
 
     // 闭包
-    println!("closure score={}", demo_closures());
+    print("closure score={}", demo_closures());
 
     // 模式匹配
     let wrapper = Wrapper { inner: Option::Some(Result::Ok(7)) };
-    println!(
+    print(
         "patterns: option={}, wrapper={}",
         demo_patterns(Option::None),
         unwrap_wrapper(wrapper),
     );
 
     // 表达式
-    println!("expression score={}", demo_expressions());
+    print("expression score={}", demo_expressions());
 
     // trait object
-    println!("trait object={}", demo_trait_object(alice));
+    print("trait object={}", demo_trait_object(alice));
 
     // self 接收器
-    println!("self receiver score={}", demo_self_receivers());
+    print("self receiver score={}", demo_self_receivers());
 
     // extern
     demo_extern();
 
     // 字面量
-    println!("{}", demo_literals());
+    print("{}", demo_literals());
 
     // ? 运算符
     let config_result = load_and_parse("app.rua");
@@ -665,10 +665,10 @@ fn main() {
     let chained = chain_option(Option::Some(1), Option::Some(2));
     let none_propagate = chain_option(Option::None, Option::Some(5));
     match config_result {
-        Result::Ok(value) => println!("result value={}", value),
-        Result::Err(error) => println!("result error={}", error),
+        Result::Ok(value) => print("result value={}", value),
+        Result::Err(error) => print("result error={}", error),
     }
-    println!(
+    print(
         "options: doubled={}, chained={}, none={}",
         match_with_wildcard(doubled),
         match_with_wildcard(chained),
@@ -676,10 +676,10 @@ fn main() {
     );
 
     // 类型检测
-    println!("arithmetic score={}", demo_arithmetic());
+    print("arithmetic score={}", demo_arithmetic());
 
     // 注释
-    println!("comment score={}", demo_comments());
+    print("comment score={}", demo_comments());
 }
 
 main();

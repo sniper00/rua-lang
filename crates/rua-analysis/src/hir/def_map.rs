@@ -271,6 +271,7 @@ impl Eq for IdentityLease {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Chunk,
+    Annotation,
     Function,
     Struct,
     Field,
@@ -303,6 +304,7 @@ impl DefKind {
     const fn path_tag(self) -> &'static str {
         match self {
             Self::Chunk => "chunk",
+            Self::Annotation => "annotation",
             Self::Function => "fn",
             Self::Struct => "struct",
             Self::Field => "field",
@@ -321,6 +323,7 @@ impl DefKind {
 impl From<ItemKind> for DefKind {
     fn from(kind: ItemKind) -> Self {
         match kind {
+            ItemKind::Annotation => Self::Annotation,
             ItemKind::Function => Self::Function,
             ItemKind::Struct => Self::Struct,
             ItemKind::Field => Self::Field,
@@ -921,7 +924,10 @@ impl DefMapBuilder<'_> {
                 "chunk",
             );
         }
-        let item_tree = self.db.item_tree(file_id);
+        let item_tree = match self.map.project_id {
+            Some(project_id) => self.db.project_item_tree(project_id, file_id),
+            None => self.db.item_tree(file_id),
+        };
         self.lower_items(module_id, file_id, item_tree.items(), "");
         self.pending_imports.extend(
             item_tree

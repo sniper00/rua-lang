@@ -5,5 +5,5 @@ local fmt = rua_std.fmt
 
 local function main()
     local text = fmt.format("value = {}", 42)
-    fmt.println("{}", text)
+    fmt.print("{}", text)
 end

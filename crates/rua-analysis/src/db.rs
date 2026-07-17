@@ -39,6 +39,7 @@ pub struct BaseDb {
     identity_interner: Arc<Mutex<IdentityInterner>>,
     standard_library: Arc<StdLibraryIndex>,
     item_tree_cache: Mutex<HashMap<FileId, Arc<ItemTree>>>,
+    project_item_tree_cache: Mutex<HashMap<(ProjectId, FileId), Arc<ItemTree>>>,
     def_map_cache: Mutex<HashMap<DefMapKey, DefMapCacheEntry>>,
     member_index_cache: Mutex<HashMap<DefMapKey, MemberIndexCacheEntry>>,
     reference_index_cache: Mutex<HashMap<DefMapKey, ReferenceIndexCacheEntry>>,
@@ -95,6 +96,7 @@ impl Default for BaseDb {
                     .clone(),
             ),
             item_tree_cache: Mutex::new(HashMap::new()),
+            project_item_tree_cache: Mutex::new(HashMap::new()),
             def_map_cache: Mutex::new(HashMap::new()),
             member_index_cache: Mutex::new(HashMap::new()),
             reference_index_cache: Mutex::new(HashMap::new()),
@@ -114,6 +116,7 @@ impl Clone for BaseDb {
             identity_interner: Arc::clone(&self.identity_interner),
             standard_library: Arc::clone(&self.standard_library),
             item_tree_cache: Mutex::new(lock(&self.item_tree_cache).clone()),
+            project_item_tree_cache: Mutex::new(lock(&self.project_item_tree_cache).clone()),
             def_map_cache: Mutex::new(lock(&self.def_map_cache).clone()),
             member_index_cache: Mutex::new(lock(&self.member_index_cache).clone()),
             reference_index_cache: Mutex::new(lock(&self.reference_index_cache).clone()),
@@ -384,7 +387,8 @@ impl BaseDb {
             lock(&self.identity_interner).active_sizes();
         CacheSizes {
             parse,
-            item_tree: lock(&self.item_tree_cache).len(),
+            item_tree: lock(&self.item_tree_cache).len()
+                + lock(&self.project_item_tree_cache).len(),
             def_map: lock(&self.def_map_cache).len(),
             body: lock(&self.body_cache).len(),
             body_resolution: lock(&self.local_resolution_cache).len(),
@@ -402,6 +406,8 @@ impl BaseDb {
 
     fn invalidate_file_text(&mut self, file_id: FileId) {
         get_mut(&mut self.item_tree_cache).remove(&file_id);
+        get_mut(&mut self.project_item_tree_cache)
+            .retain(|(_, cached_file), _| *cached_file != file_id);
         get_mut(&mut self.reference_index_cache).clear();
     }
 
@@ -411,6 +417,7 @@ impl BaseDb {
     }
 
     fn clear_project_caches(&mut self) {
+        get_mut(&mut self.project_item_tree_cache).clear();
         get_mut(&mut self.def_map_cache).clear();
         get_mut(&mut self.member_index_cache).clear();
         get_mut(&mut self.reference_index_cache).clear();
@@ -491,6 +498,27 @@ impl BaseDb {
         lock(&self.query_stats).item_tree += 1;
         let item_tree = Arc::new(ItemTree::lower(parse.tree()));
         lock(&self.item_tree_cache).insert(file_id, item_tree.clone());
+        item_tree
+    }
+
+    pub(crate) fn project_item_tree(
+        &self,
+        project_id: ProjectId,
+        file_id: FileId,
+    ) -> Arc<ItemTree> {
+        let key = (project_id, file_id);
+        if let Some(item_tree) = lock(&self.project_item_tree_cache).get(&key).cloned() {
+            return item_tree;
+        }
+        let parse = self.parse(file_id);
+        let cfg = self
+            .project(project_id)
+            .map(|project| project.cfg())
+            .cloned()
+            .unwrap_or_default();
+        lock(&self.query_stats).item_tree += 1;
+        let item_tree = Arc::new(ItemTree::lower_with_cfg(parse.tree(), &cfg));
+        lock(&self.project_item_tree_cache).insert(key, item_tree.clone());
         item_tree
     }
 
@@ -583,7 +611,12 @@ impl BaseDb {
             if self.file_text(dependency.file_id).is_none() {
                 return false;
             }
-            let current_tree = self.item_tree(dependency.file_id);
+            let current_tree = match key {
+                DefMapKey::Implicit(_) => self.item_tree(dependency.file_id),
+                DefMapKey::Project(project_id) => {
+                    self.project_item_tree(project_id, dependency.file_id)
+                }
+            };
             self.file_kind(dependency.file_id) == Some(dependency.kind)
                 && current_tree.declaration_fingerprint() == dependency.fingerprint
                 && current_tree.as_ref() == dependency.item_tree.as_ref()
@@ -604,7 +637,10 @@ impl BaseDb {
         let dependencies = files
             .into_iter()
             .filter_map(|file_id| {
-                let item_tree = self.item_tree(file_id);
+                let item_tree = match key {
+                    DefMapKey::Implicit(_) => self.item_tree(file_id),
+                    DefMapKey::Project(project_id) => self.project_item_tree(project_id, file_id),
+                };
                 Some(DeclarationDependency {
                     file_id,
                     kind: self.file_kind(file_id)?,

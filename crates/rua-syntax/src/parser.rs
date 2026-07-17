@@ -285,17 +285,20 @@ impl<'a> Parser<'a> {
     }
 
     fn scope_entry(&mut self) {
-        if matches!(
-            self.current(),
-            K::KwPub
-                | K::KwFn
-                | K::KwStruct
-                | K::KwEnum
-                | K::KwTrait
-                | K::KwImpl
-                | K::KwExtern
-                | K::KwUse
-        ) {
+        if (self.at(K::Hash) && self.nth(1) == K::LBracket)
+            || self.at_contextual("annotation")
+            || matches!(
+                self.current(),
+                K::KwPub
+                    | K::KwFn
+                    | K::KwStruct
+                    | K::KwEnum
+                    | K::KwTrait
+                    | K::KwImpl
+                    | K::KwExtern
+                    | K::KwUse
+            )
+        {
             self.item();
         } else {
             self.statement();
@@ -304,7 +307,12 @@ impl<'a> Parser<'a> {
 
     fn item(&mut self) {
         let cp = self.builder.checkpoint();
+        self.outer_attributes();
         let _ = self.accept(K::KwPub);
+        if self.at_contextual("annotation") {
+            self.annotation_decl(cp);
+            return;
+        }
         match self.current() {
             K::KwFn => {
                 self.fn_sig();
@@ -320,10 +328,121 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error_with_code(
                     DiagnosticCode::ParseExpectedItem,
-                    "expected item (fn/struct/enum/impl/trait/extern/use)",
+                    "expected item (annotation/fn/struct/enum/impl/trait/extern/use)",
                 );
                 self.error_bump();
             }
+        }
+    }
+
+    fn annotation_decl(&mut self, cp: rowan::Checkpoint) {
+        self.bump(); // contextual `annotation`
+        self.expect_ident();
+        self.expect(K::LParen);
+        while !self.at(K::RParen) && !self.at(K::Eof) {
+            let before = self.pos;
+            self.param();
+            if !self.accept(K::Comma) {
+                break;
+            }
+            if self.pos == before {
+                self.error_bump();
+            }
+        }
+        self.expect(K::RParen);
+        self.expect(K::Semi);
+        self.wrap(cp, K::AnnotationDecl);
+    }
+
+    fn outer_attributes(&mut self) {
+        while self.at(K::Hash) && self.nth(1) == K::LBracket {
+            self.builder.start_node(K::Attribute);
+            self.expect(K::Hash);
+            self.expect(K::LBracket);
+            self.meta_item();
+            self.expect(K::RBracket);
+            self.builder.finish_node();
+        }
+    }
+
+    fn meta_item(&mut self) {
+        self.builder.start_node(K::MetaItem);
+        if matches!(
+            self.current(),
+            K::Str | K::Int | K::Float | K::KwTrue | K::KwFalse
+        ) {
+            self.bump();
+            self.builder.finish_node();
+            return;
+        }
+        self.expect_meta_name();
+        while self.accept(K::ColonColon) {
+            self.expect_meta_name();
+        }
+        if self.accept(K::Eq) {
+            self.meta_value();
+        } else if self.accept(K::LParen) {
+            while !self.at(K::RParen) && !self.at(K::Eof) {
+                let before = self.pos;
+                self.meta_item();
+                if !self.accept(K::Comma) {
+                    break;
+                }
+                if self.pos == before {
+                    self.error_bump();
+                }
+            }
+            self.expect(K::RParen);
+        }
+        self.builder.finish_node();
+    }
+
+    fn meta_value(&mut self) {
+        self.builder.start_node(K::MetaValue);
+        match self.current() {
+            K::Str | K::Int | K::Float | K::KwTrue | K::KwFalse => self.bump(),
+            K::Ident => {
+                self.bump();
+                while self.accept(K::ColonColon) {
+                    self.expect_meta_name();
+                }
+            }
+            K::LBracket => {
+                self.bump();
+                while !self.at(K::RBracket) && !self.at(K::Eof) {
+                    let before = self.pos;
+                    self.meta_value();
+                    if !self.accept(K::Comma) {
+                        break;
+                    }
+                    if self.pos == before {
+                        self.error_bump();
+                    }
+                }
+                self.expect(K::RBracket);
+            }
+            _ => {
+                self.error("attribute value must be a literal, path, or homogeneous list");
+                self.error_bump();
+            }
+        }
+        self.builder.finish_node();
+    }
+
+    fn expect_meta_name(&mut self) {
+        let text = self.current_text();
+        let valid = text
+            .bytes()
+            .next()
+            .is_some_and(|first| first == b'_' || first.is_ascii_alphabetic())
+            && text
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+            && !matches!(self.current(), K::KwTrue | K::KwFalse);
+        if valid {
+            self.bump();
+        } else {
+            self.error("expected attribute identifier");
         }
     }
 
@@ -499,6 +618,7 @@ impl<'a> Parser<'a> {
 
     fn field_decl(&mut self) {
         self.builder.start_node(K::FieldDecl);
+        self.outer_attributes();
         let _ = self.accept(K::KwPub);
         self.expect_ident();
         self.expect(K::Colon);
@@ -530,6 +650,7 @@ impl<'a> Parser<'a> {
 
     fn enum_variant(&mut self) {
         self.builder.start_node(K::EnumVariant);
+        self.outer_attributes();
         self.expect_ident();
         match self.current() {
             K::LParen => {
@@ -571,6 +692,7 @@ impl<'a> Parser<'a> {
 
     fn trait_method(&mut self) {
         self.builder.start_node(K::TraitMethod);
+        self.outer_attributes();
         self.fn_sig();
         if self.at(K::LBrace) {
             self.block();
@@ -594,6 +716,7 @@ impl<'a> Parser<'a> {
         while !self.at(K::RBrace) && !self.at(K::Eof) {
             let before = self.pos;
             let mcp = self.builder.checkpoint();
+            self.outer_attributes();
             let _ = self.accept(K::KwPub);
             self.fn_sig();
             self.block();
@@ -623,6 +746,7 @@ impl<'a> Parser<'a> {
 
     fn extern_fn(&mut self) {
         self.builder.start_node(K::ExternFn);
+        self.outer_attributes();
         let _ = self.accept(K::KwPub);
         self.expect(K::KwFn);
         self.expect_ident();
@@ -691,6 +815,12 @@ impl<'a> Parser<'a> {
 
     fn ty(&mut self) {
         self.eat_trivia();
+        if self.at(K::Not) {
+            let cp = self.builder.checkpoint();
+            self.bump();
+            self.wrap(cp, K::NeverType);
+            return;
+        }
         if self.at(K::Amp) {
             let cp = self.builder.checkpoint();
             self.bump();
@@ -1013,10 +1143,6 @@ impl<'a> Parser<'a> {
                 self.wrap(cp, K::LiteralExpr);
             }
             K::Ident | K::KwSelf => {
-                if self.at(K::Ident) && self.nth(1) == K::Not {
-                    self.macro_call();
-                    return;
-                }
                 let cp = self.builder.checkpoint();
                 self.expect_ident();
                 while self.at(K::ColonColon) {
@@ -1036,6 +1162,22 @@ impl<'a> Parser<'a> {
                 self.allow_struct_expr();
                 self.expect(K::RParen);
                 self.wrap(cp, K::ParenExpr);
+            }
+            K::LBracket => {
+                let cp = self.builder.checkpoint();
+                self.bump();
+                while !self.at(K::RBracket) && !self.at(K::Eof) {
+                    let before = self.pos;
+                    self.allow_struct_expr();
+                    if !self.accept(K::Comma) {
+                        break;
+                    }
+                    if self.pos == before {
+                        self.error_bump();
+                    }
+                }
+                self.expect(K::RBracket);
+                self.wrap(cp, K::ArrayExpr);
             }
             K::LBrace => self.block(),
             K::Hash => self.map_expr(),
@@ -1103,34 +1245,6 @@ impl<'a> Parser<'a> {
         }
         self.expect(K::RBrace);
         self.builder.finish_node();
-    }
-
-    fn macro_call(&mut self) {
-        let cp = self.builder.checkpoint();
-        self.expect_ident();
-        self.expect(K::Not);
-        let close = match self.current() {
-            K::LParen => K::RParen,
-            K::LBracket => K::RBracket,
-            _ => {
-                self.error("expected `(` or `[` after `name!`");
-                self.wrap(cp, K::MacroCallExpr);
-                return;
-            }
-        };
-        self.bump(); // opening delimiter
-        while !self.at(close) && !self.at(K::Eof) {
-            let before = self.pos;
-            self.allow_struct_expr();
-            if !self.accept(K::Comma) {
-                break;
-            }
-            if self.pos == before {
-                self.error_bump();
-            }
-        }
-        self.expect(close);
-        self.wrap(cp, K::MacroCallExpr);
     }
 
     fn struct_lit_fields(&mut self) {
@@ -1455,5 +1569,35 @@ mod tests {
         assert_eq!(parsed.syntax_node().kind(), K::SourceFile);
         assert_eq!(parsed.tree().items().count(), 1);
         assert!(parsed.ok().is_ok());
+    }
+
+    #[test]
+    fn attributes_are_lossless_structured_children() {
+        let source = "#[cfg_attr(feature = \"server\", cfg(enabled))]\nfn serve() {}";
+        let parsed = parse_source_file(source);
+        assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+        assert_eq!(parsed.syntax_node().text().to_string(), source);
+        let item = parsed.tree().items().next().unwrap();
+        let attribute = item.attributes().next().unwrap().to_core().unwrap();
+        assert_eq!(attribute.name, "cfg_attr");
+        assert_eq!(attribute.items.len(), 2);
+    }
+
+    #[test]
+    fn annotation_declaration_is_a_contextual_item() {
+        let source =
+            "#[targets(function, method)]\npub annotation Route(method: String, path: String);";
+        let parsed = parse_source_file(source);
+        assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+        assert_eq!(parsed.syntax_node().text().to_string(), source);
+        let item = parsed.tree().items().next().unwrap();
+        let crate::ast::Item::Annotation(annotation) = item else {
+            panic!("expected annotation declaration");
+        };
+        assert_eq!(
+            crate::ast::Named::name_text(&annotation).as_deref(),
+            Some("Route")
+        );
+        assert_eq!(annotation.params().count(), 2);
     }
 }

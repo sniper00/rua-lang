@@ -15,9 +15,9 @@ local scores = __t1
 
 local __t2 = scores:get("alice")
 if __t2 == nil then error("called Option::unwrap on None", 2) end
-fmt.println("{}", __t2)
-fmt.println("{}", scores:contains_key("alice"))
-fmt.println("{}", scores:contains_key("carol"))
-fmt.println("{}", vec.from_table({ [0] = 1, 2, 3, n = 3 }):contains(2))
-fmt.println("{}", string.contains("Rua", "ua"))
-fmt.println("{}", iter.range(0, 5, false):contains(3))
+fmt.print("{}", __t2)
+fmt.print("{}", scores:contains_key("alice"))
+fmt.print("{}", scores:contains_key("carol"))
+fmt.print("{}", vec.from_table({ [0] = 1, 2, 3, n = 3 }):contains(2))
+fmt.print("{}", string.contains("Rua", "ua"))
+fmt.print("{}", iter.range(0, 5, false):contains(3))

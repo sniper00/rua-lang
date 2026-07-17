@@ -43,7 +43,9 @@ pub use scope::{
     BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult,
     LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,
 };
-pub use std_library::{StdLibraryIndex, StdMember, StdMemberKind, StdType, standard_library};
+pub use std_library::{
+    StdFunction, StdLibraryIndex, StdMember, StdMemberKind, StdType, standard_library,
+};
 pub use ty::{
     CallableTy, GenericParamId, GenericParamTy, NamedTy, NamedTypeResolver, PrimitiveTy,
     Substitution, Ty, TypeLoweringContext, UnifyResult, unify,

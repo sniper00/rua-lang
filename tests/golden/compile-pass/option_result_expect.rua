@@ -1,7 +1,7 @@
 let optional: Option<i64> = Option::Some(7);
 let outcome: Result<i64, String> = Result::Ok(9);
 
-println!(
+print(
     "{} {}",
     optional.expect("missing option"),
     outcome.expect("failed operation"),

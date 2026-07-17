@@ -189,7 +189,6 @@ impl Semantics {
                         | NameRefKind::Field
                         | NameRefKind::StructField
                         | NameRefKind::PatternField
-                        | NameRefKind::Macro
                 )
             });
         }

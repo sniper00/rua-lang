@@ -2,6 +2,7 @@
 //! normalized API documentation without retaining Rowan trivia.
 
 use crate::token::SourceRange;
+use rua_core::Attribute;
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -60,6 +61,7 @@ pub struct GenericParamId {
 
 #[derive(Debug, Clone)]
 pub enum Item {
+    Annotation(AnnotationDecl),
     Fn(FnDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
@@ -72,9 +74,50 @@ pub enum Item {
     Use(UseDecl),
 }
 
+impl Item {
+    pub fn attributes(&self) -> &[Attribute] {
+        match self {
+            Self::Annotation(item) => &item.attributes,
+            Self::Fn(item) => &item.attributes,
+            Self::Struct(item) => &item.attributes,
+            Self::Enum(item) => &item.attributes,
+            Self::Impl(item) => &item.attributes,
+            Self::Trait(item) => &item.attributes,
+            Self::Extern(item) => &item.attributes,
+            Self::Mod(item) => &item.attributes,
+            Self::Use(item) => &item.attributes,
+        }
+    }
+
+    pub fn set_attributes(&mut self, attributes: Vec<Attribute>) {
+        match self {
+            Self::Annotation(item) => item.attributes = attributes,
+            Self::Fn(item) => item.attributes = attributes,
+            Self::Struct(item) => item.attributes = attributes,
+            Self::Enum(item) => item.attributes = attributes,
+            Self::Impl(item) => item.attributes = attributes,
+            Self::Trait(item) => item.attributes = attributes,
+            Self::Extern(item) => item.attributes = attributes,
+            Self::Mod(item) => item.attributes = attributes,
+            Self::Use(item) => item.attributes = attributes,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotationDecl {
+    pub name: String,
+    pub name_span: SourceRange,
+    pub attributes: Vec<Attribute>,
+    pub documentation: Option<String>,
+    pub params: Vec<Param>,
+    pub is_pub: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModDecl {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub items: Vec<Item>,
     /// Executable statements owned by this module's initialization chunk.
@@ -92,6 +135,7 @@ pub struct ModDecl {
 
 #[derive(Debug, Clone)]
 pub struct UseDecl {
+    pub attributes: Vec<Attribute>,
     pub imports: Vec<UseImport>,
 }
 
@@ -107,6 +151,7 @@ pub struct UseImport {
 /// `lua-result` emits an explicit tagged-Result/multi-return adapter.
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
+    pub attributes: Vec<Attribute>,
     pub abi: String,
     pub documentation: Option<String>,
     pub fns: Vec<ExternFn>,
@@ -115,8 +160,10 @@ pub struct ExternBlock {
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub name_span: SourceRange,
     pub documentation: Option<String>,
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// `true` when the last parameter is `...` (variadic Lua function).
@@ -142,6 +189,7 @@ pub struct TraitRef {
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub methods: Vec<TraitMethod>,
@@ -151,6 +199,7 @@ pub struct TraitDecl {
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     /// Byte-span of the method name identifier (definition site).
     pub name_span: SourceRange,
@@ -167,6 +216,7 @@ pub struct TraitMethod {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<Field>,
@@ -176,6 +226,7 @@ pub struct StructDecl {
 #[derive(Debug, Clone)]
 pub struct Field {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub ty: Type,
     /// Byte-span of the field name identifier (definition site).
@@ -185,6 +236,7 @@ pub struct Field {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<Variant>,
@@ -194,6 +246,7 @@ pub struct EnumDecl {
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     pub kind: VariantKind,
 }
@@ -207,6 +260,7 @@ pub enum VariantKind {
 
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    pub attributes: Vec<Attribute>,
     /// Generic parameters of the impl itself, e.g. `impl<T> Foo<T>`.
     pub generics: Vec<GenericParam>,
     /// Type the methods are attached to.
@@ -219,6 +273,7 @@ pub struct ImplDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: String,
+    pub attributes: Vec<Attribute>,
     pub documentation: Option<String>,
     /// Byte-span of the function name identifier (definition site).
     pub name_span: SourceRange,
@@ -257,6 +312,8 @@ pub enum Type {
     Function { params: Vec<Type>, ret: Box<Type> },
     /// Tuple type `(A, B, ...)`.
     Tuple(Vec<Type>),
+    /// Never type `!` for expressions that do not return.
+    Never,
     /// Unit `()`.
     Unit,
 }
@@ -344,6 +401,7 @@ pub enum ExprKind {
     Float(String),
     Str(String),
     Bool(bool),
+    VecLit(Vec<Expr>),
     Closure {
         params: Vec<ClosureParam>,
         ret: Option<Type>,
@@ -412,12 +470,6 @@ pub enum ExprKind {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
-    },
-    /// `name!(args)` — built-in macros: `vec!`, `println!`, `print!`,
-    /// `format!`, `panic!`.
-    MacroCall {
-        name: String,
-        args: Vec<Expr>,
     },
     If {
         cond: Box<Expr>,

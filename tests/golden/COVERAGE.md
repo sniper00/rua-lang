@@ -1,9 +1,8 @@
 # Golden Coverage Matrix
 
 This matrix records repository-level compiler/parser goldens and authoritative
-native IDE oracles. The legacy IDE snapshot runner was deleted with the old
-semantic facade; the IDE column therefore accepts an active native snapshot or
-an exact protocol-neutral/LSP test owned by the production query implementation.
+analysis/LSP oracles. The IDE column accepts an active native snapshot or an
+exact protocol-neutral/LSP test owned by the production query implementation.
 
 Status meanings:
 
@@ -15,20 +14,22 @@ Status meanings:
 
 Current inventory:
 
-- Compile pass: 44 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
+- Compile pass: 45 `.rua` / `.lua.golden` pairs; every generated artifact is also executed by Lua.
 - Compile fail: 44 `.rua` / `.diag.golden` pairs plus shared code/file/range/argument manifests.
 - Phase 4A: 13 compile-pass and 8 compile-fail closure/iterator pairs.
 - Parser/range: 17 accept, 7 reject with dual-parser diagnostic snapshots, 15 byte-range cases, and a 512-case arbitrary-Unicode property test.
 - Formatter: 11 repository-level input/output pairs with parse, lossless, token-preservation, idempotence, and `check_format` invariants.
 - File modules: one nested multi-file compile/output/runtime golden.
 - `.ruai`: 5 compiler pass, 2 compiler fail, and 4 IDE snapshots.
-- General IDE: one active native closure/iterator snapshot plus exact native
-  analysis and LSP suites; older snapshots are frozen migration records.
+- General IDE: one closure/iterator snapshot plus exact native analysis and LSP
+  suites.
 
 | Feature | Compile pass | Compile fail | Parser/range | IDE oracle | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Lexing, comments, literals | Partial | No | Yes | Partial | `comments_whitespace_stability`; parser comments, escapes, numeric, keyword-boundary cases. No dedicated lexical compile-fail matrix. |
 | Expressions and operators | Yes | Yes | Yes | Yes | `expr_*`, binary/unary errors plus exact native inference for the script operators. |
+| `cfg` and `cfg_attr` | Partial | Partial | Partial | Yes | Shared predicate tests, compiler filtering, Rowan structured parsing, formatter tests, project cfg resolution, inactive tokens and condition hover are exact; repository-level parser/compiler goldens remain incomplete. |
+| Annotation declarations and applications | Partial | Partial | Partial | Yes | Compiler integration tests cover schema validation, metadata, aggregate registry and Lua execution; native IDE tests cover completion, hover, goto, parameters, diagnostics and inactive targets. Repository-level goldens remain incomplete. |
 | Bindings, mutability, assignment | Yes | Partial | Yes | Yes | Compound assignment codegen and single-evaluation runtime behavior are covered; invalid assignment targets still lack a shared compile-fail. |
 | Blocks, if, while, loop | Yes | Yes | Yes | Yes | Includes loop values, compatible `break value`, rejection in `while`, break/continue and fast diagnostics. |
 | Option `??` and `?.` | Yes | Yes | Yes | Yes | False-safe/lazy runtime execution plus optional member completion, hover, goto and inference. |
@@ -41,11 +42,11 @@ Current inventory:
 | `Result<T, E>` and `?` | Yes | Partial | Partial | Yes | ABI v2 array tag, `Ok(nil)`/`Err(nil)`, `expect`, methods, map, storage, FFI, hover/goto and successful `?` lowering are covered; error propagation mismatch diagnostics remain incomplete. |
 | `Vec<T>` | Yes | Yes | Yes | Yes | Construction/indexing plus `in` execution, mismatch rejection and inference. |
 | `HashMap<K, V>` | Yes | Yes | Yes | Yes | Constructor/method and typed literal codegen, key/value inference, `in` and mismatch rejection. |
-| Std macros and runtime calls | Yes | No | Partial | No | `println!`, `format!`, and macro nodes appear in range fixtures; misuse diagnostics are missing. |
+| Vec literals and standard functions | Yes | Partial | Yes | Yes | Vec literals have parser, type, codegen, runtime, formatting, and IDE coverage. Standard functions resolve through `.ruai`; their misuse diagnostics are not yet a complete golden matrix. |
 | Numeric ranges and `for` | Yes | No | Yes | Partial | Both range forms have compiler Lua coverage and the range operator has a semantic-token snapshot; invalid-bound diagnostics and dedicated `for` IDE coverage are missing. |
 | Closures | Yes | Yes | Yes | Yes | Expression/typed/block closures, read/fused mutable capture, inference diagnostics, ranges, cursor queries, and semantic tokens are covered. |
 | Iterator adapters and fusion | Yes | Yes | Yes | Yes | All Phase 4A sources/adapters/consumers are type/codegen tested; exact Lua goldens enforce fused loops and the IDE snapshot covers item types and adapter tokens. |
-| Imports and path modules | Yes | Yes | Yes | Yes | `use`, aliases/grouping, path-derived namespaces and explicit rejection of legacy `mod` syntax. |
+| Imports and path modules | Yes | Yes | Yes | Yes | `use`, aliases/grouping, path-derived namespaces, and rejection of source-level `mod` items. |
 | File modules (`.rua`) | Yes | Yes | Yes | Yes | Nested/sibling files, bundle/modules output, runtime execution, source maps and IDE queries. |
 | Visibility (`pub`/private) | Yes | Yes | Partial | N/A | Public and same-module private access plus cross-module/private import errors; no dedicated visibility parser range. |
 | Extern Lua ABI and variadics | Yes | Partial | Yes | Partial | Plain extern and explicit `lua-result` runtime behavior, parser ranges and `.ruai` hover exist; invalid adapter diagnostics are unit-tested rather than shared goldens. |

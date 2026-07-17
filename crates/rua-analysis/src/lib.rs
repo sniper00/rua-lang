@@ -30,19 +30,19 @@ pub use hir::{
     LocalUseKind, MatchArm, MemberCandidate, MemberId, MemberIndex, MemberKind, MemberOrigin,
     MemberResolution, MemberTarget, ModuleData, ModuleId, NameRef, NameRefId, NameRefKind, NamedTy,
     NamedTypeResolver, ParameterData, Pat, PatId, PatternField, PrimitiveTy, ReceiverKind,
-    ScopeData, ScopeId, ScopeKind, SignatureFingerprint, Statement, StdMember, StdMemberKind,
-    StructField, Substitution, TraitBound, Ty, TypeLoweringContext, TypeMismatchContext, TypeRef,
-    UnaryOp, UnifyResult, VariantKind, VariantSignature, Visibility, WherePredicateData,
-    standard_library, unify,
+    ScopeData, ScopeId, ScopeKind, SignatureFingerprint, Statement, StdFunction, StdMember,
+    StdMemberKind, StructField, Substitution, TraitBound, Ty, TypeLoweringContext,
+    TypeMismatchContext, TypeRef, UnaryOp, UnifyResult, VariantKind, VariantSignature, Visibility,
+    WherePredicateData, standard_library, unify,
 };
 pub use ide::{
     Analysis, AnalysisHost, BuiltinDefinitionTarget, CallHierarchyItem, ClosureParameterInfo,
     CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, DocumentSymbol,
-    FileEdit, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectFile,
-    ProjectId, ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError,
-    RenameTarget, SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo,
-    SourceChange, TextEdit, TextRange, TypeHierarchyItem, TypeHint, TypeHintLabelPart,
-    TypeHintTarget, TypeHintTooltip, WorkspaceSymbol,
+    FileEdit, FilePosition, FileRange, HoverResult, NavigationTarget, ProjectFile, ProjectId,
+    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, RenameTarget,
+    SemanticToken, SemanticTokenKind, SemanticTokenModifiers, SignatureHelpInfo, SourceChange,
+    TextEdit, TextRange, TypeHierarchyItem, TypeHint, TypeHintLabelPart, TypeHintTarget,
+    TypeHintTooltip, WorkspaceSymbol,
 };
 pub use semantic::{LocalReference, Semantics};
 pub use vfs::{

@@ -24,4 +24,4 @@ while true do
 end
 local answer = __t3
 
-fmt.println("{} {}", answer, label)
+fmt.print("{} {}", answer, label)

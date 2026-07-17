@@ -1,2 +1,2 @@
 let value = api::answer();
-println!("{}", value);
+print("{}", value);

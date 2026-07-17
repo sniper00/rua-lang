@@ -7,7 +7,9 @@
 //! IDE semantics live in `rua-analysis`; this crate exposes only compiler
 //! parsing, checking, and code-generation APIs.
 
+pub mod annotations;
 pub mod ast;
+mod attributes;
 mod backend_layout;
 pub mod builtins;
 pub mod check;
@@ -41,6 +43,8 @@ pub struct CompileOptions {
     pub library_mounts: BTreeMap<String, PathBuf>,
     /// Directories prepended to Lua `package.path` by generated entry chunks.
     pub lua_path: Vec<PathBuf>,
+    /// Active compile-time flags and keyed values used by `cfg`/`cfg_attr`.
+    pub cfg: rua_core::CfgOptions,
 }
 
 /// Load builtin `.ruai` declarations into a declaration-only semantic module.
@@ -64,6 +68,7 @@ pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(
         0,
         ast::Item::Mod(ast::ModDecl {
             name: "__rua_builtin".to_string(),
+            attributes: Vec::new(),
             documentation: None,
             items: loaded.items,
             chunk: ast::Block {
@@ -245,6 +250,12 @@ fn check_project_with_diagnostics<P: SourceProvider>(
                 files.clone(),
             )
         })?;
+    attributes::apply_cfg(&mut program, &project.cfg).map_err(|error| {
+        fail(
+            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            files.clone(),
+        )
+    })?;
     program.is_decl = root_path.as_str().ends_with(".ruai");
     resolve::set_file_program(&mut program, project.root_file.index());
     let scope_dir = root_path.parent().unwrap_or_default();
@@ -276,7 +287,11 @@ fn check_project_with_diagnostics<P: SourceProvider>(
             files: files.clone(),
         }
     })?;
-    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    let annotations = annotations::build(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let typed = typed_ir::TypedProgram::new(program, hir, info, annotations);
     Ok((typed, files, root_path.to_string()))
 }
 
@@ -292,6 +307,12 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
             files.clone(),
         )
     })?;
+    attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()).map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            files.clone(),
+        )
+    })?;
     load_builtins(&mut program, builtins_dir)
         .map_err(|error| CompileFailure::single(error, files.clone()))?;
     let hir = hir::resolve(&program);
@@ -304,7 +325,11 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
         files: files.clone(),
     })?;
     let rules = builtins::CodegenRules::default();
-    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    let annotations = annotations::build(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let typed = typed_ir::TypedProgram::new(program, hir, info, annotations);
     Ok(codegen::generate(&typed, &rules))
 }
 
@@ -322,6 +347,29 @@ pub fn compile_path_with_options(
     options: &CompileOptions,
 ) -> Result<String, CompileFailure> {
     compile_path_artifact_with_options(path, options).map(|artifact| artifact.source)
+}
+
+/// Validate a source project and export its resolved annotation metadata as TOML.
+pub fn compile_path_metadata(
+    path: &Path,
+    annotation: Option<&str>,
+) -> Result<String, CompileFailure> {
+    compile_path_metadata_with_options(path, &CompileOptions::default(), annotation)
+}
+
+/// Export annotation metadata with explicit project/compiler inputs.
+pub fn compile_path_metadata_with_options(
+    path: &Path,
+    options: &CompileOptions,
+    annotation: Option<&str>,
+) -> Result<String, CompileFailure> {
+    let (typed, files) = check_path_with_options(path, options)?;
+    annotations::render_toml(typed.annotations(), typed.hir(), annotation).map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+            files,
+        )
+    })
 }
 
 /// Like [`compile_path`] but with an explicit builtins directory.
@@ -362,6 +410,7 @@ pub fn compile_path_artifact_with_std(
             library: Vec::new(),
             library_mounts: BTreeMap::new(),
             lua_path: Vec::new(),
+            cfg: rua_core::CfgOptions::default(),
         },
     )
 }
@@ -428,8 +477,12 @@ fn check_path_with_options(
     path: &Path,
     options: &CompileOptions,
 ) -> Result<(typed_ir::TypedProgram, Vec<String>), CompileFailure> {
-    let (mut program, files) =
-        parse_and_load_modules_with_libraries(path, &options.library, &options.library_mounts)?;
+    let (mut program, files) = parse_and_load_modules_with_libraries(
+        path,
+        &options.library,
+        &options.library_mounts,
+        &options.cfg,
+    )?;
     load_builtins(&mut program, options.std_path.as_deref())
         .map_err(|error| CompileFailure::single(error, files.clone()))?;
     let hir = hir::resolve(&program);
@@ -441,7 +494,11 @@ fn check_path_with_options(
         diagnostics,
         files: files.clone(),
     })?;
-    let typed = typed_ir::TypedProgram::new(program, hir, info);
+    let annotations = annotations::build(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let typed = typed_ir::TypedProgram::new(program, hir, info, annotations);
     Ok((typed, files))
 }
 
@@ -452,13 +509,19 @@ pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), Com
 }
 
 pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>), CompileFailure> {
-    parse_and_load_modules_with_libraries(path, &[], &BTreeMap::new())
+    parse_and_load_modules_with_libraries(
+        path,
+        &[],
+        &BTreeMap::new(),
+        &rua_core::CfgOptions::default(),
+    )
 }
 
 fn parse_and_load_modules_with_libraries(
     path: &Path,
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
+    cfg: &rua_core::CfgOptions,
 ) -> Result<(ast::Program, Vec<String>), CompileFailure> {
     let files = vec![path.display().to_string()];
     let src = std::fs::read_to_string(path).map_err(|error| {
@@ -480,6 +543,12 @@ fn parse_and_load_modules_with_libraries(
             files.clone(),
         )
     })?;
+    attributes::apply_cfg(&mut program, cfg).map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            files.clone(),
+        )
+    })?;
     program.is_decl = path
         .extension()
         .is_some_and(|extension| extension == "ruai");
@@ -490,6 +559,7 @@ fn parse_and_load_modules_with_libraries(
         path,
         library,
         library_mounts,
+        cfg,
         &mut files,
     )
     .map_err(|error| CompileFailure::single(error, files.clone()))?;
@@ -524,6 +594,13 @@ pub fn check_diagnostics(src: &str) -> (Vec<Diag>, Vec<String>) {
             return (diags, vec![String::new()]);
         }
     };
+    if let Err(error) = attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()) {
+        diags.push(Diag::bare(
+            rua_core::DiagnosticCode::ParseUnexpectedToken,
+            error,
+        ));
+        return (diags, vec![String::new()]);
+    }
     if let Err(error) = load_builtins(&mut program, None) {
         diags.push(error);
         return (diags, vec![String::new()]);

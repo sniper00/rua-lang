@@ -289,7 +289,7 @@ fn stdio_src_main_uses_src_as_module_root_for_associated_function_navigation() {
 
     let main_source = concat!(
         "use domain::order::OrderRequest;\n",
-        "let requests = vec![OrderRequest::new(\"book-001\", 2, 10)];\n",
+        "let requests = [OrderRequest::new(\"book-001\", 2, 10)];\n",
     );
     let order_source = concat!(
         "pub struct OrderRequest { pub sku: String, pub quantity: i64 }\n",
@@ -552,7 +552,7 @@ fn stdio_completion_returns_top_level_chunk_variables_while_typing() {
     let source = concat!(
         "let processed = 1;\n",
         "let featured = processed + 1;\n",
-        "println!(\"{}\", fea);\n",
+        "print(\"{}\", fea);\n",
     );
     let mut server = ProtocolServer::start();
     server.initialize();
@@ -574,7 +574,7 @@ fn stdio_completion_returns_top_level_chunk_variables_while_typing() {
         "method": "textDocument/completion",
         "params": {
             "textDocument": { "uri": uri },
-            "position": position_after(source, "println!(\"{}\", fea")
+            "position": position_after(source, "print(\"{}\", fea")
         }
     }));
 
@@ -637,8 +637,8 @@ fn stdio_code_actions_emit_semantically_valid_edits() {
         .unwrap_or_else(|| panic!("missing fill action: {actions}"));
     let fill_edit = &fill["edit"]["changes"][uri][0];
     let fill_text = fill_edit["newText"].as_str().unwrap();
-    assert!(fill_text.contains("Pair(_, _) => todo!(),"), "{fill_text}");
-    assert!(fill_text.contains("Rect { .. } => todo!(),"), "{fill_text}");
+    assert!(fill_text.contains("Pair(_, _) => todo(),"), "{fill_text}");
+    assert!(fill_text.contains("Rect { .. } => todo(),"), "{fill_text}");
     assert!(!fill_text.contains("Dot =>"), "{fill_text}");
     let filled = apply_single_edit(match_source, fill_edit);
     let filled_parse = rua_syntax::parse(&filled);

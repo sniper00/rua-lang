@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(
     path.join(alpha, "requests.rua"),
     "use domain::order::OrderRequest;\n" +
-      'let requests = vec![OrderRequest::new("book-001")];\n',
+      'let requests = [OrderRequest::new("book-001")];\n',
   );
   fs.writeFileSync(path.join(beta, "main.rua"), "let value = 2;\n");
   fs.writeFileSync(path.join(alphaDeclarations, "host.ruai"), "");

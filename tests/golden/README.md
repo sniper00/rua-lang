@@ -1,9 +1,8 @@
 # Rua Golden Fixtures
 
-This directory is the repository-level oracle corpus shared by the compiler and
-future syntax, analysis, and IDE parity tests. Fixtures live outside individual
-crates so their paths and expected results remain stable while implementations
-change.
+This directory is the repository-level oracle corpus shared by compiler,
+syntax, analysis, and LSP tests. Fixtures live outside individual crates so
+their paths and expected results remain stable across implementations.
 
 The current feature-by-feature status and known gaps are tracked in
 [`COVERAGE.md`](COVERAGE.md). Every new language or IDE feature must update that
@@ -20,7 +19,7 @@ parser/ranges/      token and text-range snapshots
 format/             formatter inputs + byte-exact `.rua.golden` outputs
 modules/            multi-file compiler fixtures
 ruai/               declaration and external-library fixtures
-ide/                completion, hover, navigation, and rename snapshots
+ide/                protocol-neutral IDE fixtures and closure/iterator snapshot
 phase4a/            active closure and fused-iterator compiler goldens
 source-map/          generated Lua slices mapped to cross-file Rua ranges
 ```
@@ -134,8 +133,6 @@ mechanism alone is insufficient to write files.
 - `.ruai` compiler fixtures prove declarations participate in checking, reject
   executable bodies/chunks, and are skipped by codegen. Native analysis/LSP
   tests own completion, hover/goto, references, and read-only rename behavior.
-- Frozen legacy IDE snapshots document the migration baseline but are not a
-  production oracle. Exact native analysis/LSP tests own those query contracts.
 - The Phase 4A IDE snapshot covers inferred closure parameters, cursor queries,
   semantic tokens for parameters/adapters/ranges, and fast diagnostic stability.
 - `COVERAGE.md` records direct golden evidence separately from unit-test

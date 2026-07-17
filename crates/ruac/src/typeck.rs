@@ -86,6 +86,7 @@ enum Ty {
     Bool,
     Str,
     Unit,
+    Never,
     /// A user struct or enum, keyed by its declaration identity.
     Named {
         def: crate::hir::DefId,
@@ -140,6 +141,7 @@ impl Ty {
             Ty::Bool => "bool".into(),
             Ty::Str => "String".into(),
             Ty::Unit => "()".into(),
+            Ty::Never => "!".into(),
             Ty::Named { name, .. } => name.clone(),
             Ty::Trait { name, .. } => format!("dyn {name}"),
             Ty::Vec(t) => format!("Vec<{}>", t.name()),
@@ -166,6 +168,9 @@ impl Ty {
 /// Numeric types are mutually compatible (Lua unifies numbers; we stay lenient).
 /// Parameterized types recurse on their element types.
 fn compatible(a: &Ty, b: &Ty) -> bool {
+    if matches!(a, Ty::Never) || matches!(b, Ty::Never) {
+        return true;
+    }
     if !a.is_concrete() || !b.is_concrete() {
         return true;
     }
@@ -232,6 +237,11 @@ fn collect_calls_on_block<'a>(name: &str, b: &'a Block, out: &mut Vec<(&'a str, 
 
 fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'a [Expr])>) {
     match &e.kind {
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                collect_calls_on_expr(name, element, out);
+            }
+        }
         ExprKind::Closure { body, .. } => match body {
             ClosureBody::Expr(expr) => collect_calls_on_expr(name, expr, out),
             ClosureBody::Block(block) => collect_calls_on_block(name, block, out),
@@ -291,11 +301,6 @@ fn collect_calls_on_expr<'a>(name: &str, e: &'a Expr, out: &mut Vec<(&'a str, &'
         ExprKind::Index { base, index } => {
             collect_calls_on_expr(name, base, out);
             collect_calls_on_expr(name, index, out);
-        }
-        ExprKind::MacroCall { args, .. } => {
-            for a in args {
-                collect_calls_on_expr(name, a, out);
-            }
         }
         ExprKind::If {
             cond,
@@ -391,6 +396,11 @@ fn collect_closure_usage_block<'a>(name: &str, block: &'a Block, usage: &mut Clo
 
 fn collect_closure_usage_expr<'a>(name: &str, expr: &'a Expr, usage: &mut ClosureUsage<'a>) {
     match &expr.kind {
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                collect_closure_usage_expr(name, element, usage);
+            }
+        }
         ExprKind::Path(segments) => {
             if segments.len() == 1 && segments[0] == name {
                 usage.escapes = true;
@@ -460,11 +470,6 @@ fn collect_closure_usage_expr<'a>(name: &str, expr: &'a Expr, usage: &mut Closur
                 collect_closure_usage_expr(name, &arm.body, usage);
             }
         }
-        ExprKind::MacroCall { args, .. } => {
-            for arg in args {
-                collect_closure_usage_expr(name, arg, usage);
-            }
-        }
         ExprKind::If {
             cond,
             then_block,
@@ -511,6 +516,7 @@ fn join(a: &Ty, b: &Ty) -> Ty {
         return Ty::Unknown;
     }
     match (a, b) {
+        (Ty::Never, ty) | (ty, Ty::Never) => ty.clone(),
         (Ty::Unknown, _) => b.clone(),
         (_, Ty::Unknown) => a.clone(),
         (Ty::F64, _) | (_, Ty::F64) if a.is_numeric() && b.is_numeric() => Ty::F64,
@@ -519,39 +525,49 @@ fn join(a: &Ty, b: &Ty) -> Ty {
 }
 
 /// Infer bindings for generic parameters by structurally matching a declared
-/// parameter type against a concrete argument type. Only concrete bindings are
-/// recorded; conflicting bindings are joined (falling back to `Unknown`).
-fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<GenericParamId, Ty>) {
+/// parameter type against a concrete argument type. Returns false when the
+/// same parameter was already bound to an incompatible concrete type.
+fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<GenericParamId, Ty>) -> bool {
     match (param, arg) {
         (Ty::Generic { id, .. }, a) if a.is_concrete() => {
-            subst
-                .entry(*id)
-                .and_modify(|cur| *cur = join(cur, a))
-                .or_insert_with(|| a.clone());
+            if let Some(current) = subst.get_mut(id) {
+                if !compatible(current, a) {
+                    return false;
+                }
+                *current = join(current, a);
+            } else {
+                subst.insert(*id, a.clone());
+            }
+            true
         }
         (Ty::Vec(p), Ty::Vec(a)) => unify_generic(p, a, subst),
         (Ty::Option(p), Ty::Option(a)) => unify_generic(p, a, subst),
         (Ty::Result(p1, e1), Ty::Result(p2, e2)) => {
-            unify_generic(p1, p2, subst);
-            unify_generic(e1, e2, subst);
+            let first = unify_generic(p1, p2, subst);
+            let second = unify_generic(e1, e2, subst);
+            first && second
         }
         (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
-            unify_generic(k1, k2, subst);
-            unify_generic(v1, v2, subst);
+            let key = unify_generic(k1, k2, subst);
+            let value = unify_generic(v1, v2, subst);
+            key && value
         }
         (Ty::Iter(p, _), Ty::Iter(a, _)) => unify_generic(p, a, subst),
         (Ty::Tuple(p), Ty::Tuple(a)) if p.len() == a.len() => {
+            let mut compatible = true;
             for (p, a) in p.iter().zip(a) {
-                unify_generic(p, a, subst);
+                compatible &= unify_generic(p, a, subst);
             }
+            compatible
         }
         (Ty::Closure(p1, r1), Ty::Closure(p2, r2)) if p1.len() == p2.len() => {
+            let mut compatible = true;
             for (p, a) in p1.iter().zip(p2) {
-                unify_generic(p, a, subst);
+                compatible &= unify_generic(p, a, subst);
             }
-            unify_generic(r1, r2, subst);
+            compatible && unify_generic(r1, r2, subst)
         }
-        _ => {}
+        _ => true,
     }
 }
 
@@ -578,6 +594,7 @@ fn subst_ty(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Ty {
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
+    variadic: bool,
     /// Generic parameters (with bounds) declared on this function, used to check
     /// bound satisfaction at call sites. Empty for non-generic fns and for
     /// methods/trait signatures (where call-site checking is not yet done).
@@ -876,6 +893,7 @@ impl Tc {
         FnSig {
             params: params.iter().map(|p| self.ty_of(&p.ty)).collect(),
             ret: ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit),
+            variadic: false,
             generics: Vec::new(),
             generic_bounds: HashMap::new(),
         }
@@ -947,6 +965,7 @@ impl Tc {
     fn collect_identity_declarations(&mut self, items: &[Item], module: crate::hir::ModuleId) {
         for (item_index, it) in items.iter().enumerate() {
             match it {
+                Item::Annotation(_) => {}
                 Item::Fn(f) => {
                     self.set_gen_bounds(&f.generics);
                     let mut sig = self.sig_of(&f.params, f.ret.as_ref());
@@ -1006,10 +1025,12 @@ impl Tc {
                 }
                 Item::Extern(b) => {
                     for ef in &b.fns {
-                        if ef.variadic {
-                            continue;
-                        }
-                        let sig = self.sig_of(&ef.params, ef.ret.as_ref());
+                        self.set_gen_bounds(&ef.generics);
+                        let mut sig = self.sig_of(&ef.params, ef.ret.as_ref());
+                        sig.variadic = ef.variadic;
+                        sig.generic_bounds = self.gen_bounds.clone();
+                        sig.generics = ef.generics.clone();
+                        self.gen_bounds.clear();
                         if let Some(&definition) =
                             self.hir.module(module).scope.values.get(&ef.name)
                         {
@@ -1093,6 +1114,7 @@ impl Tc {
     fn ty_of(&self, t: &Type) -> Ty {
         match t {
             Type::Unit => Ty::Unit,
+            Type::Never => Ty::Never,
             Type::Ref { inner, .. } => self.ty_of(inner),
             Type::Function { params, ret } => Ty::Closure(
                 params.iter().map(|param| self.ty_of(param)).collect(),
@@ -1409,7 +1431,10 @@ impl Tc {
                 init,
                 ..
             } => {
-                let init_ty = if let ExprKind::Closure { params, ret, body } = &init.kind {
+                let init_ty = if let ExprKind::VecLit(elements) = &init.kind {
+                    let expected = ty.as_ref().map(|ty| self.ty_of(ty));
+                    self.infer_vec_literal(elements, expected.as_ref(), init.span)
+                } else if let ExprKind::Closure { params, ret, body } = &init.kind {
                     let mut usage = ClosureUsage::default();
                     for statement in rest {
                         collect_closure_usage_stmt(name, statement, &mut usage);
@@ -1469,6 +1494,15 @@ impl Tc {
                 } else {
                     bind_ty
                 };
+                if ty.is_none()
+                    && matches!(init.kind, ExprKind::VecLit(_))
+                    && matches!(&bind_ty, Ty::Vec(element) if matches!(element.as_ref(), Ty::Unknown))
+                {
+                    self.err(
+                        init.span,
+                        "cannot infer the element type of an empty Vec literal".to_string(),
+                    );
+                }
                 self.bind_mutability(name, bind_ty, *mutable);
             }
             Stmt::Expr(e) => {
@@ -2148,6 +2182,7 @@ impl Tc {
             ExprKind::Float(_) => Ty::F64,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::VecLit(elements) => self.infer_vec_literal(elements, None, sp),
             ExprKind::Closure { params, ret, body } => {
                 let ty = self.infer_closure(
                     sp,
@@ -2538,25 +2573,6 @@ impl Tc {
                     Box::new(self.iter_source(kind, e.span, &Ty::I64)),
                 )
             }
-            ExprKind::MacroCall { args, .. } => {
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
-                match self.resolved_target(e) {
-                    Some(crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroFormat)) => {
-                        Ty::Str
-                    }
-                    Some(crate::hir::ResolvedTarget::Builtin(
-                        rua_core::BuiltinId::MacroPrintln
-                        | rua_core::BuiltinId::MacroPrint
-                        | rua_core::BuiltinId::MacroPanic,
-                    )) => Ty::Unit,
-                    Some(crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroVec)) => {
-                        // Element type is the join of the literal's elements.
-                        let elem = arg_tys.iter().fold(Ty::Unknown, |acc, t| join(&acc, t));
-                        Ty::Vec(Box::new(elem))
-                    }
-                    _ => Ty::Unknown,
-                }
-            }
             ExprKind::StructLit { path, fields } => {
                 for (_, field) in fields {
                     self.infer(field);
@@ -2768,6 +2784,49 @@ impl Tc {
                 result
             }
         }
+    }
+
+    fn infer_vec_literal(
+        &mut self,
+        elements: &[Expr],
+        expected: Option<&Ty>,
+        _span: SourceRange,
+    ) -> Ty {
+        let expected_element = match expected {
+            Some(Ty::Vec(element)) => Some(element.as_ref()),
+            _ => None,
+        };
+        let mut element_ty = expected_element.cloned().unwrap_or(Ty::Unknown);
+        for element in elements {
+            let actual = self.infer(element);
+            if let Some(expected) = expected_element {
+                if actual.is_concrete() && !compatible(expected, &actual) {
+                    self.err(
+                        element.span,
+                        format!(
+                            "Vec element expects `{}`, found `{}`",
+                            expected.name(),
+                            actual.name()
+                        ),
+                    );
+                }
+                continue;
+            }
+            if element_ty.is_concrete() && actual.is_concrete() && !compatible(&element_ty, &actual)
+            {
+                self.err(
+                    element.span,
+                    format!(
+                        "Vec literal mixes incompatible element types `{}` and `{}`",
+                        element_ty.name(),
+                        actual.name()
+                    ),
+                );
+            } else {
+                element_ty = join(&element_ty, &actual);
+            }
+        }
+        Ty::Vec(Box::new(element_ty))
     }
 
     fn infer_binary(&mut self, op: BinOp, l: &Ty, r: &Ty, sp: SourceRange) -> Ty {
@@ -3025,6 +3084,7 @@ impl Tc {
                 &signature.ret,
                 &signature.generics,
                 &signature.generic_bounds,
+                signature.variadic,
                 &arg_tys,
                 args,
                 callee.span,
@@ -3217,23 +3277,25 @@ impl Tc {
         ret: &Ty,
         generics: &[GenericParam],
         generic_bounds: &HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
+        variadic: bool,
         arg_tys: &[Ty],
         args: &[Expr],
         callee_sp: SourceRange,
     ) -> Ty {
-        if args.len() != params.len() {
+        if (!variadic && args.len() != params.len()) || (variadic && args.len() < params.len()) {
             self.err(
                 callee_sp,
                 format!(
-                    "function `{}` expects {} argument(s), got {}",
+                    "function `{}` expects {}{} argument(s), got {}",
                     dispname,
                     params.len(),
+                    if variadic { " or more" } else { "" },
                     args.len()
                 ),
             );
             return ret.clone();
         }
-        for (i, at) in arg_tys.iter().enumerate() {
+        for (i, at) in arg_tys.iter().take(params.len()).enumerate() {
             if !compatible(&params[i], at) {
                 self.err(
                     args[i].span,
@@ -3251,8 +3313,20 @@ impl Tc {
         // verify each satisfies its trait bounds, substitute into the return type.
         if !generics.is_empty() {
             let mut subst: HashMap<GenericParamId, Ty> = HashMap::new();
-            for (p, a) in params.iter().zip(arg_tys.iter()) {
-                unify_generic(p, a, &mut subst);
+            for (index, (parameter, argument)) in params.iter().zip(arg_tys.iter()).enumerate() {
+                let expected = subst_ty(parameter, &subst);
+                if !unify_generic(parameter, argument, &mut subst) {
+                    self.err(
+                        args[index].span,
+                        format!(
+                            "argument {} of `{}` expects `{}`, found `{}`",
+                            index + 1,
+                            dispname,
+                            expected.name(),
+                            argument.name()
+                        ),
+                    );
+                }
             }
             self.check_bound_satisfaction(dispname, generics, generic_bounds, &subst, callee_sp);
             return subst_ty(ret, &subst);

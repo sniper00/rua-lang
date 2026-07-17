@@ -7,7 +7,7 @@ fn total() -> i64 {
 }
 
 let value = total();
-println!("{}", value);
+print("{}", value);
 
 let doubled = value * 2;
-println!("{}", doubled);
+print("{}", doubled);

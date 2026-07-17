@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub use rua_core::{FileId, ProjectId, SourceRootId};
+pub use rua_core::{CfgOptions, FileId, ProjectId, SourceRootId};
 
 pub const PROJECT_CONFIG_FILE: &str = ".ruarc.toml";
 
@@ -15,6 +15,22 @@ pub const PROJECT_CONFIG_FILE: &str = ".ruarc.toml";
 pub struct ProjectConfig {
     pub workspace: WorkspaceConfig,
     pub runtime: RuntimeConfig,
+    pub build: BuildConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildConfig {
+    pub features: Vec<String>,
+    pub cfg: BTreeMap<String, CfgConfigValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum CfgConfigValue {
+    Bool(bool),
+    String(String),
+    Strings(Vec<String>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -52,6 +68,7 @@ pub struct ResolvedProjectConfig {
     pub lua_library: Vec<ResolvedLuaLibrary>,
     pub std_path: Option<PathBuf>,
     pub lua_path: Vec<PathBuf>,
+    pub cfg: CfgOptions,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +127,22 @@ impl ProjectConfig {
             push_unique(&mut library, configured.declaration_root.clone());
             push_unique(&mut lua_path, configured.runtime_root.clone());
         }
+        let mut cfg = CfgOptions::default();
+        for feature in &self.build.features {
+            cfg.insert_feature(feature);
+        }
+        for (key, value) in &self.build.cfg {
+            match value {
+                CfgConfigValue::Bool(true) => cfg.insert_flag(key),
+                CfgConfigValue::Bool(false) => {}
+                CfgConfigValue::String(value) => cfg.insert_value(key, value),
+                CfgConfigValue::Strings(values) => {
+                    for value in values {
+                        cfg.insert_value(key, value);
+                    }
+                }
+            }
+        }
         Ok(ResolvedProjectConfig {
             library,
             library_mounts,
@@ -120,6 +153,7 @@ impl ProjectConfig {
                 .as_deref()
                 .map(|path| resolve_config_path(workspace_root, path)),
             lua_path,
+            cfg,
         })
     }
 }
@@ -357,6 +391,7 @@ pub struct ProjectSpec {
     pub roots: Vec<SourceRootSpec>,
     pub libraries: Vec<LibraryMount>,
     pub files: BTreeMap<LogicalSourcePath, FileId>,
+    pub cfg: CfgOptions,
 }
 
 impl ProjectSpec {
@@ -483,6 +518,30 @@ mod tests {
                 PathBuf::from("/workspace/project/vendor/lua"),
             ]
         );
+    }
+
+    #[test]
+    fn project_config_resolves_features_and_custom_cfg() {
+        let config = parse_project_config(
+            r#"
+            [build]
+            features = ["http", "metrics"]
+
+            [build.cfg]
+            runtime = "moon"
+            embedded = true
+            capability = ["timer", "network"]
+            disabled = false
+            "#,
+        )
+        .unwrap();
+        let resolved = config.resolve(Path::new("/workspace/project")).unwrap();
+        assert!(resolved.cfg.has_value("feature", "http"));
+        assert!(resolved.cfg.has_value("feature", "metrics"));
+        assert!(resolved.cfg.has_value("runtime", "moon"));
+        assert!(resolved.cfg.has_flag("embedded"));
+        assert!(resolved.cfg.has_value("capability", "timer"));
+        assert!(!resolved.cfg.has_flag("disabled"));
     }
 
     #[test]

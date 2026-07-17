@@ -86,6 +86,9 @@ fn collect_compiler_items(
 ) {
     for item in items {
         match item {
+            CompilerItem::Annotation(item) => {
+                insert_definition(definitions, module_path, &item.name, "annotation");
+            }
             CompilerItem::Fn(item) => {
                 insert_definition(definitions, module_path, &item.name, "function");
             }
@@ -148,6 +151,7 @@ fn analysis_definitions(
 fn analysis_kind(kind: DefKind) -> &'static str {
     match kind {
         DefKind::Chunk => "chunk",
+        DefKind::Annotation => "annotation",
         DefKind::Function => "function",
         DefKind::Struct => "struct",
         DefKind::Field => "field",
@@ -196,7 +200,7 @@ fn closure_type_parity_matches_rowan_parameter_ranges() {
         "  let scale = |value| value * factor;\n",
         "  let scaled = scale(14);\n",
         "  let add = |left: i64, right| -> i64 { left + right };\n",
-        "  let mapped_count = vec![1, 2].iter().map(|item| item + 1).count();\n",
+        "  let mapped_count = [1, 2].iter().map(|item| item + 1).count();\n",
         "  add(scaled, 8)\n",
         "}\n",
     );

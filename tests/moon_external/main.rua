@@ -15,9 +15,9 @@ fn background_task() {
     moon::sleep(1);
 }
 
-let arr = vec![1, 2, 3];
+let arr = [1, 2, 3];
 let filtered_arr = arr.iter().filter(| x | x> 0).collect();
-println!("Filtered array: {:?}", filtered_arr);
+print("Filtered array: {:?}", filtered_arr);
 moon::info("Rua external library loaded");
 let bootstrap: i64 = moon::query("bootstrap");
 let timestamp: i64 = moon::time();

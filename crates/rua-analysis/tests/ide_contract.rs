@@ -3,10 +3,10 @@
 use rua_analysis::{
     AnalysisHost, Change, CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance,
     Diagnostic, DiagnosticCode, DiagnosticOrigin, DiagnosticRelated, DiagnosticSeverity, FileId,
-    FileKind, FilePosition, FileRange, HoverResult, MacroDelimiter, NavigationTarget, ProjectId,
-    ProjectPosition, QueryContext, ReferenceKind, ReferenceResult, RenameError, SemanticToken,
-    SemanticTokenKind, SemanticTokenModifiers, SourceChange, SourceRootId, SourceRootKind,
-    TextEdit, TextRange, TypeHint, normalize_diagnostics,
+    FileKind, FilePosition, FileRange, HoverResult, NavigationTarget, ProjectId, ProjectPosition,
+    QueryContext, ReferenceKind, ReferenceResult, RenameError, SemanticToken, SemanticTokenKind,
+    SemanticTokenModifiers, SourceChange, SourceRootId, SourceRootKind, TextEdit, TextRange,
+    TypeHint, normalize_diagnostics,
 };
 
 #[test]
@@ -140,20 +140,6 @@ fn ide_contract_navigation_hover_and_completion_are_protocol_neutral() {
         Some(CompletionInsert::Call { .. })
     ));
     assert_eq!(completion.replacement_range(), Some(TextRange::new(40, 42)));
-
-    let macro_completion = CompletionItem::new("vec!", CompletionKind::Macro).with_insert(
-        CompletionInsert::MacroCall {
-            name: "vec!".to_string(),
-            delimiter: MacroDelimiter::Brackets,
-        },
-    );
-    assert!(matches!(
-        macro_completion.insert(),
-        Some(CompletionInsert::MacroCall {
-            delimiter: MacroDelimiter::Brackets,
-            ..
-        })
-    ));
 }
 
 #[test]

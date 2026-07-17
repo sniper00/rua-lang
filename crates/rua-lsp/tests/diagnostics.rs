@@ -386,7 +386,7 @@ fn binary_operator_matrix_reports_only_incompatible_concrete_types() {
         r#"
 fn binary_matrix() {
     let bool_add = true + 1;
-    let vec_subtract = vec![1] - vec![2];
+    let vec_subtract = [1] - [2];
     let string_multiply = "left" * "right";
     let mixed_equal = 1 == "1";
     let mixed_not_equal = true != "true";
@@ -672,7 +672,7 @@ fn type_immutable_assignment_uses_binding_identity() {
          fn update() {\n\
              let point = Point { x: 1 };\n\
              point.x = 2;\n\
-             let values = vec![1];\n\
+             let values = [1];\n\
              values[0] = 2;\n\
          }\n\
          update();",
@@ -701,7 +701,7 @@ fn type_immutable_assignment_uses_binding_identity() {
          fn update() {\n\
              let mut point = Point { x: 1 };\n\
              point.x = 2;\n\
-             let mut values = vec![1];\n\
+             let mut values = [1];\n\
              values[0] = 2;\n\
          }\n\
          update();",

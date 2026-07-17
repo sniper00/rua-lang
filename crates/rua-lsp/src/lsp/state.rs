@@ -13,6 +13,7 @@ pub(super) struct DiskFile {
 pub(super) struct WorkspaceProject {
     pub(super) root_file: FileId,
     pub(super) workspace_roots: Vec<ProjectRoot>,
+    pub(super) cfg: rua_project::CfgOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

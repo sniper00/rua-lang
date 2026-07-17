@@ -408,6 +408,14 @@ impl MemberIndex {
         self.standard_library.type_named(name)
     }
 
+    pub fn standard_functions(&self) -> impl ExactSizeIterator<Item = &super::StdFunction> {
+        self.standard_library.functions()
+    }
+
+    pub fn standard_function(&self, name: &str) -> Option<&super::StdFunction> {
+        self.standard_library.function_named(name)
+    }
+
     pub const fn builtin_type(ty: &Ty) -> Option<BuiltinType> {
         BuiltinType::of(ty)
     }

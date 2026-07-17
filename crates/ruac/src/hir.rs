@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rua_core::{
     BuiltinId, BuiltinTraitId, DiagnosticCode, FileId, ModulePath, StructuredDiagnostic, TextRange,
-    builtin_macro, builtin_trait, builtin_type,
+    builtin_trait, builtin_type,
 };
 
 use crate::ast::*;
@@ -48,6 +48,7 @@ pub enum VariantShape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefKind {
+    Annotation,
     Function,
     Struct,
     Enum,
@@ -208,6 +209,23 @@ impl ResolvedHir {
     ) -> Option<&crate::builtins::RuntimeModule> {
         let file = self.definition_files.get(&definition)?;
         self.standard_library.as_ref()?.runtime_module(*file)
+    }
+
+    pub(crate) fn definition_for_target(&self, target: ResolvedTarget) -> Option<DefId> {
+        match target {
+            ResolvedTarget::Item(definition) => Some(definition),
+            ResolvedTarget::Extern(extern_id) => self.definitions.iter().find_map(|definition| {
+                matches!(
+                    definition.kind,
+                    DefKind::ExternFunction { extern_id: candidate } if candidate == extern_id
+                )
+                .then_some(definition.id)
+            }),
+            ResolvedTarget::Module(_)
+            | ResolvedTarget::Builtin(_)
+            | ResolvedTarget::Local(_)
+            | ResolvedTarget::Error => None,
+        }
     }
 
     pub(crate) fn standard_runtime_named(
@@ -554,7 +572,11 @@ fn resolve_module_bodies(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]
                     resolve_module_bodies(hir, child_id, &child.items, &child.chunk);
                 }
             }
-            Item::Struct(_) | Item::Enum(_) | Item::Extern(_) | Item::Use(_) => {}
+            Item::Annotation(_)
+            | Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Extern(_)
+            | Item::Use(_) => {}
         }
     }
     let mut resolver = BodyResolver::new(hir, module, &aliases);
@@ -570,6 +592,16 @@ fn resolve_module_types(
 ) {
     for item in items {
         match item {
+            Item::Annotation(annotation) => {
+                resolve_signature_types(
+                    hir,
+                    module,
+                    aliases,
+                    &BTreeMap::new(),
+                    &annotation.params,
+                    None,
+                );
+            }
             Item::Fn(function) => {
                 resolve_trait_refs(hir, module, aliases, &function.generics);
                 let generics = generic_names(&function.generics, &[]);
@@ -644,8 +676,9 @@ fn resolve_module_types(
                 }
             }
             Item::Extern(block) => {
-                let generics = BTreeMap::new();
                 for function in &block.fns {
+                    resolve_trait_refs(hir, module, aliases, &function.generics);
+                    let generics = generic_names(&function.generics, &[]);
                     resolve_signature_types(
                         hir,
                         module,
@@ -786,7 +819,7 @@ fn resolve_type(
                 resolve_type(hir, module, aliases, generics, item);
             }
         }
-        Type::Unit => {}
+        Type::Never | Type::Unit => {}
     }
 }
 
@@ -890,6 +923,11 @@ fn resolve_expression_types(
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                resolve_expression_types(hir, module, aliases, generics, element);
+            }
+        }
         ExprKind::Closure { params, ret, body } => {
             for parameter in params {
                 if let Some(ty) = &parameter.ty {
@@ -969,11 +1007,6 @@ fn resolve_expression_types(
         ExprKind::Index { base, index } => {
             resolve_expression_types(hir, module, aliases, generics, base);
             resolve_expression_types(hir, module, aliases, generics, index);
-        }
-        ExprKind::MacroCall { args, .. } => {
-            for argument in args {
-                resolve_expression_types(hir, module, aliases, generics, argument);
-            }
         }
         ExprKind::If {
             cond,
@@ -1243,16 +1276,9 @@ impl<'a> BodyResolver<'a> {
                     self.expression(value);
                 }
             }
-            ExprKind::MacroCall { name, args } => {
-                let target = builtin_macro(name)
-                    .map(|builtin| ResolvedTarget::Builtin(builtin.id))
-                    .unwrap_or(ResolvedTarget::Error);
-                if target == ResolvedTarget::Error {
-                    unresolved(self.hir, Some(expression), name);
-                }
-                self.hir.expression_targets.insert(expression.id, target);
-                for argument in args {
-                    self.expression(argument);
+            ExprKind::VecLit(elements) => {
+                for element in elements {
+                    self.expression(element);
                 }
             }
             ExprKind::Closure { params, body, .. } => {
@@ -1557,6 +1583,19 @@ fn immutable_assignment(hir: &mut ResolvedHir, target: &Expr, name: &str) {
 fn collect_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
     for (item_index, item) in items.iter().enumerate() {
         match item {
+            Item::Annotation(annotation) => {
+                let id = alloc_def(
+                    hir,
+                    module,
+                    &annotation.name,
+                    DefKind::Annotation,
+                    annotation.is_pub,
+                );
+                hir.definition_files.insert(id, annotation.name_span.file);
+                insert(hir, module, Namespace::Type, &annotation.name, id);
+                hir.item_targets
+                    .insert((module, item_index), ResolvedTarget::Item(id));
+            }
             Item::Fn(function) => {
                 let id = alloc_def(
                     hir,
@@ -1728,7 +1767,8 @@ fn collect_trait_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) 
                     collect_trait_items(hir, child_id, &child.items);
                 }
             }
-            Item::Fn(_)
+            Item::Annotation(_)
+            | Item::Fn(_)
             | Item::Struct(_)
             | Item::Enum(_)
             | Item::Impl(_)
@@ -1822,7 +1862,8 @@ fn collect_impl_items(hir: &mut ResolvedHir, module: ModuleId, items: &[Item]) {
                     collect_impl_items(hir, child_id, &child.items);
                 }
             }
-            Item::Fn(_)
+            Item::Annotation(_)
+            | Item::Fn(_)
             | Item::Struct(_)
             | Item::Enum(_)
             | Item::Trait(_)
@@ -2007,6 +2048,7 @@ fn duplicate(hir: &mut ResolvedHir, module: ModuleId, name: &str) {
 
 fn file_of_items(items: &[Item]) -> Option<FileId> {
     items.iter().find_map(|item| match item {
+        Item::Annotation(annotation) => Some(FileId::new(annotation.name_span.file)),
         Item::Fn(function) => Some(FileId::new(function.name_span.file)),
         Item::Struct(structure) => structure
             .fields

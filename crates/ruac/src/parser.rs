@@ -9,7 +9,9 @@ use crate::lexer::RuaLexer;
 use crate::token::{RuaTokenKind as T, SourceRange};
 use crate::tokenize::StrictTokenStream;
 use crate::tokenize::TokenizeError;
-use rua_core::{DiagnosticCode, FileId, StructuredDiagnostic, TextRange};
+use rua_core::{
+    Attribute, DiagnosticCode, FileId, MetaItem, MetaValue, StructuredDiagnostic, TextRange,
+};
 use rua_lex::LexErrorKind;
 use std::fmt;
 
@@ -449,6 +451,165 @@ impl<'a> Parser<'a> {
 
     // --- items -------------------------------------------------------------
 
+    fn at_attribute_start(&self) -> bool {
+        self.cur() == T::Hash && self.lexer.peek_next() == T::LBracket
+    }
+
+    fn parse_outer_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+        let mut attributes = Vec::new();
+        while self.at_attribute_start() {
+            self.expect(T::Hash)?;
+            self.expect(T::LBracket)?;
+            let item = self.parse_meta_item()?;
+            self.expect(T::RBracket)?;
+            attributes.push(match item {
+                MetaItem::Word(name) => Attribute::new(name, Vec::new()),
+                MetaItem::List { name, items } => Attribute::new(name, items),
+                MetaItem::NameValue { name, value } => {
+                    Attribute::new(name, vec![MetaItem::Literal(value)])
+                }
+                MetaItem::Literal(_) => {
+                    return Err(self.err("attribute name must be an identifier"));
+                }
+            });
+        }
+        Ok(attributes)
+    }
+
+    fn parse_meta_item(&mut self) -> Result<MetaItem, ParseError> {
+        match self.cur() {
+            T::KwTrue => {
+                self.bump()?;
+                return Ok(MetaItem::Literal(MetaValue::Bool(true)));
+            }
+            T::KwFalse => {
+                self.bump()?;
+                return Ok(MetaItem::Literal(MetaValue::Bool(false)));
+            }
+            T::Int => {
+                let source = self.text().replace('_', "");
+                let value = source
+                    .parse::<i64>()
+                    .map_err(|_| self.err("attribute integer is outside the i64 range"))?;
+                self.bump()?;
+                return Ok(MetaItem::Literal(MetaValue::Integer(value)));
+            }
+            T::Float => {
+                let value = self.text().replace('_', "");
+                value
+                    .parse::<f64>()
+                    .map_err(|_| self.err("invalid attribute float"))?;
+                self.bump()?;
+                return Ok(MetaItem::Literal(MetaValue::Float(value)));
+            }
+            T::Str => {
+                let value = self.meta_string()?;
+                return Ok(MetaItem::Literal(MetaValue::String(value)));
+            }
+            _ => {}
+        }
+
+        let name = self.parse_meta_path()?;
+        if self.accept(T::Eq)? {
+            let value = self.parse_meta_value()?;
+            return Ok(MetaItem::NameValue { name, value });
+        }
+        if !self.accept(T::LParen)? {
+            return Ok(MetaItem::Word(name));
+        }
+        let mut items = Vec::new();
+        while self.cur() != T::RParen && self.cur() != T::Eof {
+            items.push(self.parse_meta_item()?);
+            if !self.accept(T::Comma)? {
+                break;
+            }
+        }
+        self.expect(T::RParen)?;
+        Ok(MetaItem::List { name, items })
+    }
+
+    fn parse_meta_path(&mut self) -> Result<String, ParseError> {
+        let mut path = self.expect_meta_name()?;
+        while self.accept(T::ColonColon)? {
+            path.push_str("::");
+            path.push_str(&self.expect_meta_name()?);
+        }
+        Ok(path)
+    }
+
+    fn expect_meta_name(&mut self) -> Result<String, ParseError> {
+        let text = self.text();
+        let valid = text
+            .bytes()
+            .next()
+            .is_some_and(|first| first == b'_' || first.is_ascii_alphabetic())
+            && text
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+            && !matches!(self.cur(), T::KwTrue | T::KwFalse);
+        if !valid {
+            return Err(self.err("expected attribute identifier"));
+        }
+        let name = text.to_string();
+        self.bump()?;
+        Ok(name)
+    }
+
+    fn parse_meta_value(&mut self) -> Result<MetaValue, ParseError> {
+        match self.cur() {
+            T::Str => self.meta_string().map(MetaValue::String),
+            T::KwTrue => {
+                self.bump()?;
+                Ok(MetaValue::Bool(true))
+            }
+            T::KwFalse => {
+                self.bump()?;
+                Ok(MetaValue::Bool(false))
+            }
+            T::Int => {
+                let source = self.text().replace('_', "");
+                let value = source
+                    .parse::<i64>()
+                    .map_err(|_| self.err("attribute integer is outside the i64 range"))?;
+                self.bump()?;
+                Ok(MetaValue::Integer(value))
+            }
+            T::Float => {
+                let value = self.text().replace('_', "");
+                value
+                    .parse::<f64>()
+                    .map_err(|_| self.err("invalid attribute float"))?;
+                self.bump()?;
+                Ok(MetaValue::Float(value))
+            }
+            T::LBracket => {
+                self.bump()?;
+                let mut values = Vec::new();
+                while self.cur() != T::RBracket && self.cur() != T::Eof {
+                    values.push(self.parse_meta_value()?);
+                    if !self.accept(T::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(T::RBracket)?;
+                Ok(MetaValue::List(values))
+            }
+            _ if self.cur() == T::Ident => self.parse_meta_path().map(MetaValue::Path),
+            _ => Err(self.err("attribute value must be a literal, path, or homogeneous list")),
+        }
+    }
+
+    fn meta_string(&mut self) -> Result<String, ParseError> {
+        let source = self.text();
+        let value = source
+            .strip_prefix('"')
+            .and_then(|source| source.strip_suffix('"'))
+            .ok_or_else(|| self.err("attribute string must use double quotes"))?
+            .to_string();
+        self.bump()?;
+        Ok(value)
+    }
+
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let (items, chunk, source_order) = self.parse_chunk_contents(T::Eof)?;
         Ok(Program {
@@ -469,9 +630,16 @@ impl<'a> Parser<'a> {
         let mut statement_blank_before = Vec::new();
         let mut source_order = Vec::new();
         while self.cur() != terminator && self.cur() != T::Eof {
-            if self.at_item_start() {
+            if self.at_item_start() || self.at_attribute_start() {
+                let documentation = self.leading_documentation();
+                let attributes = self.parse_outer_attributes()?;
+                if !self.at_item_start() {
+                    return Err(self.err("outer attributes currently require an item"));
+                }
+                let mut item = self.parse_item(documentation)?;
+                item.set_attributes(attributes);
                 source_order.push(ChunkEntry::Item(items.len()));
-                items.push(self.parse_item()?);
+                items.push(item);
             } else {
                 statement_blank_before.push(self.blank_line_before_current());
                 source_order.push(ChunkEntry::Statement(statements.len()));
@@ -491,17 +659,18 @@ impl<'a> Parser<'a> {
     }
 
     fn at_item_start(&self) -> bool {
-        let is_item = matches!(
-            self.cur(),
-            T::KwPub
-                | T::KwFn
-                | T::KwStruct
-                | T::KwEnum
-                | T::KwImpl
-                | T::KwTrait
-                | T::KwExtern
-                | T::KwUse
-        );
+        let is_item = (self.cur() == T::Ident && self.text() == "annotation")
+            || matches!(
+                self.cur(),
+                T::KwPub
+                    | T::KwFn
+                    | T::KwStruct
+                    | T::KwEnum
+                    | T::KwImpl
+                    | T::KwTrait
+                    | T::KwExtern
+                    | T::KwUse
+            );
         #[cfg(test)]
         {
             is_item || self.cur() == T::KwMod
@@ -549,9 +718,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_item(&mut self) -> Result<Item, ParseError> {
-        let documentation = self.leading_documentation();
+    fn parse_item(&mut self, documentation: Option<String>) -> Result<Item, ParseError> {
         let is_pub = self.accept(T::KwPub)?;
+        if self.cur() == T::Ident && self.text() == "annotation" {
+            return self
+                .parse_annotation(is_pub, documentation)
+                .map(Item::Annotation);
+        }
         match self.cur() {
             T::KwFn => {
                 let mut f = self.parse_fn()?;
@@ -591,10 +764,46 @@ impl<'a> Parser<'a> {
             }
             T::KwUse => Ok(Item::Use(self.parse_use()?)),
             other => Err(self.err(&format!(
-                "expected item (`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`use`), found `{}`",
+                "expected item (`annotation`/`fn`/`struct`/`enum`/`impl`/`trait`/`extern`/`use`), found `{}`",
                 other.user_string()
             ))),
         }
+    }
+
+    fn parse_annotation(
+        &mut self,
+        is_pub: bool,
+        documentation: Option<String>,
+    ) -> Result<AnnotationDecl, ParseError> {
+        self.bump()?; // contextual `annotation` keyword
+        let name_span = self.lexer.current_range();
+        let name = self.expect_ident()?;
+        self.expect(T::LParen)?;
+        let mut params = Vec::new();
+        while self.cur() != T::RParen {
+            let name_span = self.lexer.current_range();
+            let name = self.expect_ident()?;
+            self.expect(T::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param {
+                name,
+                name_span,
+                ty,
+            });
+            if !self.accept(T::Comma)? {
+                break;
+            }
+        }
+        self.expect(T::RParen)?;
+        self.expect(T::Semi)?;
+        Ok(AnnotationDecl {
+            name,
+            name_span,
+            attributes: Vec::new(),
+            documentation,
+            params,
+            is_pub,
+        })
     }
 
     /// Unit tests use compact inline fixtures to exercise the compiler-internal
@@ -606,6 +815,7 @@ impl<'a> Parser<'a> {
         if self.accept(T::Semi)? {
             return Ok(ModDecl {
                 name,
+                attributes: Vec::new(),
                 documentation: None,
                 items: Vec::new(),
                 chunk: Block {
@@ -626,6 +836,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RBrace)?;
         Ok(ModDecl {
             name,
+            attributes: Vec::new(),
             documentation,
             items,
             chunk,
@@ -662,7 +873,10 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(T::RBrace)?;
                     self.expect(T::Semi)?;
-                    return Ok(UseDecl { imports });
+                    return Ok(UseDecl {
+                        attributes: Vec::new(),
+                        imports,
+                    });
                 }
                 prefix.push(self.expect_ident()?);
             } else {
@@ -676,6 +890,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(T::Semi)?;
         Ok(UseDecl {
+            attributes: Vec::new(),
             imports: vec![UseImport {
                 path: prefix,
                 alias,
@@ -746,6 +961,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block()?;
         Ok(FnDecl {
             name,
+            attributes: Vec::new(),
             documentation: None,
             name_span,
             generics,
@@ -772,11 +988,12 @@ impl<'a> Parser<'a> {
         let mut fns = Vec::new();
         while self.cur() != T::RBrace && self.cur() != T::Eof {
             let documentation = self.leading_documentation();
+            let attributes = self.parse_outer_attributes()?;
             let _ = self.accept(T::KwPub)?;
             self.expect(T::KwFn)?;
             let name_span = self.lexer.current_range();
             let name = self.expect_ident()?;
-            self.skip_generics()?;
+            let mut generics = self.parse_generics()?;
             self.expect(T::LParen)?;
             let mut params = Vec::new();
             let mut variadic = false;
@@ -807,11 +1024,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            self.parse_where(&mut generics)?;
             self.expect(T::Semi)?;
             fns.push(ExternFn {
                 name,
+                attributes,
                 name_span,
                 documentation,
+                generics,
                 params,
                 ret,
                 variadic,
@@ -819,6 +1039,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(T::RBrace)?;
         Ok(ExternBlock {
+            attributes: Vec::new(),
             abi,
             documentation: None,
             fns,
@@ -834,6 +1055,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         while self.cur() != T::RBrace && self.cur() != T::Eof {
             let documentation = self.leading_documentation();
+            let attributes = self.parse_outer_attributes()?;
             let (mname, name_span, mgen, has_self, receiver_mutable, params, ret) =
                 self.parse_fn_sig()?;
             let default = if self.cur() == T::LBrace {
@@ -844,6 +1066,7 @@ impl<'a> Parser<'a> {
             };
             methods.push(TraitMethod {
                 name: mname,
+                attributes,
                 documentation,
                 name_span,
                 generics: mgen,
@@ -857,6 +1080,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RBrace)?;
         Ok(TraitDecl {
             name,
+            attributes: Vec::new(),
             documentation: None,
             generics,
             methods,
@@ -876,6 +1100,7 @@ impl<'a> Parser<'a> {
         };
         Ok(StructDecl {
             name,
+            attributes: Vec::new(),
             documentation: None,
             generics,
             fields,
@@ -888,6 +1113,7 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         while self.cur() != T::RBrace {
             let documentation = self.leading_documentation();
+            let attributes = self.parse_outer_attributes()?;
             let _ = self.accept(T::KwPub)?;
             let name_span = self.lexer.current_range();
             let fname = self.expect_ident()?;
@@ -895,6 +1121,7 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type()?;
             fields.push(Field {
                 name: fname,
+                attributes,
                 documentation,
                 ty,
                 name_span,
@@ -916,6 +1143,7 @@ impl<'a> Parser<'a> {
         let mut variants = Vec::new();
         while self.cur() != T::RBrace {
             let documentation = self.leading_documentation();
+            let attributes = self.parse_outer_attributes()?;
             let vname = self.expect_ident()?;
             let kind = match self.cur() {
                 T::LParen => {
@@ -935,6 +1163,7 @@ impl<'a> Parser<'a> {
             };
             variants.push(Variant {
                 name: vname,
+                attributes,
                 documentation,
                 kind,
             });
@@ -945,6 +1174,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RBrace)?;
         Ok(EnumDecl {
             name,
+            attributes: Vec::new(),
             documentation: None,
             generics,
             variants,
@@ -969,14 +1199,17 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         while self.cur() != T::RBrace && self.cur() != T::Eof {
             let documentation = self.leading_documentation();
+            let attributes = self.parse_outer_attributes()?;
             let is_pub = self.accept(T::KwPub)?;
             let mut method = self.parse_fn()?;
             method.is_pub = is_pub;
             method.documentation = documentation;
+            method.attributes = attributes;
             methods.push(method);
         }
         self.expect(T::RBrace)?;
         Ok(ImplDecl {
+            attributes: Vec::new(),
             generics,
             type_name,
             trait_name,
@@ -991,6 +1224,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_inner(&mut self) -> Result<Type, ParseError> {
+        if self.accept(T::Not)? {
+            return Ok(Type::Never);
+        }
         if self.accept(T::KwFn)? {
             self.expect(T::LParen)?;
             let mut params = Vec::new();
@@ -1441,6 +1677,18 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 Ok(self.mk(ExprKind::Bool(false), start))
             }
+            T::LBracket => {
+                self.bump()?;
+                let mut elements = Vec::new();
+                while self.cur() != T::RBracket && self.cur() != T::Eof {
+                    elements.push(self.parse_expr_allow_struct()?);
+                    if !self.accept(T::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(T::RBracket)?;
+                Ok(self.mk(ExprKind::VecLit(elements), start))
+            }
             T::KwLoop => {
                 self.bump()?;
                 let body = self.parse_block()?;
@@ -1448,10 +1696,6 @@ impl<'a> Parser<'a> {
             }
             T::Hash => self.parse_map_literal(start),
             T::Ident | T::KwSelf => {
-                // Macro call: `name!(...)` / `name![...]`.
-                if self.cur() == T::Ident && self.lexer.peek_next() == T::Not {
-                    return self.parse_macro();
-                }
                 let mut segs = vec![self.expect_ident()?];
                 while self.cur() == T::ColonColon {
                     self.bump()?;
@@ -1537,33 +1781,6 @@ impl<'a> Parser<'a> {
         }
         self.expect(T::RBrace)?;
         Ok(self.mk(ExprKind::MapLit(entries), start))
-    }
-
-    fn parse_macro(&mut self) -> Result<Expr, ParseError> {
-        let start = self.lexer.current_range();
-        let name = self.expect_ident()?;
-        self.expect(T::Not)?;
-        let (open, close) = match self.cur() {
-            T::LParen => (T::LParen, T::RParen),
-            T::LBracket => (T::LBracket, T::RBracket),
-            other => {
-                return Err(self.err(&format!(
-                    "expected `(` or `[` after `{}!`, found `{}`",
-                    name,
-                    other.user_string()
-                )));
-            }
-        };
-        self.expect(open)?;
-        let mut args = Vec::new();
-        while self.cur() != close {
-            args.push(self.parse_expr_allow_struct()?);
-            if !self.accept(T::Comma)? {
-                break;
-            }
-        }
-        self.expect(close)?;
-        Ok(self.mk(ExprKind::MacroCall { name, args }, start))
     }
 
     fn parse_struct_lit_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {

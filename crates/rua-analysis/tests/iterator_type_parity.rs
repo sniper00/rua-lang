@@ -54,7 +54,7 @@ fn binding_ty(fixture: &Fixture, name: &str) -> Ty {
 fn iterator_type_parity_map_collect_chain_infers_correct_types() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     let doubled: Vec<i64> = values.iter().map(|v| v + 1).collect();
     0
 }
@@ -68,7 +68,7 @@ fn main() -> i64 {
 fn iterator_type_parity_filter_count_returns_i64() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     values.iter().filter(|v| v > 0).count()
 }
 "#;
@@ -85,7 +85,7 @@ fn main() -> i64 {
 fn iterator_type_parity_filter_map_collect_unwraps_option() {
     const SOURCE: &str = r#"
 fn main() -> Vec<i64> {
-    let values: Vec<Option<i64>> = vec![Some(1), None];
+    let values: Vec<Option<i64>> = [Some(1), None];
     values.iter().filter_map(|v| v).collect()
 }
 "#;
@@ -101,7 +101,7 @@ fn main() -> Vec<i64> {
 fn iterator_type_parity_enumerate_fold_produces_correct_type() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     values.iter().enumerate().fold(0, |acc, _pair| acc + 1)
 }
 "#;
@@ -117,7 +117,7 @@ fn main() -> i64 {
 fn iterator_type_parity_take_skip_preserve_item_type() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
-    let values: Vec<i64> = vec![1, 2, 3, 4, 5];
+    let values: Vec<i64> = [1, 2, 3, 4, 5];
     let filtered: Vec<i64> = values.iter().skip(1).take(3).collect();
     0
 }
@@ -131,7 +131,7 @@ fn main() -> i64 {
 fn iterator_type_parity_any_all_return_bool() {
     const SOURCE: &str = r#"
 fn main() -> bool {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     values.iter().any(|v| v > 0) && values.iter().all(|v| v > 0)
 }
 "#;
@@ -147,7 +147,7 @@ fn main() -> bool {
 fn iterator_type_parity_find_returns_option_item() {
     const SOURCE: &str = r#"
 fn main() -> Option<i64> {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     values.iter().find(|v| v > 1)
 }
 "#;
@@ -176,7 +176,7 @@ fn main() -> i64 {
 fn iterator_type_parity_unknown_adaptor_does_not_panic() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     values.iter().unknown_adaptor().count()
 }
 "#;
@@ -194,7 +194,7 @@ fn iterator_type_parity_closure_captures_outer_variable() {
     const SOURCE: &str = r#"
 fn main() -> i64 {
     let multiplier: i64 = 2;
-    let values: Vec<i64> = vec![1, 2, 3];
+    let values: Vec<i64> = [1, 2, 3];
     let result: Vec<i64> = values.iter().map(|v| v * multiplier).collect();
     0
 }

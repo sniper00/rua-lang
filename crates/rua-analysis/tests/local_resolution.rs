@@ -214,7 +214,7 @@ impl Harness {
             /*method_receiver*/self./*method_name*/method(/*method_arg*/param);
             let short = Snapshot { /*short_field*/item };
             let qualified = /*module_self*/self::Snapshot { /*qualified_short*/item };
-            /*macro_name*/println!("{}", /*macro_arg*/item);
+            /*call_name*/print("{}", /*call_arg*/item);
         }
         /*after_item*/item
     }
@@ -428,7 +428,7 @@ fn local_resolution_handles_params_self_for_and_name_ref_kinds() {
         "/*for_item_use*/",
         "/*short_field*/",
         "/*qualified_short*/",
-        "/*macro_arg*/",
+        "/*call_arg*/",
     ] {
         resolved(
             &fixture,
@@ -455,7 +455,7 @@ fn local_resolution_handles_params_self_for_and_name_ref_kinds() {
     );
     assert_non_local(
         &fixture,
-        name_ref_at(&fixture, "/*macro_name*/", NameRefKind::Macro),
+        name_ref_at(&fixture, "/*call_name*/", NameRefKind::Path),
     );
 }
 
@@ -757,7 +757,7 @@ fn refs(/*seed_def*/seed: i64) -> i64 {
     let mut /*value_def*/value = /*seed_init*/seed;
     /*write_value*/value = /*read_value*/value + /*seed_rhs*/seed;
     (/*paren_write*/value) = /*paren_read*/value;
-    println!("{}", /*macro_value*/value);
+    print("{}", /*call_value*/value);
     /*tail_value*/value
 }
 "#;
@@ -767,16 +767,16 @@ fn refs(/*seed_def*/seed: i64) -> i64 {
     let read = name_ref_at(&fixture, "/*read_value*/", NameRefKind::Path);
     let paren_write = name_ref_at(&fixture, "/*paren_write*/", NameRefKind::Path);
     let paren_read = name_ref_at(&fixture, "/*paren_read*/", NameRefKind::Path);
-    let macro_use = name_ref_at(&fixture, "/*macro_value*/", NameRefKind::Path);
+    let call_use = name_ref_at(&fixture, "/*call_value*/", NameRefKind::Path);
     let tail = name_ref_at(&fixture, "/*tail_value*/", NameRefKind::Path);
     let local = resolved(&fixture, write, value);
-    for name_ref in [read, paren_write, paren_read, macro_use, tail] {
+    for name_ref in [read, paren_write, paren_read, call_use, tail] {
         resolved(&fixture, name_ref, value);
     }
 
     assert_use(&fixture, local, write, LocalUseKind::Write);
     assert_use(&fixture, local, paren_write, LocalUseKind::Write);
-    for name_ref in [read, paren_read, macro_use, tail] {
+    for name_ref in [read, paren_read, call_use, tail] {
         assert_use(&fixture, local, name_ref, LocalUseKind::Read);
     }
     let uses = fixture.resolution.uses_for(local).collect::<Vec<_>>();
@@ -897,7 +897,7 @@ fn local_reference_index_filters_shorthand_members_and_multipaths() {
         ("/*field_name*/", NameRefKind::Field),
         ("/*method_name*/", NameRefKind::Method),
         ("/*module_self*/", NameRefKind::StructPath),
-        ("/*macro_name*/", NameRefKind::Macro),
+        ("/*call_name*/", NameRefKind::Path),
     ] {
         let name_ref = name_ref_at(&fixture, marker, kind);
         assert_non_local(&fixture, name_ref);

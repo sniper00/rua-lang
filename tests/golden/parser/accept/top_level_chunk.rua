@@ -1,2 +1,2 @@
 let value = 1;
-println!("{}", value + 1);
+print("{}", value + 1);

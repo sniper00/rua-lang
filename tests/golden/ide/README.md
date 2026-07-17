@@ -16,6 +16,5 @@ matrix.
 closure parameter types, goto/completion/references/rename, and protocol-neutral
 semantic tokens for closure parameters, adapter methods, and range operators.
 
-[`MIGRATION_BASELINE.md`](MIGRATION_BASELINE.md) records the frozen legacy/native
-query matrix used while the native analysis facade replaces the legacy IDE
-pipeline.
+These snapshots and the exact analysis/LSP suites are the production oracles
+for IDE behavior.

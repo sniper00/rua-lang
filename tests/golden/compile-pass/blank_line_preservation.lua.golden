@@ -13,7 +13,7 @@ local function total()
 end
 
 local value = total()
-fmt.println("{}", value)
+fmt.print("{}", value)
 
 local doubled = value * 2
-fmt.println("{}", doubled)
+fmt.print("{}", doubled)

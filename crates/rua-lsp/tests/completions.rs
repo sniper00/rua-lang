@@ -5,6 +5,25 @@ mod support;
 use support::{TestServer, extract_marker, uri};
 
 #[test]
+fn completions_offer_standard_functions_without_macro_syntax() {
+    let uri = uri("/test/main.rua");
+    let (source, offset) = extract_marker("fn main() { pri$0 }");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    let print = items
+        .iter()
+        .find(|item| item.label() == "print")
+        .expect("standard print completion");
+    assert_eq!(print.kind(), rua_analysis::CompletionKind::Function);
+    assert!(print.detail().is_some_and(|detail| detail.contains("...")));
+    assert!(!items.iter().any(|item| item.label().contains('!')));
+}
+
+#[test]
 fn completions_offer_locals_in_unattached_workspace_file() {
     let root_uri = uri("/test/main.rua");
     let demo_uri = uri("/test/demo.rua");
@@ -26,10 +45,10 @@ fn completions_offer_locals_in_unattached_workspace_file() {
 fn completions_offer_top_level_chunk_variables() {
     let uri = uri("/test/main.rua");
     let (source, offset) = extract_marker(
-        "let requests = vec![\"keyboard-001\"];\n\
+        "let requests = [\"keyboard-001\"];\n\
          let mut processed = 0;\n\
          let featured = requests[0];\n\
-         println!(\"{}\", $0);\n",
+         print(\"{}\", $0);\n",
     );
     let mut srv = TestServer::new();
     srv.open(&uri, &source);

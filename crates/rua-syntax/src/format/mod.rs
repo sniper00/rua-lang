@@ -67,6 +67,16 @@ mod tests {
     }
 
     #[test]
+    fn attributes_stay_on_lines_before_their_targets() {
+        let src = "#[cfg(all(feature=\"http\",runtime=\"moon\"))]\nfn serve(){}\n";
+        let out = format_str(src);
+        assert_eq!(
+            out,
+            "#[cfg(all(feature = \"http\", runtime = \"moon\"))]\nfn serve() {}\n"
+        );
+    }
+
+    #[test]
     fn trailing_comment_on_statement() {
         let src = "fn foo() {\n    let x = 1; // trail\n}\n";
         let out = format_str(src);
@@ -426,5 +436,23 @@ mod tests {
         // Check that formatted output equals original (no blank added).
         assert_eq!(formatted, "// doc\nfn foo() {}\n");
         assert!(check_format(&formatted));
+    }
+
+    #[test]
+    fn formats_annotation_declarations_and_schema_attributes() {
+        let source =
+            "#[targets(function,method)]\npub annotation Route(method:String,path:String);\n";
+        let expected =
+            "#[targets(function, method)]\npub annotation Route(method: String, path: String);\n";
+        let formatted = format_str(source);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_str(&formatted), expected);
+    }
+
+    #[test]
+    fn formats_native_vec_literals() {
+        let source = "fn values() -> Vec<i64> { [1,2,3] }\n";
+        let expected = "fn values() -> Vec<i64> {\n    [1, 2, 3]\n}\n";
+        assert_eq!(format_str(source), expected);
     }
 }

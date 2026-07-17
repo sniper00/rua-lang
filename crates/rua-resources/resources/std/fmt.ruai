@@ -1,0 +1,30 @@
+//! Formatted output, assertions, and non-returning control-flow helpers.
+
+extern "lua" {
+    /// Format a String using Rua `{}` placeholders.
+    pub fn format(template: String, ...) -> String;
+
+    /// Print one formatted line.
+    pub fn print(template: String, ...);
+
+    /// Abort execution with a formatted error.
+    pub fn panic(template: String, ...) -> !;
+
+    /// Require a condition to be true.
+    pub fn assert(condition: bool, ...);
+
+    /// Require two values to be equal.
+    pub fn assert_eq<T>(left: T, right: T);
+
+    /// Require two values to differ.
+    pub fn assert_ne<T>(left: T, right: T);
+
+    /// Abort because an unreachable path was executed.
+    pub fn unreachable() -> !;
+
+    /// Abort because an operation is not implemented.
+    pub fn unimplemented() -> !;
+
+    /// Abort at a placeholder implementation.
+    pub fn todo() -> !;
+}

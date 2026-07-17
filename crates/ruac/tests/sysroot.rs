@@ -267,6 +267,7 @@ fn compiler_project_api_loads_modules_without_filesystem_or_dense_ids() {
     provider.paths.insert(root_path.clone(), root);
     provider.paths.insert(api_path, api);
     let project = ProjectSpec {
+        cfg: rua_core::CfgOptions::default(),
         id: ProjectId::new(7),
         root_file: root,
         roots: vec![SourceRootSpec {
@@ -340,6 +341,7 @@ fn compiler_project_api_mounts_directory_root_declaration() {
     provider.paths.insert(root_path.clone(), root);
     provider.paths.insert(declaration_path, declaration);
     let project = ProjectSpec {
+        cfg: rua_core::CfgOptions::default(),
         id: ProjectId::new(8),
         root_file: root,
         roots: vec![
@@ -398,6 +400,7 @@ fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     provider.paths.insert(flat_path.clone(), flat);
     provider.paths.insert(nested_path.clone(), nested);
     let mut project = ProjectSpec {
+        cfg: rua_core::CfgOptions::default(),
         id: ProjectId::new(9),
         root_file: root,
         roots: vec![SourceRootSpec {

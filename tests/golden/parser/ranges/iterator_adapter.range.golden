@@ -1,57 +1,55 @@
-source_len: 83
-SourceFile 0..83
-  FnDecl 0..82
+source_len: 79
+SourceFile 0..79
+  FnDecl 0..78
     KwFn 0..2 "fn"
     Ident 3..7 "main"
     LParen 7..8 "("
     RParen 8..9 ")"
-    Block 9..82
+    Block 9..78
       LBrace 10..11 "{"
-      LetStmt 16..80
+      LetStmt 16..76
         KwLet 16..19 "let"
         Ident 20..25 "count"
         Eq 26..27 "="
-        MethodCallExpr 28..79
-          MethodCallExpr 28..71
-            MethodCallExpr 28..48
-              MacroCallExpr 28..41
-                Ident 28..31 "vec"
-                Not 31..32 "!"
-                LBracket 32..33 "["
-                LiteralExpr 33..34
-                  Int 33..34 "1"
-                Comma 34..35 ","
-                LiteralExpr 36..37
-                  Int 36..37 "2"
-                Comma 37..38 ","
-                LiteralExpr 39..40
-                  Int 39..40 "3"
-                RBracket 40..41 "]"
-              Dot 41..42 "."
-              Ident 42..46 "iter"
-              ArgList 46..48
-                LParen 46..47 "("
-                RParen 47..48 ")"
-            Dot 48..49 "."
-            Ident 49..52 "map"
-            ArgList 52..71
-              LParen 52..53 "("
-              ClosureExpr 53..70
-                Pipe 53..54 "|"
-                Param 54..59
-                  Ident 54..59 "value"
-                Pipe 59..60 "|"
-                BinExpr 61..70
-                  PathExpr 61..66
-                    Ident 61..66 "value"
-                  Plus 67..68 "+"
-                  LiteralExpr 69..70
-                    Int 69..70 "1"
-              RParen 70..71 ")"
-          Dot 71..72 "."
-          Ident 72..77 "count"
-          ArgList 77..79
-            LParen 77..78 "("
-            RParen 78..79 ")"
-        Semi 79..80 ";"
-      RBrace 81..82 "}"
+        MethodCallExpr 28..75
+          MethodCallExpr 28..67
+            MethodCallExpr 28..44
+              ArrayExpr 28..37
+                LBracket 28..29 "["
+                LiteralExpr 29..30
+                  Int 29..30 "1"
+                Comma 30..31 ","
+                LiteralExpr 32..33
+                  Int 32..33 "2"
+                Comma 33..34 ","
+                LiteralExpr 35..36
+                  Int 35..36 "3"
+                RBracket 36..37 "]"
+              Dot 37..38 "."
+              Ident 38..42 "iter"
+              ArgList 42..44
+                LParen 42..43 "("
+                RParen 43..44 ")"
+            Dot 44..45 "."
+            Ident 45..48 "map"
+            ArgList 48..67
+              LParen 48..49 "("
+              ClosureExpr 49..66
+                Pipe 49..50 "|"
+                Param 50..55
+                  Ident 50..55 "value"
+                Pipe 55..56 "|"
+                BinExpr 57..66
+                  PathExpr 57..62
+                    Ident 57..62 "value"
+                  Plus 63..64 "+"
+                  LiteralExpr 65..66
+                    Int 65..66 "1"
+              RParen 66..67 ")"
+          Dot 67..68 "."
+          Ident 68..73 "count"
+          ArgList 73..75
+            LParen 73..74 "("
+            RParen 74..75 ")"
+        Semi 75..76 ";"
+      RBrace 77..78 "}"

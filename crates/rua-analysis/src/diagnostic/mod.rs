@@ -528,7 +528,8 @@ fn collect_declaration_item_diagnostics(
                     }
                 }
             }
-            SyntaxItem::Struct(_)
+            SyntaxItem::Annotation(_)
+            | SyntaxItem::Struct(_)
             | SyntaxItem::Enum(_)
             | SyntaxItem::Extern(_)
             | SyntaxItem::Use(_) => {}

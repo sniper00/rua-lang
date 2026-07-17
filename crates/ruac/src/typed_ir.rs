@@ -14,11 +14,22 @@ pub struct TypedProgram {
     syntax: Program,
     hir: ResolvedHir,
     types: TypeInfo,
+    annotations: crate::annotations::AnnotationIndex,
 }
 
 impl TypedProgram {
-    pub fn new(syntax: Program, hir: ResolvedHir, types: TypeInfo) -> Self {
-        let program = Self { syntax, hir, types };
+    pub fn new(
+        syntax: Program,
+        hir: ResolvedHir,
+        types: TypeInfo,
+        annotations: crate::annotations::AnnotationIndex,
+    ) -> Self {
+        let program = Self {
+            syntax,
+            hir,
+            types,
+            annotations,
+        };
         program.validate_items(program.hir.root, &program.syntax.items);
         program
     }
@@ -33,6 +44,10 @@ impl TypedProgram {
 
     pub fn types(&self) -> &TypeInfo {
         &self.types
+    }
+
+    pub fn annotations(&self) -> &crate::annotations::AnnotationIndex {
+        &self.annotations
     }
 
     pub fn item_target(&self, module: ModuleId, item_index: usize) -> ResolvedTarget {
@@ -146,7 +161,11 @@ impl TypedProgram {
     fn validate_items(&self, module: ModuleId, items: &[Item]) {
         for (item_index, item) in items.iter().enumerate() {
             match item {
-                Item::Fn(_) | Item::Struct(_) | Item::Enum(_) | Item::Trait(_) => {
+                Item::Annotation(_)
+                | Item::Fn(_)
+                | Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Trait(_) => {
                     self.item_definition(module, item_index);
                 }
                 Item::Mod(child) => {

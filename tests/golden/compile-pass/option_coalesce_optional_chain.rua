@@ -12,6 +12,6 @@ let profile: Option<Profile> = Option::Some(Profile { city: "Shanghai" });
 let missing: Option<Profile> = Option::None;
 let disabled: Option<bool> = Option::Some(false);
 
-println!("{}", disabled ?? true);
-println!("{}", profile?.city ?? "unknown");
-println!("{}", missing?.label("!") ?? "unknown");
+print("{}", disabled ?? true);
+print("{}", profile?.city ?? "unknown");
+print("{}", missing?.label("!") ?? "unknown");

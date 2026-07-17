@@ -67,6 +67,39 @@ fn compile_and_run(label: &str, source: &str) -> (String, Output) {
     compile_and_run_with_prelude(label, "", source)
 }
 
+#[test]
+fn runtime_annotation_registry_is_available_to_top_level_code() {
+    let (lua, output) = compile_and_run(
+        "runtime_annotations",
+        r#"
+        #[targets(function)]
+        #[retention(runtime)]
+        pub annotation Route(path: String);
+
+        #[Route(path = "/users")]
+        pub fn users() -> String { "users" }
+
+        let routes = Annotations::find("Route");
+        print("routes={}", routes.len());
+        "#,
+    );
+    assert_success(&output, "routes=1\n", &lua);
+}
+
+#[test]
+fn native_vec_literal_uses_the_zero_based_vec_runtime() {
+    let (lua, output) = compile_and_run(
+        "native_vec_literal",
+        r#"
+        let values = [10, 20, 30];
+        let empty: Vec<String> = [];
+        print("{}:{}:{}", values.len(), values[0], empty.len());
+        "#,
+    );
+    assert_success(&output, "3:10:0\n", &lua);
+    assert!(!lua.contains("vec!"));
+}
+
 fn compile_and_run_with_prelude(label: &str, prelude: &str, source: &str) -> (String, Output) {
     let root = workspace_root();
     let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-resources/resources/std"))
@@ -116,11 +149,11 @@ fn runtime_harness_executes_lua() {
 fn compound_assignment_and_loop_values_execute() {
     let source = r#"
 fn index() -> i64 {
-    println!("index");
+    print("index");
     0
 }
 
-let mut values = vec![1];
+let mut values = [1];
 values[index()] += 4;
 
 let mut text = "Rua";
@@ -130,7 +163,7 @@ let answer = loop {
     break values[0];
 };
 
-println!("{} {}", answer, text);
+print("{} {}", answer, text);
 "#;
     let (lua, output) = compile_and_run("compound-loop-value", source);
     assert_success(&output, "index\n5 Rua 5.5\n", &lua);
@@ -151,7 +184,7 @@ impl Profile {
 }
 
 fn fallback() -> String {
-    println!("fallback");
+    print("fallback");
     "!".to_string()
 }
 
@@ -159,11 +192,11 @@ let present: Option<Profile> = Option::Some(Profile { city: "Shanghai" });
 let absent: Option<Profile> = Option::None;
 let disabled: Option<bool> = Option::Some(false);
 
-println!("{}", disabled ?? true);
-println!("{}", present?.city ?? "unknown");
-println!("{}", absent?.city ?? "unknown");
-println!("{}", present?.label("!") ?? "none");
-println!("{}", absent?.label(fallback()) ?? "none");
+print("{}", disabled ?? true);
+print("{}", present?.city ?? "unknown");
+print("{}", absent?.city ?? "unknown");
+print("{}", present?.label("!") ?? "none");
+print("{}", absent?.label(fallback()) ?? "none");
 "#;
     let (lua, output) = compile_and_run("option-operators", source);
     assert_success(&output, "false\nShanghai\nunknown\nShanghai!\nnone\n", &lua);
@@ -178,13 +211,13 @@ let scores: HashMap<String, i64> = #{
     "bob": 20,
 };
 
-println!("{}", scores.get("alice").unwrap());
-println!("{}", "alice" in scores);
-println!("{}", "carol" in scores);
-println!("{}", 2 in vec![1, 2, 3]);
-println!("{}", "ua" in "Rua");
-println!("{}", 3 in 0..5);
-println!("{}", 5 in 0..5);
+print("{}", scores.get("alice").unwrap());
+print("{}", "alice" in scores);
+print("{}", "carol" in scores);
+print("{}", 2 in [1, 2, 3]);
+print("{}", "ua" in "Rua");
+print("{}", 3 in 0..5);
+print("{}", 5 in 0..5);
 "#;
     let (lua, output) = compile_and_run("membership-map", source);
     assert_success(&output, "10\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\n", &lua);
@@ -193,7 +226,7 @@ println!("{}", 5 in 0..5);
 
 #[test]
 fn generated_artifact_checks_runtime_abi() {
-    let lua = ruac::compile_str("println!(\"abi\");").unwrap();
+    let lua = ruac::compile_str("print(\"abi\");").unwrap();
     assert!(
         lua.contains("assert(rua_std.ABI_VERSION == 2, \"incompatible rua_std ABI\")"),
         "{lua}"
@@ -203,16 +236,16 @@ fn generated_artifact_checks_runtime_abi() {
 #[test]
 fn first_class_iterators_execute_without_fusion() {
     let source = r#"
-let mut pending = vec![1, 2, 3].iter().map(|value| value * 2).skip(1);
-println!("{}", pending.next().unwrap());
-println!("{}", pending.next().unwrap());
+let mut pending = [1, 2, 3].iter().map(|value| value * 2).skip(1);
+print("{}", pending.next().unwrap());
+print("{}", pending.next().unwrap());
 
 let mut characters = "你a".chars();
-println!("{}", characters.next().unwrap());
+print("{}", characters.next().unwrap());
 
 let range = (1..4).map(|value| value + 1);
 for value in range {
-    println!("{}", value);
+    print("{}", value);
 }
 "#;
     let (lua, output) = compile_and_run("first-class-iterator", source);
@@ -285,24 +318,24 @@ fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
         }
 
         match host_fetch(true) {
-            Ok(value) => println!("{}", value),
-            Err(error) => println!("{}", error),
+            Ok(value) => print("{}", value),
+            Err(error) => print("{}", error),
         }
         match host_fetch(false) {
-            Ok(value) => println!("{}", value),
-            Err(error) => println!("{}", error),
+            Ok(value) => print("{}", value),
+            Err(error) => print("{}", error),
         }
         match host_echo(Ok(9)) {
-            Ok(value) => println!("{}", value),
-            Err(error) => println!("{}", error),
+            Ok(value) => print("{}", value),
+            Err(error) => print("{}", error),
         }
         match host_echo(Err("bad")) {
-            Ok(value) => println!("{}", value),
-            Err(error) => println!("{}", error),
+            Ok(value) => print("{}", value),
+            Err(error) => print("{}", error),
         }
         match nested::run(6) {
-            Ok(value) => println!("{}", value),
-            Err(error) => println!("{}", error),
+            Ok(value) => print("{}", value),
+            Err(error) => print("{}", error),
         }
         "#,
         &[(
@@ -323,7 +356,7 @@ fn lua_result_extern_adapts_host_multi_returns_and_rua_tagged_arguments() {
 
 #[test]
 fn top_level_chunk_runs_without_main() {
-    let (lua, output) = compile_and_run("top-level", r#"println!("top-level");"#);
+    let (lua, output) = compile_and_run("top-level", r#"print("top-level");"#);
     assert_success(&output, "top-level\n", &lua);
 }
 
@@ -332,8 +365,8 @@ fn function_named_main_is_not_an_entry_point() {
     let (lua, output) = compile_and_run(
         "ordinary-main",
         r#"
-        fn main() { println!("wrong"); }
-        println!("chunk");
+        fn main() { print("wrong"); }
+        print("chunk");
         "#,
     );
     assert_success(&output, "chunk\n", &lua);
@@ -345,13 +378,13 @@ fn module_initializers_run_before_the_root_chunk() {
         "initializer-order",
         "",
         r#"
-        println!("root-before");
-        println!("root-after {}", api::answer());
+        print("root-before");
+        print("root-after {}", api::answer());
         "#,
         &[(
             "api.rua",
             r#"
-            println!("module");
+            print("module");
             pub fn answer() -> i64 { 42 }
             "#,
         )],
@@ -365,7 +398,7 @@ fn module_sibling_calls_use_resolved_target() {
         "module-sibling",
         "",
         r#"
-        println!("{}", api::double(4));
+        print("{}", api::double(4));
         "#,
         &[(
             "api.rua",
@@ -384,7 +417,7 @@ fn nested_module_uses_one_parent_owned_table() {
         "nested-module",
         "",
         r#"
-        println!("{}", outer::inner::answer());
+        print("{}", outer::inner::answer());
         "#,
         &[("outer/inner.rua", "pub fn answer() -> i64 { 42 }")],
     );
@@ -398,7 +431,7 @@ fn module_local_type_uses_one_backend_place() {
         "",
         r#"
         let point = geo::Point::new(2, 3);
-        println!("{}", point.x + point.y);
+        print("{}", point.x + point.y);
         "#,
         &[(
             "geo.rua",
@@ -426,9 +459,9 @@ fn variant_aliases_use_identity_in_construction_and_patterns() {
         let ready = R;
         let code = C(7);
         let movement = M { x: 5 };
-        match ready { R => println!("ready") }
-        match code { C(value) => println!("{}", value) }
-        match movement { M { x } => println!("{}", x) }
+        match ready { R => print("ready") }
+        match code { C(value) => print("{}", value) }
+        match movement { M { x } => print("{}", x) }
         "#,
         &[(
             "api.rua",
@@ -456,7 +489,7 @@ fn mutual_recursion_uses_one_lexical_binding_per_function() {
             if value == 0 { false } else { is_even(value - 1) }
         }
 
-        println!("{}", is_even(10));
+        print("{}", is_even(10));
         "#,
     );
     assert_success(&output, "true\n", &lua);
@@ -479,7 +512,7 @@ fn acyclic_forward_reference_is_reordered_without_declaration() {
         fn independent() -> i64 { 7 }
         fn callee() -> i64 { 42 }
 
-        println!("{} {}", caller(), independent());
+        print("{} {}", caller(), independent());
         "#,
     );
     assert_success(&output, "42 7\n", &lua);
@@ -506,7 +539,7 @@ fn direct_recursion_uses_local_function_without_forward_declaration() {
         fn factorial(value: i64) -> i64 {
             if value <= 1 { 1 } else { value * factorial(value - 1) }
         }
-        println!("{}", factorial(5));
+        print("{}", factorial(5));
         "#,
     );
     assert_success(&output, "120\n", &lua);
@@ -525,7 +558,7 @@ fn module_function_captures_root_local_function() {
         r#"
         fn root_answer() -> i64 { 42 }
 
-        println!("{}", api::answer());
+        print("{}", api::answer());
         "#,
         &[("api.rua", "pub fn answer() -> i64 { root_answer() }")],
     );
@@ -554,7 +587,7 @@ fn user_method_dispatch_is_not_shadowed_by_same_named_field() {
         fn dynamic(value: &dyn Named) -> String { value.name() }
 
         let person = Person { name: "Rua" };
-        println!("{} {} {}", concrete(person), generic(person), dynamic(person));
+        print("{} {} {}", concrete(person), generic(person), dynamic(person));
         "#,
     );
     assert_success(&output, "Rua Rua Rua\n", &lua);
@@ -571,8 +604,8 @@ fn option_map_inlines_without_allocating_an_unused_closure() {
         r#"
         let mapped = Option::Some(4).map(|value| value + 1);
         match mapped {
-            Option::Some(value) => println!("{}", value),
-            Option::None => println!("none"),
+            Option::Some(value) => print("{}", value),
+            Option::None => print("none"),
         }
         "#,
     );
@@ -588,7 +621,7 @@ fn result_methods_and_map_use_array_tag_abi() {
         let success: Result<i64, String> = Result::Ok(4).map(|value| value + 1);
         let failure: Result<i64, String> = Result::Err("no").map(|value| value + 1);
 
-        println!(
+        print(
             "{} {} {} {}",
             success.is_ok(),
             failure.is_err(),
@@ -596,8 +629,8 @@ fn result_methods_and_map_use_array_tag_abi() {
             failure.unwrap_or(9),
         );
         match failure {
-            Ok(_) => println!("wrong"),
-            Err(error) => println!("{}", error),
+            Ok(_) => print("wrong"),
+            Err(error) => print("{}", error),
         }
         "#,
     );
@@ -615,7 +648,7 @@ fn option_and_result_expect_return_values_and_report_context() {
         r#"
         let present: Option<i64> = Option::Some(7);
         let success: Result<i64, String> = Result::Ok(9);
-        println!("{} {}", present.expect("missing option"), success.expect("load failed"));
+        print("{} {}", present.expect("missing option"), success.expect("load failed"));
         "#,
     );
     assert_success(&output, "7 9\n", &lua);
@@ -669,7 +702,7 @@ fn returning_match_uses_direct_if_elseif_control_flow() {
                 Color::Blue => "blue",
             }
         }
-        println!("{}", name(Color::Green));
+        print("{}", name(Color::Green));
         "#,
     );
     assert_success(&output, "green\n", &lua);
@@ -684,12 +717,12 @@ fn fused_iterator_uses_nested_guards_without_active_flag() {
     let (lua, output) = compile_and_run(
         "iterator-guards",
         r#"
-        let total = vec![1, 2, 3, 4]
+        let total = [1, 2, 3, 4]
             .iter()
             .map(|value| value * 2)
             .filter(|value| value > 4)
             .fold(0, |sum, value| sum + value);
-        println!("{}", total);
+        print("{}", total);
         "#,
     );
     assert_success(&output, "14\n", &lua);
@@ -708,19 +741,16 @@ fn exact_size_collect_uses_lua_table_capacity_without_changing_vec_layout() {
     let (lua, output) = compile_and_run(
         "iterator-table-capacity",
         r#"
-        let mapped = vec![1, 2, 3]
+        let mapped = [1, 2, 3]
             .iter()
             .map(|value| value * 10)
             .collect::<Vec<i64>>();
-        println!("{} {} {}", mapped.len(), mapped[0], mapped[2]);
+        print("{} {} {}", mapped.len(), mapped[0], mapped[2]);
         "#,
     );
     assert_success(&output, "3 10 30\n", &lua);
-    assert!(
-        lua.contains("local __rua_table_create = table.create"),
-        "{lua}"
-    );
-    assert!(lua.contains("vec.from_table(__rua_table_create("), "{lua}");
+    assert!(lua.contains("local tbcreate = table.create"), "{lua}");
+    assert!(lua.contains("vec.from_table(tbcreate("), "{lua}");
 }
 
 #[test]
@@ -729,14 +759,14 @@ fn unused_iterator_with_capture_side_effect_is_not_eliminated() {
         "iterator-effect-dce",
         r#"
         let mut calls = 0;
-        let unused = vec![1, 2, 3]
+        let unused = [1, 2, 3]
             .iter()
             .map(|value| {
                 calls = calls + 1;
                 value * 2
             })
             .collect::<Vec<i64>>();
-        println!("{}", calls);
+        print("{}", calls);
         "#,
     );
     assert_success(&output, "3\n", &lua);
@@ -754,8 +784,8 @@ fn result_remains_tagged_after_storage() {
 
         let result = make_result(false);
         match result {
-            Ok(value) => println!("ok {}", value),
-            Err(message) => println!("err {}", message),
+            Ok(value) => print("ok {}", value),
+            Err(message) => print("err {}", message),
         }
         "#,
     );
@@ -775,9 +805,9 @@ fn match_guard_failure_continues_to_later_arm() {
             }
         }
 
-        println!("{}", classify(2));
-        println!("{}", classify(0));
-        println!("{}", classify(-2));
+        print("{}", classify(2));
+        print("{}", classify(0));
+        print("{}", classify(-2));
         "#,
     );
     assert_success(&output, "positive\nzero\nnegative\n", &lua);
@@ -789,8 +819,8 @@ fn same_named_traits_in_modules_keep_default_method_identity() {
         "module-trait-identity",
         "",
         r#"
-        println!("{}", left::make().name());
-        println!("{}", right::make().name());
+        print("{}", left::make().name());
+        print("{}", right::make().name());
         "#,
         &[
             (
@@ -833,7 +863,7 @@ fn end(repeat: i64) -> i64 {
 }
 
 let value = Holder { end: end(4) };
-println!("{}", value.repeat());
+print("{}", value.repeat());
 "#,
     );
     assert_success(&output, "5\n", &lua);
@@ -846,7 +876,7 @@ fn module_and_local_with_same_name_get_distinct_backend_places() {
         "",
         r#"
 let api = 2;
-println!("{}", api + api::value());
+print("{}", api + api::value());
 "#,
         &[("api.rua", "pub fn value() -> i64 { 40 }")],
     );
@@ -858,22 +888,22 @@ fn result_remains_tagged_in_vec_and_with_nil_payload() {
     let (lua, output) = compile_and_run(
         "result-containers",
         r#"
-        let values = vec![Err("inside")];
+        let values = [Err("inside")];
         match values[0] {
-            Ok(_) => println!("wrong"),
-            Err(message) => println!("{}", message),
+            Ok(_) => print("wrong"),
+            Err(message) => print("{}", message),
         }
 
         let ok_nil: Result<Option<i64>, Option<String>> = Ok(None);
         match ok_nil {
-            Ok(value) => if let None = value { println!("nil-ok"); },
-            Err(_) => println!("wrong"),
+            Ok(value) => if let None = value { print("nil-ok"); },
+            Err(_) => print("wrong"),
         }
 
         let err_nil: Result<Option<i64>, Option<String>> = Err(None);
         match err_nil {
-            Ok(_) => println!("wrong"),
-            Err(error) => if let None = error { println!("nil-err"); },
+            Ok(_) => print("wrong"),
+            Err(error) => if let None = error { print("nil-err"); },
         }
         "#,
     );

@@ -23,7 +23,7 @@ strict compiler               tolerant Rowan CST + formatter
                               protocol and workspace adapter
 ```
 
-长期约束：
+依赖约束：
 
 - `ruac` 不依赖 Rowan、analysis 或 LSP，可以嵌入不提供磁盘和 CWD 的 host。
 - `rua-syntax` / `rua-analysis` production 不调用 compiler semantic API 作为 fallback。
@@ -35,7 +35,7 @@ strict compiler               tolerant Rowan CST + formatter
 
 ## 2. 双 parser
 
-双 parser 是长期设计：
+Rua 使用两套 parser：
 
 | | `ruac` strict parser | `rua-syntax` IDE parser |
 |---|---|---|
@@ -62,8 +62,10 @@ parser 流水线；compiler execution golden 与 native inference/LSP cursor tes
 ```text
 shared tokens
   -> owned AST preserving chunk order
+  -> cfg_attr expansion + active declaration/member view
   -> module and declaration collection
   -> resolved HIR
+  -> annotation identity/schema index
   -> structural checks and ID-keyed type facts
   -> BackendLayout
   -> structured Lua IR
@@ -72,7 +74,12 @@ shared tokens
 
 collection 先分配 module/item identity，再解析 import、path 和 body，因此支持前向引用与递归。成功的 use site 在 codegen 前已经是 `LocalId`、`DefId`、`ModuleId`、`BuiltinId` 或其他稳定 target；type facts 同样以 identity 为 key。
 
-`BackendLayout` 唯一负责把 semantic identity 分配到 Lua place，并处理关键字、Unicode、保留前缀和清洗冲突。bundle layout 把 module 映射到同一 lexical chunk 中的 table path；modules layout 把当前 module 映射到 `__rua_module`，把跨 module identity 映射到由普通 `require` 绑定的稳定 local alias。codegen 只消费 resolved HIR、type facts 和 layout，不按 AST 字符串、span 或未限定名称重新猜目标。
+attribute 先解析为结构化 meta item。`cfg_attr` 展开和 `cfg` 求值使用 project 的
+`CfgOptions`，只把激活的声明与成员交给 collection；codegen 不再次检查 attribute
+字符串。resolve 后建立的 `AnnotationIndex` 保存 annotation identity、validated arguments、
+retention 和目标 identity，metadata 与 runtime registry 都从该索引投影。
+
+`BackendLayout` 唯一负责把 semantic identity 分配到 Lua place，并处理关键字、Unicode、保留前缀和清洗冲突。bundle layout 把 module 映射到同一 lexical chunk 中的 table path；modules layout 把当前 module 映射到具名本地 table，把跨 module identity 映射到由普通 `require` 绑定的稳定 local alias。依赖 alias 由完整逻辑路径转成 PascalCase，例如 `application.checkout` 对应 `ApplicationCheckout`；路径折叠重名时追加 identity，用户局部变量同名时由 layout 改名。仅含一个公开 `struct`/`enum` 的源模块把 module identity 与该类型 table 合并；声明模块保留配置的外部 ABI。codegen 只消费 resolved HIR、type facts 和 layout，不按 AST 字符串、span 或未限定名称重新猜目标。
 
 root free function 按 resolved dependency 排序并直接输出带 EmmyLua 注解的 `local function`；直接递归沿用该形式，只有包含多个函数的强连通依赖环才生成独立的 Lua 前向声明。
 
@@ -104,18 +111,33 @@ Lua 5.5 table allocation 按可证明的容量生成：随后填充的 module/ty
 
 Lua IR 结构化表示 expression、place、table、call、function、statement 和 block。printer 独占括号、优先级、缩进和文本输出；source map 使用 HIR source anchor，不从生成字符串反推。
 
-modules backend 为每个 runtime `ModuleId` 生成独立 Lua IR 和 source map。每个单元
-在顶部直接 require identity-resolved dependency，然后定义、初始化并返回自己的 table；
+modules backend 只为 root 和具有实体 `.rua` source 的 runtime `ModuleId` 生成独立
+Lua IR 和 source map。纯目录 namespace 没有输出文件或 runtime table；跨过 namespace
+的引用直接 require 最终实体模块。每个单元在顶部直接 require identity-resolved
+dependency。仅有一个公开 `struct`/`enum` 时，类型 table 同时作为 module 返回值，
+跨模块调用直接使用返回的类型 table；多个公开类型或纯函数模块以文件名末段的
+PascalCase 声明 module table。EmmyLua class identity 使用完整路径，例如
+`presentation.Console` 或 `domain.Product`。单元随后定义、初始化并返回对应 table；
 `.ruai` 只形成 runtime import，不产生生成文件。`runtime.lua_path`/`--lua-path`
 只负责在 root 输出中前置 Lua `package.path`。依赖图必须无环，循环依赖在生成阶段
 诊断；初始化顺序采用 Lua require 的深度优先语义。
+
+dependency alias 由完整 module path 转为 PascalCase，例如 `application.checkout`
+对应 `ApplicationCheckout`。`BackendLayout` 统一处理路径折叠冲突、用户 local 遮蔽和
+runtime alias 冲突。模块头按搜索路径、标准库 ABI、module require、标准库 export
+alias 分组；Lua IR 中的 blank entry 负责类型、函数、初始化与最终 return 的空行。
+
+runtime annotation 的 modules artifact 包含一个 `rua_annotations.lua`。codegen 按
+resolved annotation identity 与 backend place 生成 canonical locator；registry 加载只
+注册 metadata，`Annotations::load` 负责 target module 的惰性 require。CLI 仅清理带
+ruac metadata header 的 compiler-owned metadata 文件。
 
 ## 4. Native analysis 数据流
 
 ```text
 file text/path/root/project/config/standard-library revision
   -> tolerant parse
-  -> ItemTree
+  -> project-filtered ItemTree
   -> project DefMap
   -> Body + Scope + BodySourceMap
   -> BodyResolution + Inference
@@ -129,15 +151,20 @@ native inference 独立推断 `loop` break join、Option chain/coalesce、member
 key/value，并把可选链 receiver 解包后交给 `MemberIndex`。因此 `value?.member` 与
 `value.member` 共享同一个 declaration identity，而表达式结果仍按 Option 规则包装。
 
-definition identity 携带 project context。enum variant、field、method、trait item、standard declaration 和 inline macro 都是可导航的 semantic target。`ReferenceIndex` 由 resolved occurrence 构建，区分 declaration、read、write、call、capture 和 member use；references、rename、hierarchy 与 unused diagnostics 不扫描同名文本。
+analysis 使用与 compiler 相同的 `CfgOptions` 构造 project-filtered ItemTree。未激活
+声明不参与 resolve、completion 或 diagnostics，但原始 syntax token 带 inactive
+modifier，并可 hover 查看未满足的 cfg。annotation declaration 和 application 则以
+definition identity 进入 completion、hover、definition、references 与 rename。
 
-cache 以 file revision、project/root/config identity 为 key。public signature、private body、文件删除、project 删除和 library reload 分别触发受控失效；取消或基于旧 generation 的结果不进入 cache。
+definition identity 携带 project context。enum variant、field、method、trait item 和 standard declaration 都是可导航的 semantic target。`ReferenceIndex` 由 resolved occurrence 构建，区分 declaration、read、write、call、capture 和 member use；references、rename、hierarchy 与 unused diagnostics 不扫描同名文本。
+
+cache 以 file revision、project/root/config identity 为 key。public signature、private body、文件删除、project 删除和 library reload 分别触发受控失效；取消或过期 generation 的结果不进入 cache。
 
 ## 5. 文档与诊断契约
 
 `Documentation` 是 protocol-neutral semantic record。只有 `///`、`//!`、`/** */` 和 `/*! */` 附着为 API 文档；普通注释和被空行隔开的注释不会进入 hover。
 
-function、method、trait item、extern、`.ruai` declaration、field、enum variant 与 inline macro 从同一记录提供 hover、completion resolve 和 signature help。
+function、method、trait item、extern、`.ruai` declaration、field 与 enum variant 从同一记录提供 hover、completion resolve 和 signature help。标准函数由 `.ruai` 派生索引提供相同能力，不维护宏特判。
 
 `DiagnosticCode` 是 compiler 与 analysis 共用的稳定分类。machine contract 使用 code、file、byte range 和命名参数；CLI message 只是 presentation。LSP 直接发布 native analysis diagnostic，不启动 compiler 再解析终端文字。
 
@@ -154,7 +181,7 @@ production server 维护一个长期 `AnalysisHost`，adapter state 分开记录
 
 未在 `.ruarc.toml` 配置 `runtime.std_path` 时，LSP 使用内嵌标准库，并把同版本资源物化到只读临时目录以提供可打开的 definition URI。自定义路径必须包含有效 `std.toml`；manifest 与所有 `.ruai` 会在替换当前索引前完整校验。一个 server 实例中的 workspace folder 必须使用相同标准库根，避免同一 semantic database 出现互相冲突的 language item。
 
-目录扫描会处理 ignore 文件、跳过常见构建目录并防止 symlink cycle。昂贵只读查询和扫描运行在 bounded worker 上，支持 `$/cancelRequest`；输入 generation 改变后旧结果以 `ContentModified` 失败，不能覆盖新状态。URI/path 转换与 UTF-8 byte offset 到 UTF-16 position 的转换集中在 adapter 层。
+目录扫描会处理 ignore 文件、跳过常见构建目录并防止 symlink cycle。昂贵只读查询和扫描运行在 bounded worker 上，支持 `$/cancelRequest`；输入 generation 改变后过期结果以 `ContentModified` 失败，不能覆盖新状态。URI/path 转换与 UTF-8 byte offset 到 UTF-16 position 的转换集中在 adapter 层。
 
 ## 7. 验证门禁
 

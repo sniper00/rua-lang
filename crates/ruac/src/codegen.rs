@@ -11,10 +11,11 @@
 //!   Option        -> pure nil: Some(v) => v, None => nil
 //!   Result        -> first-class tagged runtime value
 
-use rua_core::{BuiltinMacroLowering, builtin_macro_by_id};
-
+use crate::annotations::{AnnotationRetention, AnnotationTarget, AnnotationValue};
 use crate::ast::*;
-use crate::backend_layout::BackendLayout;
+use crate::backend_layout::{
+    BackendLayout, module_class_name, module_table_identifier, single_public_type, user_identifier,
+};
 use crate::lua_ir::{
     BinaryOp as LuaBinaryOp, Expr as LuaExpr, FunctionTarget, InlineStatement, TableField,
     UnaryOp as LuaUnaryOp,
@@ -98,6 +99,7 @@ pub struct LuaSourceMapping {
 pub struct GeneratedLua {
     pub source: String,
     pub source_map: Vec<LuaSourceMapping>,
+    pub annotations: crate::annotations::AnnotationIndex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +117,7 @@ pub struct GeneratedLuaModule {
 pub struct GeneratedLuaModules {
     pub root_output_path: String,
     pub modules: Vec<GeneratedLuaModule>,
+    pub annotations: crate::annotations::AnnotationIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +170,8 @@ pub fn generate_with_source_map_and_lua_path(
         current_module: hir.root,
         mode: CodegenMode::Bundle,
         module_dependencies: BTreeSet::new(),
+        flattened_module_type: None,
+        flattened_module_class: None,
         builtin_rules: rules,
         metatable_types,
     };
@@ -194,7 +199,7 @@ pub fn generate_with_source_map_and_lua_path(
         }
     }
     if cg.uses_table_create {
-        prefix.push_str("local __rua_table_create = table.create\n");
+        prefix.push_str("local tbcreate = table.create\n");
     }
     let printed = crate::lua_ir::print_with_source_map(&cg.lua.finish());
     if !printed.source.is_empty() && !prefix.ends_with("\n\n") && !printed.source.starts_with('\n')
@@ -215,6 +220,7 @@ pub fn generate_with_source_map_and_lua_path(
     Ok(GeneratedLua {
         source: prefix,
         source_map,
+        annotations: program.annotations().clone(),
     })
 }
 
@@ -328,12 +334,344 @@ pub fn generate_modules_with_source_maps(
             "modules output cannot lower cyclic Lua require dependency: {display}"
         ));
     }
-    let modules = generated.into_iter().map(|unit| unit.output).collect();
+    let mut modules = generated
+        .into_iter()
+        .map(|unit| unit.output)
+        .collect::<Vec<_>>();
+    let runtime_modules = module_annotation_outputs(program, &names)?;
+    for module in runtime_modules {
+        if !outputs.insert(module.output_path.clone()) {
+            return Err(format!(
+                "runtime annotation metadata conflicts with `{}`",
+                module.output_path
+            ));
+        }
+        modules.push(module);
+    }
 
     Ok(GeneratedLuaModules {
         root_output_path: root_output_path.to_string(),
         modules,
+        annotations: program.annotations().clone(),
     })
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeAnnotationLocator {
+    module_name: String,
+    fields: Vec<String>,
+    kind: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeAnnotationEntry<'a> {
+    annotation: String,
+    locator: RuntimeAnnotationLocator,
+    arguments: &'a [(String, AnnotationValue)],
+    source_order: u32,
+}
+
+fn runtime_annotation_entries<'a>(
+    program: &'a crate::typed_ir::TypedProgram,
+    module_names: &BTreeMap<crate::hir::ModuleId, String>,
+) -> Result<Vec<RuntimeAnnotationEntry<'a>>, String> {
+    let hir = program.hir();
+    let mut layouts = BTreeMap::new();
+    let mut field_names = BTreeMap::new();
+    collect_annotation_field_names(&program.syntax().items, hir.root, program, &mut field_names);
+    let mut entries = Vec::new();
+    for instance in program.annotations().instances() {
+        let definition = program
+            .annotations()
+            .definition(instance.annotation)
+            .expect("annotation instance has a schema");
+        if definition.retention != AnnotationRetention::Runtime {
+            continue;
+        }
+        let (module, base, extra, kind) = match instance.target {
+            AnnotationTarget::Definition(target) => {
+                let target_data = hir.definition(target);
+                match target_data.kind {
+                    crate::hir::DefKind::EnumVariant { owner, .. } => (
+                        hir.definition(owner).module,
+                        owner,
+                        vec![
+                            BackendLayout::for_module(program, hir.definition(owner).module)
+                                .member_name(&target_data.name),
+                        ],
+                        "variant",
+                    ),
+                    crate::hir::DefKind::Method { owner } => {
+                        (hir.definition(owner).module, target, Vec::new(), "method")
+                    }
+                    crate::hir::DefKind::Function => {
+                        (target_data.module, target, Vec::new(), "function")
+                    }
+                    crate::hir::DefKind::Struct => {
+                        (target_data.module, target, Vec::new(), "struct")
+                    }
+                    crate::hir::DefKind::Enum => (target_data.module, target, Vec::new(), "enum"),
+                    other => {
+                        return Err(format!(
+                            "runtime annotation target `{}` has unsupported backend kind {other:?}",
+                            target_data.name
+                        ));
+                    }
+                }
+            }
+            AnnotationTarget::Field { owner, index } => {
+                let module = hir.definition(owner).module;
+                let name = field_names.get(&instance.target).ok_or_else(|| {
+                    format!("missing runtime field locator for {owner:?}/{index}")
+                })?;
+                let member = BackendLayout::for_module(program, module).member_name(name);
+                (module, owner, vec![member], "field")
+            }
+            AnnotationTarget::VariantField { variant, index } => {
+                let crate::hir::DefKind::EnumVariant { owner, .. } = hir.definition(variant).kind
+                else {
+                    return Err("runtime variant-field target has no enum owner".to_string());
+                };
+                let module = hir.definition(owner).module;
+                let name = field_names.get(&instance.target).ok_or_else(|| {
+                    format!("missing runtime variant field locator for {variant:?}/{index}")
+                })?;
+                let layout = BackendLayout::for_module(program, module);
+                let extra = vec![
+                    layout.member_name(&hir.definition(variant).name),
+                    layout.member_name(name),
+                ];
+                (module, owner, extra, "variant_field")
+            }
+        };
+        let layout = layouts
+            .entry(module)
+            .or_insert_with(|| BackendLayout::for_module(program, module));
+        let mut fields = layout
+            .definition(base)
+            .ok_or_else(|| format!("runtime annotation target {base:?} has no backend place"))?
+            .fields()
+            .to_vec();
+        fields.extend(extra);
+        let module_name = module_names.get(&module).cloned().unwrap_or_else(|| {
+            if module == hir.root {
+                "main".to_string()
+            } else {
+                hir.module(module).path.segments().join(".")
+            }
+        });
+        entries.push(RuntimeAnnotationEntry {
+            annotation: definition.qualified_name.clone(),
+            locator: RuntimeAnnotationLocator {
+                module_name,
+                fields,
+                kind,
+            },
+            arguments: &instance.arguments,
+            source_order: instance.source_order,
+        });
+    }
+    entries.sort_by_key(|entry| entry.source_order);
+    Ok(entries)
+}
+
+fn collect_annotation_field_names(
+    items: &[Item],
+    module: crate::hir::ModuleId,
+    program: &crate::typed_ir::TypedProgram,
+    names: &mut BTreeMap<AnnotationTarget, String>,
+) {
+    for (item_index, item) in items.iter().enumerate() {
+        match item {
+            Item::Struct(structure) => {
+                let owner = program.item_definition(module, item_index);
+                for (index, field) in structure.fields.iter().enumerate() {
+                    names.insert(
+                        AnnotationTarget::Field {
+                            owner,
+                            index: index as u32,
+                        },
+                        field.name.clone(),
+                    );
+                }
+            }
+            Item::Enum(enumeration) => {
+                let owner = program.item_definition(module, item_index);
+                for (variant_index, variant) in enumeration.variants.iter().enumerate() {
+                    let variant_id = program.hir().enum_variant_targets[&(owner, variant_index)];
+                    if let VariantKind::Struct(fields) = &variant.kind {
+                        for (index, field) in fields.iter().enumerate() {
+                            names.insert(
+                                AnnotationTarget::VariantField {
+                                    variant: variant_id,
+                                    index: index as u32,
+                                },
+                                field.name.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+            Item::Mod(child) => {
+                let child_module = program.child_module(module, item_index);
+                collect_annotation_field_names(&child.items, child_module, program, names);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn module_annotation_outputs(
+    program: &crate::typed_ir::TypedProgram,
+    names: &[(crate::hir::ModuleId, String)],
+) -> Result<Vec<GeneratedLuaModule>, String> {
+    let names = names.iter().cloned().collect::<BTreeMap<_, _>>();
+    let entries = runtime_annotation_entries(program, &names)?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let all = entries.iter().collect::<Vec<_>>();
+    Ok(vec![GeneratedLuaModule {
+        module_name: "rua_annotations".to_string(),
+        output_path: "rua_annotations.lua".to_string(),
+        source: render_annotation_table(&all, program.hir()),
+        source_map: Vec::new(),
+        is_root: false,
+    }])
+}
+
+fn render_annotation_table(
+    entries: &[&RuntimeAnnotationEntry<'_>],
+    hir: &crate::hir::ResolvedHir,
+) -> String {
+    let mut output = String::from(
+        "-- Generated by ruac. Runtime annotation metadata ABI 1.\nlocal entries = {\n",
+    );
+    for entry in entries {
+        output.push_str("    { annotation = ");
+        output.push_str(&crate::lua_ir::lua_string(&entry.annotation));
+        output.push_str(", target = { module = ");
+        output.push_str(&crate::lua_ir::lua_string(&entry.locator.module_name));
+        output.push_str(", kind = ");
+        output.push_str(&crate::lua_ir::lua_string(entry.locator.kind));
+        output.push_str(", path = {");
+        for (index, field) in entry.locator.fields.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&crate::lua_ir::lua_string(field));
+        }
+        output.push_str("} }, args = ");
+        render_annotation_arguments(&mut output, entry.arguments, Some(hir));
+        output.push_str(" },\n");
+    }
+    output.push_str("}\n");
+    output.push_str(
+        r#"local M = require("rua_std").annotations
+M.set_entries(entries)
+return M
+"#,
+    );
+    output
+}
+
+fn render_annotation_arguments(
+    output: &mut String,
+    arguments: &[(String, AnnotationValue)],
+    hir: Option<&crate::hir::ResolvedHir>,
+) {
+    output.push('{');
+    for (index, (name, value)) in arguments.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push('[');
+        output.push_str(&crate::lua_ir::lua_string(name));
+        output.push_str("] = ");
+        render_annotation_value(output, value, hir);
+    }
+    output.push('}');
+}
+
+fn render_annotation_value(
+    output: &mut String,
+    value: &AnnotationValue,
+    hir: Option<&crate::hir::ResolvedHir>,
+) {
+    match value {
+        AnnotationValue::String(value) => output.push_str(&crate::lua_ir::lua_string(value)),
+        AnnotationValue::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        AnnotationValue::Integer(value) => output.push_str(&value.to_string()),
+        AnnotationValue::Float(value) => output.push_str(value),
+        AnnotationValue::EnumVariant(definition) => {
+            let value = hir.map_or_else(
+                || format!("definition:{}", definition.index()),
+                |hir| qualified_definition_name(hir, *definition),
+            );
+            output.push_str(&crate::lua_ir::lua_string(&value));
+        }
+        AnnotationValue::List(values) => {
+            output.push('{');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                render_annotation_value(output, value, hir);
+            }
+            output.push('}');
+        }
+    }
+}
+
+fn annotation_arguments_expr(
+    arguments: &[(String, AnnotationValue)],
+    hir: &crate::hir::ResolvedHir,
+) -> LuaExpr {
+    LuaExpr::Table(
+        arguments
+            .iter()
+            .map(|(name, value)| {
+                TableField::Indexed(LuaExpr::string(name), annotation_value_expr(value, hir))
+            })
+            .collect(),
+    )
+}
+
+fn annotation_value_expr(value: &AnnotationValue, hir: &crate::hir::ResolvedHir) -> LuaExpr {
+    match value {
+        AnnotationValue::String(value) => LuaExpr::string(value),
+        AnnotationValue::Bool(value) => LuaExpr::Bool(*value),
+        AnnotationValue::Integer(value) => LuaExpr::integer(value.to_string()),
+        AnnotationValue::Float(value) => LuaExpr::number(value.clone()),
+        AnnotationValue::EnumVariant(definition) => {
+            LuaExpr::string(&qualified_definition_name(hir, *definition))
+        }
+        AnnotationValue::List(values) => LuaExpr::Table(
+            values
+                .iter()
+                .map(|value| TableField::Value(annotation_value_expr(value, hir)))
+                .collect(),
+        ),
+    }
+}
+
+fn qualified_definition_name(
+    hir: &crate::hir::ResolvedHir,
+    definition: crate::hir::DefId,
+) -> String {
+    let data = hir.definition(definition);
+    match data.kind {
+        crate::hir::DefKind::EnumVariant { owner, .. }
+        | crate::hir::DefKind::TraitMethod { owner }
+        | crate::hir::DefKind::Method { owner } => {
+            format!("{}::{}", qualified_definition_name(hir, owner), data.name)
+        }
+        _ => {
+            let mut segments = hir.module(data.module).path.segments().to_vec();
+            segments.push(data.name.clone());
+            segments.join("::")
+        }
+    }
 }
 
 struct GeneratedModuleUnit {
@@ -403,13 +741,15 @@ fn collect_module_units<'a>(
         if child.is_decl {
             continue;
         }
-        out.push(ModuleUnit {
-            module: child_module,
-            items: &child.items,
-            chunk: &child.chunk,
-            source_order: &child.source_order,
-            is_root: false,
-        });
+        if child.is_file {
+            out.push(ModuleUnit {
+                module: child_module,
+                items: &child.items,
+                chunk: &child.chunk,
+                source_order: &child.source_order,
+                is_root: false,
+            });
+        }
         collect_module_units(&child.items, child_module, program, out);
     }
 }
@@ -424,6 +764,16 @@ fn generate_module_unit(
     lua_path: &[PathBuf],
 ) -> GeneratedModuleUnit {
     let hir = program.hir();
+    let flattened_module_type = single_public_type(program, unit.module);
+    let flattened_type_name =
+        flattened_module_type.map(|definition| hir.definition(definition).name.as_str());
+    let module_table = flattened_type_name
+        .map(user_identifier)
+        .unwrap_or_else(|| module_table_identifier(module_name));
+    let module_class = flattened_type_name.map_or_else(
+        || module_class_name(module_name),
+        |type_name| flattened_type_class_name(module_name, type_name),
+    );
     let mut metatable_types = HashSet::new();
     collect_metatable_types(
         &program.syntax().items,
@@ -450,10 +800,12 @@ fn generate_module_unit(
         program,
         info: program.types(),
         hir,
-        layout: BackendLayout::for_module(program, unit.module),
+        layout: BackendLayout::for_module_named(program, unit.module, &module_table),
         current_module: unit.module,
         mode: CodegenMode::Modules,
         module_dependencies: BTreeSet::new(),
+        flattened_module_type,
+        flattened_module_class: flattened_module_type.map(|_| module_class.clone()),
         builtin_rules: rules,
         metatable_types,
     };
@@ -461,12 +813,21 @@ fn generate_module_unit(
 
     let dependencies = cg.module_dependencies.iter().copied().collect::<Vec<_>>();
     let mut prefix =
-        String::from("-- Generated by ruac (Rua -> Lua 5.5 modules). Do not edit by hand.\n");
+        String::from("-- Generated by ruac (Rua -> Lua 5.5 modules). Do not edit by hand.\n\n");
     if unit.is_root {
-        append_lua_search_path(&mut prefix, lua_path)
+        let mut search_path = String::new();
+        append_lua_search_path(&mut search_path, lua_path)
             .expect("Lua search paths are validated before module generation");
+        append_header_section(&mut prefix, &search_path);
     }
-    prefix.push_str("local __rua_module = {}\n");
+
+    if let Some(import) = cg.runtime_imports.get("rua_std") {
+        let mut standard_library = String::new();
+        append_runtime_require(&mut standard_library, "rua_std", import);
+        append_header_section(&mut prefix, &standard_library);
+    }
+
+    let mut dependency_imports = String::new();
     for dependency in &dependencies {
         let alias = cg
             .layout
@@ -476,14 +837,31 @@ fn generate_module_unit(
             .iter()
             .find_map(|(module, name)| (module == dependency).then_some(name))
             .expect("generated module dependency has a package name");
-        prefix.push_str(&format!(
+        dependency_imports.push_str(&format!(
             "local {alias} = require({})\n",
             crate::lua_ir::lua_string(package_name)
         ));
     }
-    append_runtime_imports(&mut prefix, &cg.runtime_imports);
+    for (module, import) in &cg.runtime_imports {
+        if module != "rua_std" {
+            append_runtime_require(&mut dependency_imports, module, import);
+        }
+    }
+    append_header_section(&mut prefix, &dependency_imports);
+
+    let mut aliases = String::new();
+    for import in cg.runtime_imports.values() {
+        append_runtime_export_aliases(&mut aliases, import);
+    }
     if cg.uses_table_create {
-        prefix.push_str("local __rua_table_create = table.create\n");
+        aliases.push_str("local tbcreate = table.create\n");
+    }
+    append_header_section(&mut prefix, &aliases);
+
+    if flattened_module_type.is_none() {
+        prefix.push_str(&format!(
+            "---@class {module_class}\nlocal {module_table} = {{}}\n"
+        ));
     }
 
     let printed = crate::lua_ir::print_with_source_map(&cg.lua.finish());
@@ -503,7 +881,13 @@ fn generate_module_unit(
         .collect();
     prefix.push_str(&printed.source);
 
-    prefix.push_str("return __rua_module\n");
+    if !prefix.ends_with("\n\n") {
+        if !prefix.ends_with('\n') {
+            prefix.push('\n');
+        }
+        prefix.push('\n');
+    }
+    prefix.push_str(&format!("return {module_table}\n"));
 
     GeneratedModuleUnit {
         module: unit.module,
@@ -547,25 +931,45 @@ fn append_lua_search_path(prefix: &mut String, paths: &[PathBuf]) -> Result<(), 
     Ok(())
 }
 
-fn append_runtime_imports(prefix: &mut String, imports: &BTreeMap<String, RuntimeImport>) {
-    for (module, import) in imports {
+fn append_header_section(prefix: &mut String, section: &str) {
+    if section.is_empty() {
+        return;
+    }
+    prefix.push_str(section);
+    if !section.ends_with('\n') {
+        prefix.push('\n');
+    }
+    prefix.push('\n');
+}
+
+fn append_runtime_require(prefix: &mut String, module: &str, import: &RuntimeImport) {
+    prefix.push_str(&format!(
+        "local {} = require({})\n",
+        import.alias,
+        crate::lua_ir::lua_string(module)
+    ));
+    if let Some(abi) = import.abi {
         prefix.push_str(&format!(
-            "local {} = require({})\n",
-            import.alias,
-            crate::lua_ir::lua_string(module)
+            "assert({0}.ABI_VERSION == {abi}, \"incompatible {module} ABI\")\n",
+            import.alias
         ));
-        if let Some(abi) = import.abi {
-            prefix.push_str(&format!(
-                "assert({0}.ABI_VERSION == {abi}, \"incompatible {module} ABI\")\n",
-                import.alias
-            ));
-        }
-        for (export, alias) in &import.exports {
-            prefix.push_str(&format!(
-                "local {alias} = {}\n",
-                crate::lua_ir::lua_member(&import.alias, export)
-            ));
-        }
+    }
+}
+
+fn append_runtime_export_aliases(prefix: &mut String, import: &RuntimeImport) {
+    for (export, alias) in &import.exports {
+        prefix.push_str(&format!(
+            "local {alias} = {}\n",
+            crate::lua_ir::lua_member(&import.alias, export)
+        ));
+    }
+}
+
+fn flattened_type_class_name(module_name: &str, type_name: &str) -> String {
+    if module_table_identifier(module_name) == user_identifier(type_name) {
+        module_class_name(module_name)
+    } else {
+        format!("{module_name}.{type_name}")
     }
 }
 
@@ -594,6 +998,8 @@ struct Codegen<'a> {
     current_module: crate::hir::ModuleId,
     mode: CodegenMode,
     module_dependencies: BTreeSet<crate::hir::ModuleId>,
+    flattened_module_type: Option<crate::hir::DefId>,
+    flattened_module_class: Option<String>,
     builtin_rules: &'a crate::builtins::CodegenRules,
     metatable_types: HashSet<crate::hir::DefId>,
 }
@@ -611,56 +1017,65 @@ fn statement_source(statement: &Stmt) -> Option<crate::token::SourceRange> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// EmmyLua helpers — convert rua types to LuaLS annotations
-// ---------------------------------------------------------------------------
-
-fn type_to_emmylua(ty: &Type) -> String {
-    match ty {
-        Type::Path { name, args, .. } => {
-            let base = match name.as_str() {
-                "i64" | "i8" | "i16" | "i32" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
-                    "integer"
-                }
-                "f64" | "f32" => "number",
-                "bool" => "boolean",
-                "String" | "str" => "string",
-                "Vec" => {
-                    if let Some(a) = args.first() {
-                        return format!("{}[]", type_to_emmylua(a));
-                    }
-                    "table"
-                }
-                "Option" => {
-                    if let Some(a) = args.first() {
-                        return format!("{}|nil", type_to_emmylua(a));
-                    }
-                    "any|nil"
-                }
-                "Result" => "table",
-                "HashMap" => "table",
-                _ => name.as_str(),
-            };
-            base.to_string()
-        }
-        Type::Ref { inner, .. } => type_to_emmylua(inner),
-        Type::Function { params, ret } => {
-            let params = params.iter().map(type_to_emmylua).collect::<Vec<_>>();
-            format!("fun({}): {}", params.join(", "), type_to_emmylua(ret))
-        }
-        Type::Tuple(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(type_to_emmylua)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Type::Unit => "nil".into(),
-    }
-}
-
 impl Codegen<'_> {
+    fn type_to_emmylua(&self, ty: &Type) -> String {
+        match ty {
+            Type::Path { id, name, args } => {
+                if self.is_modules()
+                    && let Some(crate::hir::TypeTarget::Item(definition)) =
+                        self.hir.type_targets.get(id).copied()
+                    && single_public_type(self.program, self.hir.definition(definition).module)
+                        == Some(definition)
+                {
+                    let definition = self.hir.definition(definition);
+                    let module_name = self.hir.module(definition.module).path.segments().join(".");
+                    return flattened_type_class_name(&module_name, &definition.name);
+                }
+                let base = match name.as_str() {
+                    "i64" | "i8" | "i16" | "i32" | "isize" | "u8" | "u16" | "u32" | "u64"
+                    | "usize" => "integer",
+                    "f64" | "f32" => "number",
+                    "bool" => "boolean",
+                    "String" | "str" => "string",
+                    "Vec" => {
+                        if let Some(a) = args.first() {
+                            return format!("{}[]", self.type_to_emmylua(a));
+                        }
+                        "table"
+                    }
+                    "Option" => {
+                        if let Some(a) = args.first() {
+                            return format!("{}|nil", self.type_to_emmylua(a));
+                        }
+                        "any|nil"
+                    }
+                    "Result" => "table",
+                    "HashMap" => "table",
+                    _ => name.as_str(),
+                };
+                base.to_string()
+            }
+            Type::Ref { inner, .. } => self.type_to_emmylua(inner),
+            Type::Function { params, ret } => {
+                let params = params
+                    .iter()
+                    .map(|parameter| self.type_to_emmylua(parameter))
+                    .collect::<Vec<_>>();
+                format!("fun({}): {}", params.join(", "), self.type_to_emmylua(ret))
+            }
+            Type::Tuple(items) => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|item| self.type_to_emmylua(item))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Type::Never => "never".into(),
+            Type::Unit => "nil".into(),
+        }
+    }
+
     fn is_modules(&self) -> bool {
         self.mode == CodegenMode::Modules
     }
@@ -810,7 +1225,7 @@ impl Codegen<'_> {
         // Parameter types are explicit in Rua source; only emit the return
         // annotation so LuaLS can infer the result type at call sites.
         if let Some(ret) = &f.ret {
-            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
+            self.annotation(format!("---@return {}", self.type_to_emmylua(ret)));
         }
     }
 
@@ -899,8 +1314,7 @@ impl Codegen<'_> {
 
     fn table_create(&mut self, sequence: LuaExpr, records: usize) -> LuaExpr {
         self.uses_table_create = true;
-        LuaExpr::name("__rua_table_create")
-            .call(vec![sequence, LuaExpr::integer(records.to_string())])
+        LuaExpr::name("tbcreate").call(vec![sequence, LuaExpr::integer(records.to_string())])
     }
 
     fn empty_table(&mut self, records: usize) -> LuaExpr {
@@ -1152,6 +1566,9 @@ impl Codegen<'_> {
             | ExprKind::Bool(_)
             | ExprKind::Path(_)
             | ExprKind::Closure { .. } => true,
+            ExprKind::VecLit(elements) => elements
+                .iter()
+                .all(|element| self.expression_is_removable_with_returns(element, closure_returns)),
             ExprKind::Unary { expr, .. } => {
                 self.info.is_pure_operator(expression.id)
                     && self.expression_is_removable_with_returns(expr, closure_returns)
@@ -1227,16 +1644,6 @@ impl Codegen<'_> {
                 self.expression_is_removable_with_returns(start, closure_returns)
                     && self.expression_is_removable_with_returns(end, closure_returns)
             }
-            ExprKind::MacroCall { args, .. }
-                if matches!(
-                    self.program.expression_target(expression.id),
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::MacroVec)
-                ) =>
-            {
-                args.iter().all(|argument| {
-                    self.expression_is_removable_with_returns(argument, closure_returns)
-                })
-            }
             ExprKind::If {
                 cond,
                 then_block,
@@ -1262,7 +1669,6 @@ impl Codegen<'_> {
             | ExprKind::IfLet { .. }
             | ExprKind::Loop(_)
             | ExprKind::Index { .. }
-            | ExprKind::MacroCall { .. }
             | ExprKind::Assign { .. } => false,
         }
     }
@@ -1278,7 +1684,6 @@ impl Codegen<'_> {
                     )
             ),
             ExprKind::MethodCall { .. }
-            | ExprKind::MacroCall { .. }
             | ExprKind::If { .. }
             | ExprKind::IfLet { .. }
             | ExprKind::Match { .. }
@@ -1313,6 +1718,9 @@ impl Codegen<'_> {
         self.define_module_functions(items, module);
         self.gen_impls(items, &traits, module);
         self.publish_module_items(items, module);
+        if !chunk.stmts.is_empty() || chunk.tail.is_some() {
+            self.blank();
+        }
         self.init_entries(source_order, items, chunk, module);
     }
 
@@ -1322,38 +1730,74 @@ impl Codegen<'_> {
             .module(module)
             .expect("modular unit has a module table")
             .clone();
+        let mut emitted_allocation = false;
+        let mut last_allocation_was_module = false;
         for (item_index, item) in items.iter().enumerate() {
             match item {
                 Item::Struct(structure) => {
+                    if emitted_allocation {
+                        self.blank();
+                    }
                     let definition = self.program.item_definition(module, item_index);
-                    self.emit_struct_annotation(structure);
+                    if self.flattened_module_type == Some(definition) {
+                        self.annotation(format!(
+                            "---@class {}",
+                            self.flattened_module_class
+                                .as_deref()
+                                .expect("flattened module type has a class identity")
+                        ));
+                    } else {
+                        self.emit_struct_annotation(structure);
+                    }
                     for field in &structure.fields {
                         self.annotation(format!(
                             "---@field {} {}",
                             field.name,
-                            type_to_emmylua(&field.ty)
+                            self.type_to_emmylua(&field.ty)
                         ));
                     }
                     if self.type_needs_runtime_table(definition) {
                         let place = self.layout.definition(definition).unwrap().clone();
                         let table = self.empty_table(self.type_table_record_capacity(definition));
-                        self.assign(place.expression(), table);
+                        if self.flattened_module_type == Some(definition) {
+                            self.local(place.to_string(), Some(table));
+                        } else {
+                            self.assign(place.expression(), table);
+                        }
                         if self.metatable_types.contains(&definition) {
                             self.assign(place.field("__index").expression(), place.expression());
                         }
                     }
+                    emitted_allocation = true;
+                    last_allocation_was_module = false;
                 }
                 Item::Enum(enumeration) => {
+                    if emitted_allocation {
+                        self.blank();
+                    }
                     let definition = self.program.item_definition(module, item_index);
-                    self.annotation(format!("---@class {}", enumeration.name));
+                    let class = if self.flattened_module_type == Some(definition) {
+                        self.flattened_module_class
+                            .as_deref()
+                            .expect("flattened module type has a class identity")
+                    } else {
+                        &enumeration.name
+                    };
+                    self.annotation(format!("---@class {class}"));
                     if self.type_needs_runtime_table(definition) {
                         let place = self.layout.definition(definition).unwrap().clone();
                         let table = self.empty_table(self.type_table_record_capacity(definition));
-                        self.assign(place.expression(), table);
+                        if self.flattened_module_type == Some(definition) {
+                            self.local(place.to_string(), Some(table));
+                        } else {
+                            self.assign(place.expression(), table);
+                        }
                         if self.metatable_types.contains(&definition) {
                             self.assign(place.field("__index").expression(), place.expression());
                         }
                     }
+                    emitted_allocation = true;
+                    last_allocation_was_module = false;
                 }
                 Item::Mod(child) => {
                     let child_module = self.program.child_module(module, item_index);
@@ -1368,8 +1812,11 @@ impl Codegen<'_> {
                     {
                         continue;
                     }
-                    if child.is_decl {
+                    if child.is_decl || !child.is_file {
                         continue;
+                    }
+                    if emitted_allocation && !last_allocation_was_module {
+                        self.blank();
                     }
                     self.record_module_dependency(child_module);
                     let value = self
@@ -1379,6 +1826,8 @@ impl Codegen<'_> {
                         .expression();
                     let field = self.layout.member_name(&child.name);
                     self.assign(module_place.field(field).expression(), value);
+                    emitted_allocation = true;
+                    last_allocation_was_module = true;
                 }
                 _ => {}
             }
@@ -1416,20 +1865,29 @@ impl Codegen<'_> {
     fn publish_module_items(&mut self, items: &[Item], module: crate::hir::ModuleId) {
         let module_place = self.layout.module(module).unwrap().clone();
         for (item_index, item) in items.iter().enumerate() {
+            let definition = match item {
+                Item::Fn(_) | Item::Struct(_) | Item::Enum(_) => {
+                    Some(self.program.item_definition(module, item_index))
+                }
+                _ => None,
+            };
+            if definition == self.flattened_module_type {
+                continue;
+            }
             let exported = match item {
                 Item::Fn(function) if function.is_pub => self
                     .layout
-                    .definition(self.program.item_definition(module, item_index))
+                    .definition(definition.expect("function has a definition"))
                     .map(|place| (function.name.as_str(), place.clone())),
                 Item::Struct(structure) if structure.is_pub => self
                     .layout
-                    .definition(self.program.item_definition(module, item_index))
+                    .definition(definition.expect("struct has a definition"))
                     .map(|place| (structure.name.as_str(), place.clone())),
                 Item::Enum(enumeration) if enumeration.is_pub => self
                     .layout
-                    .definition(self.program.item_definition(module, item_index))
+                    .definition(definition.expect("enum has a definition"))
                     .map(|place| (enumeration.name.as_str(), place.clone())),
-                Item::Mod(child) if child.is_pub && !child.is_decl => self
+                Item::Mod(child) if child.is_pub && !child.is_decl && child.is_file => self
                     .layout
                     .module(self.program.child_module(module, item_index))
                     .map(|place| (child.name.as_str(), place.clone())),
@@ -1473,7 +1931,7 @@ impl Codegen<'_> {
                         self.annotation(format!(
                             "---@field {} {}",
                             field.name,
-                            type_to_emmylua(&field.ty)
+                            self.type_to_emmylua(&field.ty)
                         ));
                     }
                     if self.type_needs_runtime_table(definition) {
@@ -1555,6 +2013,7 @@ impl Codegen<'_> {
             }
         }
         self.gen_impls(&prog.items, &traits, self.hir.root);
+        self.gen_bundle_annotation_registry();
         // Phase 3: execute initializers in observable source order.
         self.init_entries(&prog.source_order, &prog.items, &prog.chunk, self.hir.root);
 
@@ -1587,6 +2046,140 @@ impl Codegen<'_> {
             self.blank();
             self.lua.return_table(exports);
         }
+    }
+
+    fn gen_bundle_annotation_registry(&mut self) {
+        let runtime_instances = self
+            .program
+            .annotations()
+            .instances()
+            .iter()
+            .filter(|instance| {
+                self.program
+                    .annotations()
+                    .definition(instance.annotation)
+                    .is_some_and(|definition| definition.retention == AnnotationRetention::Runtime)
+            })
+            .collect::<Vec<_>>();
+        if runtime_instances.is_empty() {
+            return;
+        }
+
+        let mut field_names = BTreeMap::new();
+        collect_annotation_field_names(
+            &self.program.syntax().items,
+            self.hir.root,
+            self.program,
+            &mut field_names,
+        );
+        let entries = runtime_instances
+            .into_iter()
+            .map(|instance| {
+                let definition = self
+                    .program
+                    .annotations()
+                    .definition(instance.annotation)
+                    .expect("annotation instance has a schema");
+                let target = match instance.target {
+                    AnnotationTarget::Definition(target) => {
+                        let data = self.hir.definition(target);
+                        if let crate::hir::DefKind::EnumVariant { owner, .. } = data.kind {
+                            self.layout
+                                .definition(owner)
+                                .expect("runtime enum has a backend place")
+                                .field(self.layout.member_name(&data.name))
+                                .expression()
+                        } else {
+                            self.layout
+                                .definition(target)
+                                .expect("runtime definition has a backend place")
+                                .expression()
+                        }
+                    }
+                    AnnotationTarget::Field { owner, .. } => LuaExpr::named_table(vec![
+                        (
+                            "owner".to_string(),
+                            self.layout
+                                .definition(owner)
+                                .expect("runtime field owner has a backend place")
+                                .expression(),
+                        ),
+                        (
+                            "member".to_string(),
+                            LuaExpr::string(
+                                &self.layout.member_name(&field_names[&instance.target]),
+                            ),
+                        ),
+                        ("kind".to_string(), LuaExpr::string("field")),
+                    ]),
+                    AnnotationTarget::VariantField { variant, .. } => {
+                        let crate::hir::DefKind::EnumVariant { owner, .. } =
+                            self.hir.definition(variant).kind
+                        else {
+                            unreachable!("variant field has an enum variant identity")
+                        };
+                        LuaExpr::named_table(vec![
+                            (
+                                "owner".to_string(),
+                                self.layout
+                                    .definition(owner)
+                                    .expect("runtime enum owner has a backend place")
+                                    .field(
+                                        self.layout.member_name(&self.hir.definition(variant).name),
+                                    )
+                                    .expression(),
+                            ),
+                            (
+                                "member".to_string(),
+                                LuaExpr::string(
+                                    &self.layout.member_name(&field_names[&instance.target]),
+                                ),
+                            ),
+                            ("kind".to_string(), LuaExpr::string("variant_field")),
+                        ])
+                    }
+                };
+                LuaExpr::named_table(vec![
+                    (
+                        "annotation".to_string(),
+                        LuaExpr::string(&definition.qualified_name),
+                    ),
+                    ("target".to_string(), target),
+                    (
+                        "args".to_string(),
+                        annotation_arguments_expr(&instance.arguments, self.hir),
+                    ),
+                ])
+            })
+            .map(TableField::Value)
+            .collect();
+        self.local("__rua_annotation_entries", Some(LuaExpr::Table(entries)));
+        self.local(
+            "__rua_annotations",
+            Some(
+                LuaExpr::name("require")
+                    .call(vec![LuaExpr::string("rua_std")])
+                    .field("annotations"),
+            ),
+        );
+        self.expression_statement(
+            LuaExpr::name("__rua_annotations")
+                .field("set_entries")
+                .call(vec![LuaExpr::name("__rua_annotation_entries")]),
+        );
+        self.lua.begin_function(
+            FunctionTarget::path(vec!["__rua_annotations".to_string(), "load".to_string()]),
+            vec!["entry".to_string()],
+        );
+        self.return_value(LuaExpr::name("entry").field("target"));
+        self.lua.end_block();
+        self.assign(
+            LuaExpr::name("package")
+                .field("loaded")
+                .index(LuaExpr::string("rua_annotations")),
+            LuaExpr::name("__rua_annotations"),
+        );
+        self.blank();
     }
 
     fn bind_externs(&mut self, items: &[Item], module: crate::hir::ModuleId) {
@@ -1824,7 +2417,9 @@ impl Codegen<'_> {
                     {
                         let child = self.program.child_module(module, index);
                         if self.is_modules() {
-                            self.record_module_dependency(child);
+                            if child_decl.is_file {
+                                self.record_module_dependency(child);
+                            }
                         } else {
                             self.init_entries(
                                 &child_decl.source_order,
@@ -1981,7 +2576,7 @@ impl Codegen<'_> {
         self.blank();
         // Return annotation so LuaLS can infer result types.
         if let Some(ret) = &m.ret {
-            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
+            self.annotation(format!("---@return {}", self.type_to_emmylua(ret)));
         }
         let params = m
             .params
@@ -2001,10 +2596,14 @@ impl Codegen<'_> {
         // Emit param/return annotations
         let skip_self = if tm.has_self { 1 } else { 0 };
         for p in tm.params.iter().skip(skip_self) {
-            self.annotation(format!("---@param {} {}", p.name, type_to_emmylua(&p.ty)));
+            self.annotation(format!(
+                "---@param {} {}",
+                p.name,
+                self.type_to_emmylua(&p.ty)
+            ));
         }
         if let Some(ret) = &tm.ret {
-            self.annotation(format!("---@return {}", type_to_emmylua(ret)));
+            self.annotation(format!("---@return {}", self.type_to_emmylua(ret)));
         }
         let params = tm
             .params
@@ -2055,7 +2654,7 @@ impl Codegen<'_> {
                 let local = self.local_name(name);
                 // EmmyLua type annotation for explicitly typed bindings
                 if let Some(ty_ann) = ty {
-                    self.annotation(format!("---@type {}", type_to_emmylua(ty_ann)));
+                    self.annotation(format!("---@type {}", self.type_to_emmylua(ty_ann)));
                 }
                 if let ExprKind::Closure { params, body, .. } = &init.kind {
                     self.gen_closure_local(&local, params, body);
@@ -3344,6 +3943,7 @@ impl Codegen<'_> {
             ExprKind::Float(s) => LuaExpr::number(s.replace('_', "")),
             ExprKind::Str(s) => LuaExpr::string_literal(s),
             ExprKind::Bool(value) => LuaExpr::Bool(*value),
+            ExprKind::VecLit(elements) => self.gen_vec_literal(elements),
             ExprKind::Closure { params, body, .. } => self.gen_closure_value(params, body),
             ExprKind::Path(_) => self.gen_path(e),
             ExprKind::Unary { op, expr } => {
@@ -3632,7 +4232,6 @@ impl Codegen<'_> {
                 let i = self.gen_inline(index);
                 b.index(i)
             }
-            ExprKind::MacroCall { args, .. } => self.gen_macro(e, args),
             ExprKind::Range {
                 start,
                 end,
@@ -3755,23 +4354,12 @@ impl Codegen<'_> {
 
     fn target_module(&self, target: crate::hir::ResolvedTarget) -> Option<crate::hir::ModuleId> {
         match target {
-            crate::hir::ResolvedTarget::Item(definition) => {
-                Some(self.hir.definition(definition).module)
-            }
             crate::hir::ResolvedTarget::Module(module) => Some(module),
-            crate::hir::ResolvedTarget::Extern(external) => {
-                self.hir
-                    .definitions
-                    .iter()
-                    .find_map(|definition| match definition.kind {
-                        crate::hir::DefKind::ExternFunction { extern_id }
-                            if extern_id == external =>
-                        {
-                            Some(definition.module)
-                        }
-                        _ => None,
-                    })
-            }
+            target @ (crate::hir::ResolvedTarget::Item(_)
+            | crate::hir::ResolvedTarget::Extern(_)) => self
+                .hir
+                .definition_for_target(target)
+                .map(|definition| self.hir.definition(definition).module),
             crate::hir::ResolvedTarget::Local(_)
             | crate::hir::ResolvedTarget::Builtin(_)
             | crate::hir::ResolvedTarget::Error => None,
@@ -3829,8 +4417,9 @@ impl Codegen<'_> {
                     _ => {}
                 }
             }
-            if let crate::hir::ResolvedTarget::Item(definition) =
-                self.program.expression_target(callee.id)
+            if let Some(definition) = self
+                .hir
+                .definition_for_target(self.program.expression_target(callee.id))
                 && let Some(runtime) = self.hir.standard_runtime(definition).cloned()
             {
                 let arguments = args
@@ -3865,47 +4454,19 @@ impl Codegen<'_> {
         c.call(a)
     }
 
-    fn gen_macro(&mut self, expression: &Expr, args: &[Expr]) -> LuaExpr {
-        let a: Vec<LuaExpr> = args.iter().map(|x| self.gen_inline(x)).collect();
-        let crate::hir::ResolvedTarget::Builtin(builtin) =
-            self.program.expression_target(expression.id)
-        else {
-            panic!(
-                "checked macro call {:?} has no builtin identity",
-                expression.id
-            );
-        };
-        let spec = builtin_macro_by_id(builtin)
-            .unwrap_or_else(|| panic!("resolved builtin {builtin:?} is not a macro"));
-        let lowering = spec.lowering;
-        match lowering {
-            BuiltinMacroLowering::Vec => {
-                // 0-based storage + length field, matching Rust indexing.
-                // Keep only index 0 explicit. Remaining list fields compile to a
-                // Lua `NEWTABLE` with an array-capacity hint and still land at
-                // indices 1..n-1.
-                let length = a.len();
-                let mut values = a.into_iter();
-                let mut fields = Vec::with_capacity(length + 1);
-                if let Some(first) = values.next() {
-                    fields.push(TableField::Indexed(LuaExpr::integer("0"), first));
-                    fields.extend(values.map(TableField::Value));
-                }
-                fields.push(TableField::Named(
-                    "n".into(),
-                    LuaExpr::integer(length.to_string()),
-                ));
-                self.standard_call("std::vec", "from_table", vec![LuaExpr::Table(fields)])
-            }
-            BuiltinMacroLowering::Format => self.helper_call("format", "format", a),
-            BuiltinMacroLowering::Println => self.helper_call("format", "println", a),
-            BuiltinMacroLowering::Print => self.helper_call("format", "print", a),
-            BuiltinMacroLowering::Panic => {
-                let message = self.helper_call("format", "format", a);
-                self.helper_call("format", "panic", vec![message])
-            }
-            BuiltinMacroLowering::Passthrough => LuaExpr::name(spec.name).call(a),
+    fn gen_vec_literal(&mut self, elements: &[Expr]) -> LuaExpr {
+        let length = elements.len();
+        let mut values = elements.iter().map(|element| self.gen_inline(element));
+        let mut fields = Vec::with_capacity(length + 1);
+        if let Some(first) = values.next() {
+            fields.push(TableField::Indexed(LuaExpr::integer("0"), first));
+            fields.extend(values.map(TableField::Value));
         }
+        fields.push(TableField::Named(
+            "n".into(),
+            LuaExpr::integer(length.to_string()),
+        ));
+        self.standard_call("std::vec", "from_table", vec![LuaExpr::Table(fields)])
     }
 
     fn gen_struct_lit(&mut self, expression: &Expr, fields: &[(String, Expr)]) -> LuaExpr {
@@ -4130,9 +4691,9 @@ fn expression_mentions_binding(expression: &Expr, name: &str) -> bool {
         ExprKind::Index { base, index } => {
             expression_mentions_binding(base, name) || expression_mentions_binding(index, name)
         }
-        ExprKind::MacroCall { args, .. } => args
+        ExprKind::VecLit(elements) => elements
             .iter()
-            .any(|argument| expression_mentions_binding(argument, name)),
+            .any(|element| expression_mentions_binding(element, name)),
         ExprKind::If {
             cond,
             then_block,
@@ -4362,9 +4923,9 @@ fn collect_expr_function_dependencies(
             collect_expr_function_dependencies(base, hir, functions, dependencies);
             collect_expr_function_dependencies(index, hir, functions, dependencies);
         }
-        ExprKind::MacroCall { args, .. } => {
-            for argument in args {
-                collect_expr_function_dependencies(argument, hir, functions, dependencies);
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                collect_expr_function_dependencies(element, hir, functions, dependencies);
             }
         }
         ExprKind::If {

@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, sync::OnceLock};
 use rua_core::StdSymbolId;
 
 use super::{
-    CallableTy, ItemKind, ItemSignature, ItemTree, ReceiverKind, Ty, TypeLoweringContext,
-    VariantKind,
+    CallableTy, DefId, GenericParamId, ItemKind, ItemSignature, ItemTree, ReceiverKind, Ty,
+    TypeLoweringContext, VariantKind,
 };
 use crate::base::TextRange;
 
@@ -70,6 +70,106 @@ pub struct StdMember {
     source_path: String,
     name_range: TextRange,
     documentation: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StdFunction {
+    name: String,
+    generic_params: Vec<String>,
+    params: Vec<(Option<String>, String)>,
+    return_type: Option<String>,
+    variadic: bool,
+    source_path: String,
+    name_range: TextRange,
+    documentation: Option<String>,
+}
+
+impl StdFunction {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn params(&self) -> &[(Option<String>, String)] {
+        &self.params
+    }
+
+    pub fn generic_params(&self) -> &[String] {
+        &self.generic_params
+    }
+
+    pub fn return_type(&self) -> Option<&str> {
+        self.return_type.as_deref()
+    }
+
+    pub const fn is_variadic(&self) -> bool {
+        self.variadic
+    }
+
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+
+    pub const fn name_range(&self) -> TextRange {
+        self.name_range
+    }
+
+    pub fn documentation(&self) -> Option<&str> {
+        self.documentation.as_deref()
+    }
+
+    pub fn callable(&self) -> CallableTy {
+        // Standard functions are not owned by a project DefMap. The synthetic
+        // owner only scopes parameter identities inside this callable; each
+        // call gets an independent substitution.
+        let generic_owner = DefId::from_index(u32::MAX);
+        let lowering = TypeLoweringContext::new().with_generic_params(
+            self.generic_params.iter().enumerate().map(|(index, name)| {
+                (
+                    name.as_str(),
+                    GenericParamId::new(generic_owner, index as u32),
+                )
+            }),
+        );
+        CallableTy::new(
+            self.params
+                .iter()
+                .map(|(_, ty)| lowering.lower_syntax(ty))
+                .collect(),
+            self.return_type
+                .as_deref()
+                .map(|ty| lowering.lower_syntax(ty))
+                .unwrap_or(Ty::UNIT),
+        )
+    }
+
+    pub fn signature(&self) -> String {
+        let mut params = self
+            .params
+            .iter()
+            .map(|(name, ty)| match name {
+                Some(name) => format!("{name}: {ty}"),
+                None => ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        if self.variadic {
+            params.push("...".to_string());
+        }
+        let return_type = self
+            .return_type
+            .as_deref()
+            .map(|ty| format!(" -> {ty}"))
+            .unwrap_or_default();
+        let generics = if self.generic_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.generic_params.join(", "))
+        };
+        format!(
+            "fn {}{generics}({}){return_type}",
+            self.name,
+            params.join(", ")
+        )
+    }
 }
 
 impl StdMember {
@@ -143,6 +243,7 @@ impl StdMember {
 pub struct StdLibraryIndex {
     types: Vec<StdType>,
     members: Vec<StdMember>,
+    functions: Vec<StdFunction>,
     by_id: BTreeMap<StdSymbolId, usize>,
 }
 
@@ -160,6 +261,17 @@ impl StdLibraryIndex {
             .binary_search_by(|standard_type| standard_type.name.as_str().cmp(name))
             .ok()
             .map(|index| &self.types[index])
+    }
+
+    pub fn functions(&self) -> impl ExactSizeIterator<Item = &StdFunction> {
+        self.functions.iter()
+    }
+
+    pub fn function_named(&self, name: &str) -> Option<&StdFunction> {
+        self.functions
+            .binary_search_by(|function| function.name.as_str().cmp(name))
+            .ok()
+            .map(|index| &self.functions[index])
     }
 
     pub fn members_for<'a>(&'a self, owner_ty: &Ty) -> impl Iterator<Item = &'a StdMember> + 'a {
@@ -186,6 +298,7 @@ impl StdLibraryIndex {
     pub fn build(library: &rua_resources::StdLibrary) -> Result<Self, String> {
         let mut types = Vec::new();
         let mut members = Vec::new();
+        let mut functions = Vec::new();
 
         for source in library.declarations() {
             let parse = rua_syntax::parse(source.text());
@@ -232,6 +345,31 @@ impl StdLibraryIndex {
 
             for item in tree.items() {
                 match (item.kind(), item.signature()) {
+                    (ItemKind::ExternFunction, ItemSignature::Callable(signature)) => {
+                        functions.push(StdFunction {
+                            name: item.name().to_string(),
+                            generic_params: signature
+                                .generic_params()
+                                .iter()
+                                .filter_map(|parameter| parameter.name().map(str::to_string))
+                                .collect(),
+                            params: signature
+                                .params()
+                                .iter()
+                                .filter_map(|parameter| {
+                                    Some((
+                                        parameter.name().map(str::to_string),
+                                        parameter.type_ref().syntax()?.to_string(),
+                                    ))
+                                })
+                                .collect(),
+                            return_type: signature.return_type().syntax().map(str::to_string),
+                            variadic: signature.is_variadic(),
+                            source_path: source.path().to_string(),
+                            name_range: item.name_range(),
+                            documentation: item.documentation().map(str::to_string),
+                        });
+                    }
                     (ItemKind::Enum, ItemSignature::Aggregate(_)) => {
                         let owner_generics = owners.get(item.name()).cloned().unwrap_or_default();
                         for variant in item.children() {
@@ -317,9 +455,11 @@ impl StdLibraryIndex {
             }
         }
         types.sort_by(|left, right| left.name.cmp(&right.name));
+        functions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(StdLibraryIndex {
             types,
             members,
+            functions,
             by_id,
         })
     }
@@ -411,5 +551,25 @@ mod tests {
                 "is_err"
             ]
         );
+
+        let print = library.function_named("print").expect("standard print");
+        assert!(print.is_variadic());
+        assert_eq!(print.callable().return_ty(), &Ty::UNIT);
+        assert_eq!(print.source_path(), "fmt.ruai");
+        let panic = library.function_named("panic").expect("standard panic");
+        assert_eq!(panic.callable().return_ty(), &Ty::Never);
+
+        let assert_eq = library
+            .function_named("assert_eq")
+            .expect("standard generic assertion");
+        assert_eq!(assert_eq.generic_params(), ["T"]);
+        assert_eq!(
+            assert_eq.signature(),
+            "fn assert_eq<T>(left: T, right: T) -> ()"
+        );
+        let callable = assert_eq.callable();
+        assert_eq!(callable.params().len(), 2);
+        assert_eq!(callable.params()[0], callable.params()[1]);
+        assert!(matches!(callable.params()[0], Ty::GenericParam(_)));
     }
 }

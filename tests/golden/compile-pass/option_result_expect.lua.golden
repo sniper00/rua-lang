@@ -11,4 +11,4 @@ local outcome = result.ok(9)
 
 local __t1 = optional
 if __t1 == nil then error("missing option", 2) end
-fmt.println("{} {}", __t1, outcome:expect("failed operation"))
+fmt.print("{} {}", __t1, outcome:expect("failed operation"))

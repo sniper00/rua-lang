@@ -162,14 +162,24 @@ impl Ser {
         // No space *after* these.
         if matches!(
             prev,
-            ColonColon | LParen | LBracket | LBrace | Amp | Lt | Dot
+            ColonColon | LParen | LBracket | LBrace | Amp | Lt | Dot | Hash
         ) {
             return false;
         }
         // No space *before* these.
         if matches!(
             cur,
-            ColonColon | Comma | Semi | Colon | RParen | RBracket | RBrace | Lt | Gt | Dot
+            ColonColon
+                | Comma
+                | Semi
+                | Colon
+                | RParen
+                | RBracket
+                | RBrace
+                | Lt
+                | Gt
+                | Dot
+                | LBracket
         ) {
             return false;
         }
@@ -193,17 +203,11 @@ fn tok_text(t: SyntaxToken) -> String {
     t.text().to_string()
 }
 
-fn has_child_token(n: &SyntaxNode, k: K) -> bool {
-    n.children_with_tokens()
-        .filter_map(|e| e.into_token())
-        .any(|t| t.kind() == k)
-}
-
 /// Serialize every non-trivia token of a node (used for types and simple decls).
 fn ser_node(n: &SyntaxNode) -> String {
     let mut s = Ser::new();
     for t in n.descendants_with_tokens().filter_map(|e| e.into_token()) {
-        if !t.kind().is_trivia() {
+        if !t.kind().is_trivia() && (n.kind() == K::Attribute || !token_in_attribute(n, &t)) {
             s.push(&t);
         }
     }
@@ -220,7 +224,7 @@ fn decl_header(n: &SyntaxNode) -> String {
         .map(|t| t.text_range().start());
     let mut s = Ser::new();
     for t in n.descendants_with_tokens().filter_map(|e| e.into_token()) {
-        if t.kind().is_trivia() {
+        if t.kind().is_trivia() || token_in_attribute(n, &t) {
             continue;
         }
         if let Some(b) = brace
@@ -233,29 +237,57 @@ fn decl_header(n: &SyntaxNode) -> String {
     s.finish()
 }
 
+fn token_in_attribute(node: &SyntaxNode, token: &SyntaxToken) -> bool {
+    node.children().any(|child| {
+        child.kind() == K::Attribute && child.text_range().contains_range(token.text_range())
+    })
+}
+
+fn with_attributes(node: &SyntaxNode, body: Doc) -> Doc {
+    let attributes = node
+        .children()
+        .filter(|child| child.kind() == K::Attribute)
+        .collect::<Vec<_>>();
+    if attributes.is_empty() {
+        return body;
+    }
+    let mut parts = Vec::with_capacity(attributes.len() * 2 + 1);
+    for attribute in attributes {
+        parts.push(Doc::text(ser_node(&attribute)));
+        parts.push(Doc::HardLine);
+    }
+    parts.push(body);
+    Doc::Concat(parts)
+}
+
 // --- items -----------------------------------------------------------------
 
 fn item_doc(it: &Item) -> Doc {
     match it {
+        Item::Annotation(annotation) => with_attributes(
+            annotation.syntax(),
+            Doc::text(ser_node(annotation.syntax())),
+        ),
         Item::Fn(f) => fn_doc(f),
         Item::Struct(s) => struct_doc(s),
         Item::Enum(e) => enum_doc(e),
         Item::Trait(t) => trait_doc(t),
         Item::Impl(i) => impl_doc(i),
         Item::Extern(x) => extern_doc(x),
-        Item::Use(u) => Doc::text(ser_node(u.syntax())),
+        Item::Use(u) => with_attributes(u.syntax(), Doc::text(ser_node(u.syntax()))),
     }
 }
 
 fn fn_doc(f: &FnDecl) -> Doc {
-    match f.body() {
+    let body = match f.body() {
         Some(b) => Doc::concat([
             Doc::text(decl_header(f.syntax())),
             Doc::text(" "),
             block_doc(&b),
         ]),
         None => Doc::text(format!("{};", decl_header(f.syntax()))),
-    }
+    };
+    with_attributes(f.syntax(), body)
 }
 
 fn struct_doc(s: &StructDecl) -> Doc {
@@ -265,21 +297,24 @@ fn struct_doc(s: &StructDecl) -> Doc {
                 fl.syntax(),
                 |node| {
                     if let Some(fd) = FieldDecl::cast(node.clone()) {
-                        Doc::text(format!("{},", ser_node(fd.syntax())))
+                        Doc::concat([field_doc(&fd), Doc::text(",")])
                     } else {
                         Doc::text(compact(node))
                     }
                 },
                 false,
             );
-            Doc::concat([
-                Doc::text(decl_header(s.syntax())),
-                Doc::text(" "),
-                brace_block(fields),
-            ])
+            with_attributes(
+                s.syntax(),
+                Doc::concat([
+                    Doc::text(decl_header(s.syntax())),
+                    Doc::text(" "),
+                    brace_block(fields),
+                ]),
+            )
         }
         // Unit struct `struct S;`.
-        None => Doc::text(ser_node(s.syntax())),
+        None => with_attributes(s.syntax(), Doc::text(ser_node(s.syntax()))),
     }
 }
 
@@ -289,7 +324,7 @@ fn enum_doc(e: &EnumDecl) -> Doc {
             vl.syntax(),
             |node| {
                 if let Some(v) = EnumVariant::cast(node.clone()) {
-                    Doc::text(format!("{},", variant_str(&v)))
+                    Doc::concat([variant_doc(&v), Doc::text(",")])
                 } else {
                     Doc::text(compact(node))
                 }
@@ -298,16 +333,19 @@ fn enum_doc(e: &EnumDecl) -> Doc {
         ),
         None => Vec::new(),
     };
-    Doc::concat([
-        Doc::text(decl_header(e.syntax())),
-        Doc::text(" "),
-        brace_block(variants),
-    ])
+    with_attributes(
+        e.syntax(),
+        Doc::concat([
+            Doc::text(decl_header(e.syntax())),
+            Doc::text(" "),
+            brace_block(variants),
+        ]),
+    )
 }
 
-fn variant_str(v: &EnumVariant) -> String {
+fn variant_doc(v: &EnumVariant) -> Doc {
     let name = v.name_text().unwrap_or_default();
-    if let Some(fl) = v.field_list() {
+    let body = if let Some(fl) = v.field_list() {
         let fields: Vec<String> = fl.fields().map(|fd| ser_node(fd.syntax())).collect();
         if fields.is_empty() {
             format!("{name} {{}}")
@@ -321,7 +359,12 @@ fn variant_str(v: &EnumVariant) -> String {
         } else {
             format!("{name}({})", tys.join(", "))
         }
-    }
+    };
+    with_attributes(v.syntax(), Doc::text(body))
+}
+
+fn field_doc(field: &FieldDecl) -> Doc {
+    with_attributes(field.syntax(), Doc::text(ser_node(field.syntax())))
 }
 
 fn trait_doc(t: &TraitDecl) -> Doc {
@@ -336,22 +379,26 @@ fn trait_doc(t: &TraitDecl) -> Doc {
         },
         true,
     );
-    Doc::concat([
-        Doc::text(decl_header(t.syntax())),
-        Doc::text(" "),
-        brace_block_spaced(methods),
-    ])
+    with_attributes(
+        t.syntax(),
+        Doc::concat([
+            Doc::text(decl_header(t.syntax())),
+            Doc::text(" "),
+            brace_block_spaced(methods),
+        ]),
+    )
 }
 
 fn trait_method_doc(tm: &TraitMethod) -> Doc {
-    match tm.default_body() {
+    let body = match tm.default_body() {
         Some(b) => Doc::concat([
             Doc::text(decl_header(tm.syntax())),
             Doc::text(" "),
             block_doc(&b),
         ]),
         None => Doc::text(ser_node(tm.syntax())),
-    }
+    };
+    with_attributes(tm.syntax(), body)
 }
 
 fn impl_doc(i: &ImplDecl) -> Doc {
@@ -366,11 +413,14 @@ fn impl_doc(i: &ImplDecl) -> Doc {
         },
         true,
     );
-    Doc::concat([
-        Doc::text(decl_header(i.syntax())),
-        Doc::text(" "),
-        brace_block_spaced(methods),
-    ])
+    with_attributes(
+        i.syntax(),
+        Doc::concat([
+            Doc::text(decl_header(i.syntax())),
+            Doc::text(" "),
+            brace_block_spaced(methods),
+        ]),
+    )
 }
 
 fn extern_doc(x: &ExternBlock) -> Doc {
@@ -378,18 +428,21 @@ fn extern_doc(x: &ExternBlock) -> Doc {
         x.syntax(),
         |node| {
             if let Some(ef) = ExternFn::cast(node.clone()) {
-                Doc::text(ser_node(ef.syntax()))
+                with_attributes(ef.syntax(), Doc::text(ser_node(ef.syntax())))
             } else {
                 Doc::text(compact(node))
             }
         },
         false,
     );
-    Doc::concat([
-        Doc::text(decl_header(x.syntax())),
-        Doc::text(" "),
-        brace_block(fns),
-    ])
+    with_attributes(
+        x.syntax(),
+        Doc::concat([
+            Doc::text(decl_header(x.syntax())),
+            Doc::text(" "),
+            brace_block(fns),
+        ]),
+    )
 }
 
 // --- blocks & braces -------------------------------------------------------
@@ -802,9 +855,17 @@ fn expr_inline(e: &Expr) -> Doc {
             i.index().map(|x| expr_inline(&x)).unwrap_or(Doc::Nil),
             Doc::text("]"),
         ]),
+        Expr::Array(array) => wrap_list(
+            "[",
+            array
+                .elements()
+                .map(|element| expr_inline(&element))
+                .collect(),
+            "]",
+            false,
+        ),
         Expr::StructLit(s) => struct_lit_doc(s),
         Expr::Map(map) => map_doc(map),
-        Expr::MacroCall(m) => macro_doc(m),
         Expr::Closure(closure) => Doc::text(ser_node(closure.syntax())),
         Expr::If(if_expr) => if_doc(if_expr),
         Expr::Match(match_expr) => match_doc(match_expr),
@@ -861,22 +922,6 @@ fn map_doc(map: &MapExpr) -> Doc {
         })
         .collect();
     Doc::group(wrap_list("#{", entries, "}", true))
-}
-
-fn macro_doc(m: &MacroCallExpr) -> Doc {
-    let name = m.name().map(tok_text).unwrap_or_default();
-    let args: Vec<Doc> = m.args().map(|a| expr_inline(&a)).collect();
-    let (open, close, spaced) = if has_child_token(m.syntax(), K::LBrace) {
-        ("{", "}", true)
-    } else if has_child_token(m.syntax(), K::LBracket) {
-        ("[", "]", false)
-    } else {
-        ("(", ")", false)
-    };
-    Doc::concat([
-        Doc::text(format!("{name}!")),
-        wrap_list(open, args, close, spaced),
-    ])
 }
 
 // --- patterns --------------------------------------------------------------

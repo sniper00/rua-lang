@@ -950,7 +950,7 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
 fn member_lookup_builtin_calls_feed_inference_and_resolution_facts() {
     const SOURCE: &str = r#"
 fn builtin_calls() -> i64 {
-    let mut values = vec![1, 2];
+    let mut values = [1, 2];
     values./*vec_push*/push(3);
     let length = values./*vec_len*/len();
     let upper = "rua"./*string_upper*/to_uppercase();

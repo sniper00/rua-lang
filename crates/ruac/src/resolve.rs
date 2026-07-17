@@ -40,6 +40,7 @@ pub fn discover_modules_from_filesystem(
     root_file: &Path,
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
+    cfg: &rua_core::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let source_root = root_file
@@ -85,6 +86,7 @@ pub fn discover_modules_from_filesystem(
         &mut program.items,
         &mut program.source_order,
         discovered.children,
+        cfg,
         files,
     )
 }
@@ -159,6 +161,7 @@ pub fn discover_modules_with_provider<P: SourceProvider>(
         &mut program.source_order,
         discovered.children,
         provider,
+        &project.cfg,
         files,
     )
 }
@@ -371,13 +374,14 @@ fn materialize_filesystem_modules(
     items: &mut Vec<Item>,
     source_order: &mut Vec<ChunkEntry>,
     modules: BTreeMap<String, DiscoveredModule<PathBuf>>,
+    cfg: &rua_core::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let mut entries = Vec::new();
     for (name, module) in modules {
         let item_index = items.len();
         items.push(Item::Mod(materialize_filesystem_module(
-            name, module, files,
+            name, module, cfg, files,
         )?));
         entries.push(ChunkEntry::Item(item_index));
     }
@@ -389,6 +393,7 @@ fn materialize_filesystem_modules(
 fn materialize_filesystem_module(
     name: String,
     module: DiscoveredModule<PathBuf>,
+    cfg: &rua_core::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<ModDecl, Diag> {
     let (mut items, chunk, mut source_order, source_is_declaration, source_file) =
@@ -404,6 +409,8 @@ fn materialize_filesystem_module(
             let mut program =
                 crate::parser::parse_with_semantic_file(&text, file).map_err(parser_diagnostic)?;
             set_file_program(&mut program, file);
+            crate::attributes::apply_cfg(&mut program, cfg)
+                .map_err(|error| module_error(DiagnosticCode::ParseUnexpectedToken, error))?;
             (
                 program.items,
                 program.chunk,
@@ -414,7 +421,7 @@ fn materialize_filesystem_module(
         } else {
             (Vec::new(), empty_block(), Vec::new(), false, None)
         };
-    materialize_filesystem_modules(&mut items, &mut source_order, module.children, files)?;
+    materialize_filesystem_modules(&mut items, &mut source_order, module.children, cfg, files)?;
     let is_declaration = source_is_declaration
         || (!items.is_empty()
             && items
@@ -429,12 +436,13 @@ fn materialize_filesystem_module(
     }
     Ok(ModDecl {
         name,
+        attributes: Vec::new(),
         documentation: None,
         items,
         chunk,
         source_order,
         is_pub: true,
-        is_file: true,
+        is_file: source_file.is_some(),
         is_decl: is_declaration,
     })
 }
@@ -444,13 +452,14 @@ fn materialize_provider_modules<P: SourceProvider>(
     source_order: &mut Vec<ChunkEntry>,
     modules: BTreeMap<String, DiscoveredModule<(FileId, LogicalSourcePath)>>,
     provider: &P,
+    cfg: &rua_core::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let mut entries = Vec::new();
     for (name, module) in modules {
         let item_index = items.len();
         items.push(Item::Mod(materialize_provider_module(
-            name, module, provider, files,
+            name, module, provider, cfg, files,
         )?));
         entries.push(ChunkEntry::Item(item_index));
     }
@@ -463,6 +472,7 @@ fn materialize_provider_module<P: SourceProvider>(
     name: String,
     module: DiscoveredModule<(FileId, LogicalSourcePath)>,
     provider: &P,
+    cfg: &rua_core::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<ModDecl, Diag> {
     let (mut items, chunk, mut source_order, source_is_declaration, source_file) =
@@ -478,6 +488,8 @@ fn materialize_provider_module<P: SourceProvider>(
             let mut program = crate::parser::parse_with_semantic_file(&text.text, file_id.index())
                 .map_err(parser_diagnostic)?;
             set_file_program(&mut program, file_id.index());
+            crate::attributes::apply_cfg(&mut program, cfg)
+                .map_err(|error| module_error(DiagnosticCode::ParseUnexpectedToken, error))?;
             (
                 program.items,
                 program.chunk,
@@ -493,6 +505,7 @@ fn materialize_provider_module<P: SourceProvider>(
         &mut source_order,
         module.children,
         provider,
+        cfg,
         files,
     )?;
     let is_declaration = source_is_declaration
@@ -509,12 +522,13 @@ fn materialize_provider_module<P: SourceProvider>(
     }
     Ok(ModDecl {
         name,
+        attributes: Vec::new(),
         documentation: None,
         items,
         chunk,
         source_order,
         is_pub: true,
-        is_file: true,
+        is_file: source_file.is_some(),
         is_decl: is_declaration,
     })
 }
@@ -842,6 +856,10 @@ fn resolve_modules_inner(
 fn set_file_items(items: &mut [Item], id: u32) {
     for it in items.iter_mut() {
         match it {
+            Item::Annotation(annotation) => {
+                annotation.name_span.file = id;
+                set_file_signature(&mut annotation.params, None, id);
+            }
             Item::Fn(f) => {
                 f.name_span.file = id;
                 set_file_generics(&mut f.generics, id);
@@ -897,6 +915,7 @@ fn set_file_items(items: &mut [Item], id: u32) {
             Item::Extern(block) => {
                 for function in &mut block.fns {
                     function.name_span.file = id;
+                    set_file_generics(&mut function.generics, id);
                     set_file_signature(&mut function.params, function.ret.as_mut(), id);
                 }
             }
@@ -983,7 +1002,12 @@ fn validate_declaration_items(items: &[Item], file: u32) -> Result<(), Diag> {
                 }
                 validate_declaration_items(&module.items, file)?;
             }
-            Item::Fn(_) | Item::Struct(_) | Item::Enum(_) | Item::Extern(_) | Item::Use(_) => {}
+            Item::Annotation(_)
+            | Item::Fn(_)
+            | Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Extern(_)
+            | Item::Use(_) => {}
         }
     }
     Ok(())
@@ -1049,7 +1073,7 @@ fn set_file_type(ty: &mut Type, file: u32) {
                 set_file_type(item, file);
             }
         }
-        Type::Unit => {}
+        Type::Never | Type::Unit => {}
     }
 }
 
@@ -1119,6 +1143,11 @@ fn set_file_expr(e: &mut Expr, id: u32) {
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
+        ExprKind::VecLit(elements) => {
+            for element in elements {
+                set_file_expr(element, id);
+            }
+        }
         ExprKind::Closure {
             params, ret, body, ..
         } => {
@@ -1189,11 +1218,6 @@ fn set_file_expr(e: &mut Expr, id: u32) {
         ExprKind::Index { base, index } => {
             set_file_expr(base, id);
             set_file_expr(index, id);
-        }
-        ExprKind::MacroCall { args, .. } => {
-            for a in args {
-                set_file_expr(a, id);
-            }
         }
         ExprKind::If {
             cond,

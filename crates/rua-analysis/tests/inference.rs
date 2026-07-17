@@ -214,7 +214,7 @@ fn inference_binary_operator_matrix_rejects_incompatible_concrete_types() {
     const SOURCE: &str = r#"
 fn binary_matrix() {
     let bool_add = true + 1;
-    let vec_subtract = vec![1] - vec![2];
+    let vec_subtract = [1] - [2];
     let string_multiply = "left" * "right";
     let mixed_equal = 1 == "1";
     let mixed_not_equal = true != "true";
@@ -445,7 +445,7 @@ fn inference_control_flow_propagates_never_without_unreachable_noise() {
 fn dead_tail() -> i64 { return 1; "unreachable" }
 fn forever() -> i64 { loop {} }
 fn broken_loop() -> i64 { loop { break; } 1 }
-fn never_binary() -> i64 { panic!("stop") + 1 }
+fn never_binary() -> i64 { panic("stop") + 1 }
 fn inferred_closure() -> i64 {
     let produce = /*inferred_closure*/|| { return 3; };
     /*inferred_call*/produce()
@@ -600,6 +600,35 @@ fn invalid_calls() -> bool {
 }
 
 #[test]
+fn standard_generic_function_reuses_one_type_parameter() {
+    const SOURCE: &str = r#"
+fn valid() { assert_eq(1, 2); }
+fn invalid() { assert_eq(1, "two"); }
+"#;
+    let (host, file_id) = single_file_host(SOURCE);
+    let analysis = host.analysis();
+
+    let valid = body_owner(&analysis, file_id, "valid", DefKind::Function);
+    assert!(
+        analysis
+            .infer(valid)
+            .expect("valid standard generic call")
+            .diagnostics()
+            .is_empty()
+    );
+
+    let invalid = body_owner(&analysis, file_id, "invalid", DefKind::Function);
+    assert!(
+        analysis
+            .infer(invalid)
+            .expect("invalid standard generic call")
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, InferenceDiagnostic::TypeMismatch { .. }))
+    );
+}
+
+#[test]
 fn inference_calls_unknown_types_suppress_secondary_noise() {
     const SOURCE: &str = r#"
 fn unknown_suppression() -> bool {
@@ -710,7 +739,7 @@ fn inference_calls_reports_expected_branch_constructor_vec_and_pattern_mismatche
     const SOURCE: &str = r#"
 fn bad_branch(flag: bool) -> i64 { if flag { "text" } else { 1 } }
 fn bad_some() -> Option<i64> { Some("text") }
-fn bad_vec() { let values: Vec<i64> = vec!["text"]; values; }
+fn bad_vec() { let values: Vec<i64> = ["text"]; values; }
 fn bad_pattern() -> i64 { match 1 { "text" => 0, _ => 1 } }
 fn bad_arity() { Some(); }
 fn unknown_arithmetic() { let value = external_value() + 1; value; }
@@ -830,7 +859,7 @@ fn generic_call() -> i64 {
 fn inference_control_flow_types_containers_ranges_and_index_without_unknown_noise() {
     const SOURCE: &str = r#"
 fn containers() -> i64 {
-    let /*values_def*/values: Vec<i64> = /*vec_expr*/vec![1, 2, 3];
+    let /*values_def*/values: Vec<i64> = /*vec_expr*/[1, 2, 3];
     let /*option_def*/optional: Option<i64> = /*some_call*/Some(/*unknown_call*/external_value());
     let /*none_def*/none: Option<i64> = /*none_expr*/None;
     let /*result_def*/result: Result<i64, String> = /*ok_call*/Ok(1);
@@ -1063,7 +1092,10 @@ fn parity(flag: bool, count: i64) -> i64 {
     let fixture = fixture(SOURCE, "parity");
     assert!(fixture.inference.diagnostics().is_empty());
     let (compiler_diagnostics, _) = ruac::check_diags(SOURCE);
-    assert!(compiler_diagnostics.is_empty());
+    assert!(
+        compiler_diagnostics.is_empty(),
+        "strict compiler diagnostics: {compiler_diagnostics:#?}"
+    );
 
     for (binding, data) in fixture.body.bindings() {
         let Some(name) = data.name() else {
