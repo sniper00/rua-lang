@@ -57,7 +57,28 @@ Err(e) = { false, e }
 declaration 定义。`expect(message)` 返回成功值；`Option::None` 或 `Result::Err`
 路径通过 `rua_std` 报告消息并终止执行。
 
-### 2.2 脚本表达式
+### 2.3 内嵌 Lua 代码
+
+需要直接使用宿主 Lua API 或暂未被 Rua 封装的 Lua 语法时，可以在 statement 位置写
+`lua! { ... }` 原始代码块：
+
+```rua
+lua! {
+    local payload = { ready = true, values = { 1, 2, 3 } }
+    print(payload.ready, #payload.values)
+}
+```
+
+`lua!` 代码块在词法阶段作为一个整体保留，支持 Lua 的嵌套 table、字符串、长字符串
+和注释。codegen 将块内容原样写入当前 Lua chunk，并把生成范围锚定到该 Rua block，
+因此运行时错误仍能定位到 Rua 源文件的 block 行。
+
+内嵌 Lua 不参与 Rua 类型检查、名称解析或变量插值；Rua local 不能直接作为 Lua
+local 使用。需要稳定参数和返回值时，应优先使用 `extern "lua"` 声明 Lua ABI，再由
+Rua 表达式调用。原始块允许出现在顶层、函数和控制流 block 中，也可以在末尾使用一个
+分号；它本身没有 Rua 表达式值。
+
+### 2.4 脚本表达式
 
 Rua 吸收动态脚本语言中高频、低歧义的表达方式，但每个操作仍在编译期确定类型与
 lowering，不引入运行时名称猜测。
@@ -157,7 +178,7 @@ table，再由 `map.from_table` 包装成运行时 map，不再逐项调用 `ins
 `x in (0..10)`；`??` 低于布尔运算并短路求值。assignment 仍是最低层 statement
 expression，不允许隐式链式赋值。
 
-### 2.3 Attribute、cfg 与 annotation
+### 2.5 Attribute、cfg 与 annotation
 
 Rua 的外部 attribute 使用 Rust 风格语法，附着到声明、field、variant、method 和
 extern function。`cfg` 在名称收集、类型检查和 codegen 之前求值，

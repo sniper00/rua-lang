@@ -1088,6 +1088,7 @@ fn set_file_block(b: &mut Block, id: u32) {
 
 fn set_file_stmt(s: &mut Stmt, id: u32) {
     match s {
+        Stmt::Lua { span, .. } => span.file = id,
         Stmt::Let {
             name_span,
             ty,

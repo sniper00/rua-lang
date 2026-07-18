@@ -332,6 +332,11 @@ pub struct Block {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    /// Raw Lua emitted verbatim inside the surrounding generated chunk.
+    Lua {
+        code: String,
+        span: SourceRange,
+    },
     Let {
         name: String,
         /// Byte span of the binding name identifier (for LSP hover/typing).

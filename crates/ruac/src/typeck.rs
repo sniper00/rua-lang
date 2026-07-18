@@ -201,6 +201,7 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
 /// variable `name`.
 fn collect_calls_on_stmt<'a>(name: &str, s: &'a Stmt, out: &mut Vec<(&'a str, &'a [Expr])>) {
     match s {
+        Stmt::Lua { .. } => {}
         Stmt::Let { init, .. } => collect_calls_on_expr(name, init, out),
         Stmt::Expr(e) => collect_calls_on_expr(name, e, out),
         Stmt::Return(Some(e)) => collect_calls_on_expr(name, e, out),
@@ -360,6 +361,7 @@ struct ClosureContext<'a> {
 
 fn collect_closure_usage_stmt<'a>(name: &str, stmt: &'a Stmt, usage: &mut ClosureUsage<'a>) {
     match stmt {
+        Stmt::Lua { .. } => {}
         Stmt::Let { init, .. } | Stmt::Expr(init) | Stmt::Return(Some(init)) => {
             collect_closure_usage_expr(name, init, usage)
         }
@@ -1435,6 +1437,7 @@ impl Tc {
 
     fn stmt(&mut self, s: &Stmt, rest: &[Stmt], tail: Option<&Expr>) {
         match s {
+            Stmt::Lua { .. } => {}
             Stmt::Let {
                 name,
                 mutable,

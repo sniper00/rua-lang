@@ -1827,6 +1827,23 @@ fn codegen_primitive_to_string_uses_lua_conversion() {
 }
 
 #[test]
+fn codegen_embedded_lua_block_is_emitted_verbatim() {
+    let lua = compile(
+        r#"
+        lua! {
+            local payload = { nested = { ok = true } }
+            print(payload.nested.ok)
+        }
+        "#,
+    );
+    assert!(
+        lua.contains("local payload = { nested = { ok = true } }"),
+        "got: {lua}"
+    );
+    assert!(lua.contains("print(payload.nested.ok)"), "got: {lua}");
+}
+
+#[test]
 fn codegen_string_concat_uses_dotdot() {
     let lua = compile(r#"fn f(a: String, b: String) -> String { a + b }"#);
     assert!(lua.contains("(a .. b)"), "got: {lua}");
@@ -3614,4 +3631,5 @@ fn compile_str_artifact_produces_source_map() {
         artifact.source_map.iter().any(|m| m.source.file == 0),
         "at least one mapping should belong to the user source"
     );
+    assert_eq!(artifact.source_files, vec![String::new()]);
 }

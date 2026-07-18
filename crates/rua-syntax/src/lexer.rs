@@ -55,6 +55,7 @@ const fn syntax_kind(kind: TokenKind) -> SyntaxKind {
         TokenKind::KwMatch => SyntaxKind::KwMatch,
         TokenKind::KwSelf => SyntaxKind::KwSelf,
         TokenKind::KwExtern => SyntaxKind::KwExtern,
+        TokenKind::LuaBlock => SyntaxKind::LuaBlock,
         TokenKind::Ident => SyntaxKind::Ident,
         TokenKind::Int => SyntaxKind::Int,
         TokenKind::Float => SyntaxKind::Float,

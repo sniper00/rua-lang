@@ -876,6 +876,7 @@ fn resolve_statement_types(
     statement: &Stmt,
 ) {
     match statement {
+        Stmt::Lua { .. } => {}
         Stmt::Let { ty, init, .. } => {
             if let Some(ty) = ty {
                 resolve_type(hir, module, aliases, generics, ty);
@@ -1203,6 +1204,7 @@ impl<'a> BodyResolver<'a> {
 
     fn statement(&mut self, statement: &Stmt) {
         match statement {
+            Stmt::Lua { .. } => {}
             Stmt::Let {
                 name,
                 name_span,

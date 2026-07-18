@@ -1,9 +1,10 @@
 //! Compiler token data built on the shared lossless token kind.
 
 pub use rua_lex::{TokenKind as RuaTokenKind, keyword_kind};
+use serde::{Deserialize, Serialize};
 
 /// Byte-offset span plus the 1-based line and compiler source-file index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRange {
     pub start: usize,
     pub len: usize,

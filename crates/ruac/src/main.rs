@@ -61,13 +61,19 @@ fn build(args: &[String]) -> Result<(), String> {
     let options = load_compile_options(&args)?;
     match args.emit {
         EmitMode::Bundle => {
-            let lua = ruac::compile_path_with_options(&args.input, &options)
+            let artifact = ruac::compile_path_artifact_with_options(&args.input, &options)
                 .map_err(|error| error.to_string())?;
             let out = args
                 .output
                 .unwrap_or_else(|| args.input.with_extension("lua"));
-            std::fs::write(&out, lua).map_err(|e| format!("writing {}: {}", out.display(), e))?;
-            println!("compiled {} -> {}", args.input.display(), out.display());
+            let sidecar =
+                ruac::artifact::write(&ruac::artifact::RuaArtifact::Bundle(artifact), &out)?;
+            println!(
+                "compiled {} -> {} (source map {})",
+                args.input.display(),
+                out.display(),
+                sidecar.display()
+            );
         }
         EmitMode::Modules => {
             let output_dir = args
@@ -76,20 +82,19 @@ fn build(args: &[String]) -> Result<(), String> {
             let artifact = ruac::compile_path_modules_artifact_with_options(&args.input, &options)
                 .map_err(|error| error.to_string())?;
             remove_stale_annotation_outputs(&output_dir)?;
-            for module in &artifact.modules {
-                let output = output_dir.join(&module.output_path);
-                let parent = output.parent().unwrap_or(&output_dir);
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("creating {}: {error}", parent.display()))?;
-                std::fs::write(&output, &module.source)
-                    .map_err(|error| format!("writing {}: {error}", output.display()))?;
-            }
+            let module_count = artifact.modules.len();
+            let root_output_path = artifact.root_output_path.clone();
+            let manifest = ruac::artifact::write(
+                &ruac::artifact::RuaArtifact::Modules(artifact),
+                &output_dir,
+            )?;
             println!(
-                "compiled {} -> {} ({} Lua modules, entry {})",
+                "compiled {} -> {} ({} Lua modules, entry {}, artifact {})",
                 args.input.display(),
                 output_dir.display(),
-                artifact.modules.len(),
-                artifact.root_output_path
+                module_count,
+                root_output_path,
+                manifest.display()
             );
         }
     }

@@ -19,4 +19,5 @@ rua-lex.workspace = true
 rua-project.workspace = true
 rua-resources.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true

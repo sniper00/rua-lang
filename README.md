@@ -7,7 +7,25 @@ cargo build --release -p ruac -p rua-lsp --features lsp
 target/release/ruac build app.rua
 ```
 
+`ruac build` also emits a versioned artifact metadata file: bundle output gets
+`<file>.rua-map.json`, while `--emit modules` gets `rua-artifact.json`. These
+files let a host such as `moon_rs` run precompiled Lua and still map errors
+back to Rua source.
+
 Output targets Lua 5.5. The standard runtime is consolidated in a single [rua_std.lua](crates/rua-resources/resources/std/rua_std.lua); bundle codegen emits at most one `require("rua_std")`, while modules codegen relies on Lua's `require` cache to share the same runtime package.
+
+Rua can embed a raw Lua block when an API is not yet wrapped by a `.ruai`
+declaration:
+
+```rua
+lua! {
+    local value = { ready = true }
+    print(value.ready)
+}
+```
+
+The block is emitted into the surrounding Lua chunk without Rua type checking or
+variable interpolation. Use `extern "lua"` when a typed Lua ABI is preferable.
 
 ## Complete example: Rua and Lua
 
@@ -632,7 +650,7 @@ let artifact = ruac::compile_project_with_diagnostics(
 let modules = ruac::compile_project_modules_artifact(&project_spec, &source_provider)?;
 ```
 
-`compile_project_with_diagnostics` is the full host integration entry point: success values include Lua with a generated-to-Rua source map; failure values (`CompileFailure`) include diagnostic codes, files, and byte ranges. `compile_str`, `compile_path`, `compile_project`, and artifact convenience APIs also return structured failures; only the CLI is responsible for rendering display text. The default entry point uses the embedded standard library; `compile_*_with_std` and `--std-path` explicitly load a directory containing `std.toml`. `compile_path_artifact` preserves the generated-to-Rua source map for filesystem hosts. `ProjectSpec` provides stable `FileId`, logical paths, source roots, and library mounts; `SourceProvider` provides source text.
+`compile_project_with_diagnostics` is the full host integration entry point: success values include Lua with a generated-to-Rua source map; failure values (`CompileFailure`) include diagnostic codes, files, and byte ranges. `compile_str`, `compile_path`, `compile_project`, and artifact convenience APIs also return structured failures; only the CLI is responsible for rendering display text. The default entry point uses the embedded standard library; `compile_*_with_std` and `--std-path` explicitly load a directory containing `std.toml`. `compile_path_artifact` preserves the generated-to-Rua source map for filesystem hosts, and `ruac::stacktrace::convert_lua_traceback` converts Lua runtime traceback frames back to Rua ranges; see [Lua stack conversion](docs/rua-stacktrace.md). `ProjectSpec` provides stable `FileId`, logical paths, source roots, and library mounts; `SourceProvider` provides source text.
 
 The standard library's `.ruai` signatures, documentation, members, Lua packages, exported sub-tables, local aliases, and optional ABI are uniformly described by `std.toml`. Declaration files and `rua_std.lua` reside in the same resource directory; `Vec`, `HashMap`, `Iter`, `String`, `Result`, formatting, and integer operations are separate exports of the same Lua package. The compiler only reserves special representations for the `Option` and `Result` language items specified in the manifest. User types with the same names remain ordinary `struct`/`enum` and are not mistakenly lowered through the standard library. Deployment only requires providing a single `rua_std.lua`.
 

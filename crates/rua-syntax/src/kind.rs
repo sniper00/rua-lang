@@ -45,6 +45,7 @@ pub enum SyntaxKind {
     KwMatch,
     KwSelf,
     KwExtern,
+    LuaBlock,
     // Literals / identifiers
     Ident,
     Int,

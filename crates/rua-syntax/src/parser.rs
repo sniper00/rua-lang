@@ -83,6 +83,7 @@ pub fn parse_source_file(src: &str) -> Parse<SourceFile> {
             let code = match error {
                 LexErrorKind::UnterminatedString => DiagnosticCode::ParseUnterminatedString,
                 LexErrorKind::UnterminatedBlockComment => DiagnosticCode::ParseUnterminatedComment,
+                LexErrorKind::UnterminatedLuaBlock => DiagnosticCode::ParseUnexpectedToken,
                 LexErrorKind::UnknownCharacter => DiagnosticCode::ParseUnexpectedToken,
             };
             Some(ParseError {

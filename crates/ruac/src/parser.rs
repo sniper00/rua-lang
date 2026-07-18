@@ -59,6 +59,7 @@ impl From<TokenizeError> for ParseError {
         let code = match error.kind {
             LexErrorKind::UnterminatedString => DiagnosticCode::ParseUnterminatedString,
             LexErrorKind::UnterminatedBlockComment => DiagnosticCode::ParseUnterminatedComment,
+            LexErrorKind::UnterminatedLuaBlock => DiagnosticCode::ParseUnexpectedToken,
             LexErrorKind::UnknownCharacter => DiagnosticCode::ParseUnexpectedToken,
         };
         Self::at_code(error.range, code, error.kind.message())
@@ -683,6 +684,7 @@ impl<'a> Parser<'a> {
 
     fn parse_chunk_stmt(&mut self, terminator: T) -> Result<Stmt, ParseError> {
         match self.cur() {
+            T::LuaBlock => self.parse_lua_block(),
             T::KwLet => self.parse_let(),
             T::KwReturn => self.parse_return(),
             T::KwWhile => self.parse_while(),
@@ -716,6 +718,24 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_lua_block(&mut self) -> Result<Stmt, ParseError> {
+        let span = self.lexer.current_range();
+        let raw = self.text().to_string();
+        self.bump()?;
+        let open = raw
+            .find('{')
+            .ok_or_else(|| self.err("Lua block must use `lua! { ... }`"))?;
+        let close = raw
+            .rfind('}')
+            .filter(|close| *close > open)
+            .ok_or_else(|| self.err("Lua block must end with `}`"))?;
+        let _ = self.accept(T::Semi)?;
+        Ok(Stmt::Lua {
+            code: raw[open + 1..close].to_string(),
+            span,
+        })
     }
 
     fn parse_item(&mut self, documentation: Option<String>) -> Result<Item, ParseError> {

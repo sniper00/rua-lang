@@ -665,6 +665,7 @@ dependencies = [
  "rua-project",
  "rua-resources",
  "serde",
+ "serde_json",
  "toml",
 ]
 

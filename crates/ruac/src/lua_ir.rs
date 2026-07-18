@@ -278,6 +278,7 @@ enum Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Statement {
     Annotation(String),
+    Raw(String),
     Expression(Expr),
     Local {
         names: Vec<String>,
@@ -426,6 +427,10 @@ impl Builder {
 
     pub(crate) fn annotation(&mut self, source: impl Into<String>) {
         self.statement(Statement::Annotation(source.into()));
+    }
+
+    pub(crate) fn raw(&mut self, source: impl Into<String>) {
+        self.statement(Statement::Raw(source.into()));
     }
 
     pub(crate) fn expression(&mut self, expression: Expr) {
@@ -676,6 +681,7 @@ impl Printer {
     fn statement(&mut self, statement: &Statement, indent: usize) {
         match statement {
             Statement::Annotation(source) => self.line(indent, source),
+            Statement::Raw(source) => self.raw(source, indent),
             Statement::Expression(expression) => {
                 let source = self.expression(expression);
                 self.line(indent, &source);
@@ -798,6 +804,16 @@ impl Printer {
                     .join("; ");
                 self.line(indent, &format!("if {condition} then {statements} end"));
             }
+        }
+    }
+
+    fn raw(&mut self, source: &str, indent: usize) {
+        let source = source.trim_matches(['\r', '\n']);
+        if source.is_empty() {
+            return;
+        }
+        for line in source.lines() {
+            self.line(indent, line.trim_end_matches('\r'));
         }
     }
 

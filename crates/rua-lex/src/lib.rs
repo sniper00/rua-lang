@@ -33,6 +33,8 @@ pub enum TokenKind {
     KwMatch,
     KwSelf,
     KwExtern,
+    /// A raw `lua! { ... }` block, consumed as one lossless token.
+    LuaBlock,
     Ident,
     Int,
     Float,
@@ -124,6 +126,7 @@ impl TokenKind {
             Self::KwMatch => "match",
             Self::KwSelf => "self",
             Self::KwExtern => "extern",
+            Self::LuaBlock => "lua! { ... }",
             Self::Ident => "<ident>",
             Self::Int => "<int>",
             Self::Float => "<float>",
@@ -180,6 +183,7 @@ pub enum LexErrorKind {
     UnknownCharacter,
     UnterminatedString,
     UnterminatedBlockComment,
+    UnterminatedLuaBlock,
 }
 
 impl LexErrorKind {
@@ -188,6 +192,7 @@ impl LexErrorKind {
             Self::UnknownCharacter => "unknown character",
             Self::UnterminatedString => "unterminated string",
             Self::UnterminatedBlockComment => "unterminated block comment",
+            Self::UnterminatedLuaBlock => "unterminated lua block",
         }
     }
 }
@@ -281,6 +286,18 @@ pub fn lex_with_limit(text: &str, max_tokens: usize) -> Result<Vec<LexToken>, To
                 }
                 let error = (!terminated).then_some(LexErrorKind::UnterminatedString);
                 (TokenKind::Str, end, error)
+            }
+            b'l' if bytes.get(cursor..cursor + 4) == Some(b"lua!") => {
+                if let Some((end, error)) = lex_lua_block(text, cursor) {
+                    (TokenKind::LuaBlock, end, error)
+                } else {
+                    let mut end = cursor + 1;
+                    while end < bytes.len() && is_name_continue(bytes[end]) {
+                        end += 1;
+                    }
+                    let word = &text[cursor..end];
+                    (keyword_kind(word), end, None)
+                }
             }
             byte if is_name_start(byte) => {
                 let mut end = cursor + 1;
@@ -436,6 +453,106 @@ fn char_width(text: &str, offset: usize) -> usize {
     text[offset..].chars().next().map_or(1, char::len_utf8)
 }
 
+/// Recognize and consume `lua! { ... }` while respecting Lua strings,
+/// long-bracket strings, line comments, block comments, and nested braces.
+fn lex_lua_block(text: &str, start: usize) -> Option<(usize, Option<LexErrorKind>)> {
+    let bytes = text.as_bytes();
+    if start + 4 > bytes.len() || &bytes[start..start + 4] != b"lua!" {
+        return None;
+    }
+    if start > 0 && is_name_continue(bytes[start - 1]) {
+        return None;
+    }
+    let mut cursor = start + 4;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        if let Some(end) = skip_lua_quoted(bytes, cursor) {
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'-' && bytes.get(cursor + 1) == Some(&b'-') {
+            if let Some(end) = skip_lua_long_bracket(bytes, cursor + 2) {
+                cursor = end;
+            } else {
+                cursor += 2;
+                while cursor < bytes.len() && !matches!(bytes[cursor], b'\r' | b'\n') {
+                    cursor += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(end) = skip_lua_long_bracket(bytes, cursor) {
+            cursor = end;
+            continue;
+        }
+        match bytes[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((cursor + 1, None));
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Some((bytes.len(), Some(LexErrorKind::UnterminatedLuaBlock)))
+}
+
+fn skip_lua_quoted(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = *bytes.get(start)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = (cursor + 2).min(bytes.len()),
+            byte if byte == quote => return Some(cursor + 1),
+            _ => cursor += 1,
+        }
+    }
+    Some(bytes.len())
+}
+
+fn skip_lua_long_bracket(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while bytes.get(cursor) == Some(&b'=') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'[') {
+        return None;
+    }
+    let level = cursor - start - 1;
+    cursor += 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b']' {
+            let mut close = cursor + 1;
+            let mut matched = 0usize;
+            while matched < level && bytes.get(close) == Some(&b'=') {
+                matched += 1;
+                close += 1;
+            }
+            if matched == level && bytes.get(close) == Some(&b']') {
+                return Some(close + 1);
+            }
+        }
+        cursor += 1;
+    }
+    Some(bytes.len())
+}
+
 pub fn keyword_kind(word: &str) -> TokenKind {
     match word {
         "fn" => TokenKind::KwFn,
@@ -519,6 +636,25 @@ mod tests {
             lex("/*")[0].error,
             Some(LexErrorKind::UnterminatedBlockComment)
         );
+        assert_eq!(
+            lex("lua! {")[0].error,
+            Some(LexErrorKind::UnterminatedLuaBlock)
+        );
+    }
+
+    #[test]
+    fn lua_block_is_one_lossless_token_with_nested_literals() {
+        let source = "lua! { local text = [[ { not a block } ]]; -- }\n local t = { ok = true } } let value = 1;";
+        let tokens: Vec<_> = lex(source)
+            .into_iter()
+            .filter(|token| !token.kind.is_trivia())
+            .collect();
+        assert_eq!(tokens[0].kind, TokenKind::LuaBlock);
+        assert_eq!(
+            &source[tokens[0].range.start() as usize..tokens[0].range.end() as usize],
+            "lua! { local text = [[ { not a block } ]]; -- }\n local t = { ok = true } }"
+        );
+        assert_eq!(tokens[1].kind, TokenKind::KwLet);
     }
 
     proptest! {

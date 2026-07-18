@@ -8,6 +8,7 @@
 //! parsing, checking, and code-generation APIs.
 
 pub mod annotations;
+pub mod artifact;
 pub mod ast;
 mod attributes;
 mod backend_layout;
@@ -20,6 +21,7 @@ pub mod lexer;
 mod lua_ir;
 pub mod parser;
 pub mod resolve;
+pub mod stacktrace;
 pub mod token;
 pub mod tokenize;
 pub mod typeck;
@@ -169,11 +171,11 @@ pub fn compile_project_with_diagnostics<P: SourceProvider>(
     project: &ProjectSpec,
     provider: &P,
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
-    let (typed, _, _) = check_project_with_diagnostics(project, provider)?;
-    Ok(codegen::generate_with_source_map(
-        &typed,
-        &builtins::CodegenRules::default(),
-    ))
+    let (typed, files, _) = check_project_with_diagnostics(project, provider)?;
+    let mut artifact =
+        codegen::generate_with_source_map(&typed, &builtins::CodegenRules::default());
+    artifact.source_files = files;
+    Ok(artifact)
 }
 
 /// Compile an IO-free logical project into one artifact per runtime module.
@@ -196,7 +198,7 @@ pub fn compile_project_modules_artifact<P: SourceProvider>(
                 files.clone(),
             )
         })?;
-    codegen::generate_modules_with_source_maps(
+    let mut artifact = codegen::generate_modules_with_source_maps(
         &typed,
         &builtins::CodegenRules::default(),
         &format!("{root_stem}.lua"),
@@ -205,9 +207,11 @@ pub fn compile_project_modules_artifact<P: SourceProvider>(
     .map_err(|error| {
         CompileFailure::single(
             Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
-            files,
+            files.clone(),
         )
-    })
+    })?;
+    artifact.source_files = files;
+    Ok(artifact)
 }
 
 fn check_project_with_diagnostics<P: SourceProvider>(
@@ -376,7 +380,9 @@ fn _compile_str_artifact(
         files: files.clone(),
     })?;
     let typed = typed_ir::TypedProgram::new(program, hir, info, annotations);
-    Ok(codegen::generate_with_source_map(&typed, &rules))
+    let mut artifact = codegen::generate_with_source_map(&typed, &rules);
+    artifact.source_files = files;
+    Ok(artifact)
 }
 
 /// Compile a Rua source tree to Lua 5.5. Every `.rua` below the entry file's
@@ -468,14 +474,17 @@ pub fn compile_path_artifact_with_options(
 ) -> Result<codegen::GeneratedLua, CompileFailure> {
     let (typed, files) = check_path_with_options(path, options)?;
     let rules = builtins::CodegenRules::default();
-    codegen::generate_with_source_map_and_lua_path(&typed, &rules, &options.lua_path).map_err(
-        |error| {
-            CompileFailure::single(
-                Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
-                files,
-            )
-        },
-    )
+    let mut artifact =
+        codegen::generate_with_source_map_and_lua_path(&typed, &rules, &options.lua_path).map_err(
+            |error| {
+                CompileFailure::single(
+                    Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                    files.clone(),
+                )
+            },
+        )?;
+    artifact.source_files = files;
+    Ok(artifact)
 }
 
 /// Compile a source tree into one Lua file per resolved runtime module.
@@ -510,13 +519,16 @@ pub fn compile_path_modules_artifact_with_options(
         })?;
     let root_output = format!("{root_stem}.lua");
     let rules = builtins::CodegenRules::default();
-    codegen::generate_modules_with_source_maps(&typed, &rules, &root_output, &options.lua_path)
-        .map_err(|error| {
-            CompileFailure::single(
-                Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
-                files,
-            )
-        })
+    let mut artifact =
+        codegen::generate_modules_with_source_maps(&typed, &rules, &root_output, &options.lua_path)
+            .map_err(|error| {
+                CompileFailure::single(
+                    Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                    files.clone(),
+                )
+            })?;
+    artifact.source_files = files;
+    Ok(artifact)
 }
 
 fn check_path_with_options(

@@ -21,6 +21,7 @@ use crate::lua_ir::{
     UnaryOp as LuaUnaryOp,
 };
 use crate::typeck::{IterAdapterKind, IterConsumerKind, IterPlan, IterSourceKind, TypeInfo};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -88,7 +89,7 @@ pub fn generate(
     generate_with_source_map(program, rules).source
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LuaSourceMapping {
     pub generated_start: usize,
     pub generated_end: usize,
@@ -99,6 +100,8 @@ pub struct LuaSourceMapping {
 pub struct GeneratedLua {
     pub source: String,
     pub source_map: Vec<LuaSourceMapping>,
+    /// Source paths indexed by `LuaSourceMapping::source.file`.
+    pub source_files: Vec<String>,
     pub annotations: crate::annotations::AnnotationIndex,
 }
 
@@ -117,6 +120,8 @@ pub struct GeneratedLuaModule {
 pub struct GeneratedLuaModules {
     pub root_output_path: String,
     pub modules: Vec<GeneratedLuaModule>,
+    /// Source paths indexed by each module mapping's `SourceRange::file`.
+    pub source_files: Vec<String>,
     pub annotations: crate::annotations::AnnotationIndex,
 }
 
@@ -220,6 +225,7 @@ pub fn generate_with_source_map_and_lua_path(
     Ok(GeneratedLua {
         source: prefix,
         source_map,
+        source_files: Vec::new(),
         annotations: program.annotations().clone(),
     })
 }
@@ -352,6 +358,7 @@ pub fn generate_modules_with_source_maps(
     Ok(GeneratedLuaModules {
         root_output_path: root_output_path.to_string(),
         modules,
+        source_files: Vec::new(),
         annotations: program.annotations().clone(),
     })
 }
@@ -1006,6 +1013,7 @@ struct Codegen<'a> {
 
 fn statement_source(statement: &Stmt) -> Option<crate::token::SourceRange> {
     match statement {
+        Stmt::Lua { span, .. } => Some(*span),
         Stmt::Let { name_span, .. } => Some(*name_span),
         Stmt::Expr(expression) => Some(expression.span),
         Stmt::Return(Some(expression)) => Some(expression.span),
@@ -1475,6 +1483,7 @@ impl Codegen<'_> {
 
     fn block_is_removable(&self, block: &Block, closure_returns: bool) -> bool {
         block.stmts.iter().all(|statement| match statement {
+            Stmt::Lua { .. } => false,
             Stmt::Let { init, .. } | Stmt::Expr(init) => {
                 self.expression_is_removable_with_returns(init, closure_returns)
             }
@@ -2635,6 +2644,7 @@ impl Codegen<'_> {
 
     fn gen_stmt_inner(&mut self, s: &Stmt) {
         match s {
+            Stmt::Lua { code, .. } => self.lua.raw(code.clone()),
             Stmt::Let {
                 name,
                 name_span,
@@ -4605,6 +4615,7 @@ fn block_mentions_binding(block: &Block, name: &str) -> bool {
 
 fn statement_mentions_binding(statement: &Stmt, name: &str) -> bool {
     match statement {
+        Stmt::Lua { .. } => false,
         Stmt::Let { init, .. } | Stmt::Expr(init) => expression_mentions_binding(init, name),
         Stmt::Return(value) => value
             .as_ref()
@@ -4801,6 +4812,7 @@ fn collect_block_function_dependencies(
 ) {
     for statement in &block.stmts {
         match statement {
+            Stmt::Lua { .. } => {}
             Stmt::Let { init, .. } | Stmt::Expr(init) => {
                 collect_expr_function_dependencies(init, hir, functions, dependencies);
             }

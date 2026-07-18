@@ -299,6 +299,7 @@ fn walk_block(info: &Info, hir: &crate::hir::ResolvedHir, b: &Block, errs: &mut 
 
 fn walk_stmt(info: &Info, hir: &crate::hir::ResolvedHir, s: &Stmt, errs: &mut Vec<Diag>) {
     match s {
+        Stmt::Lua { .. } => {}
         Stmt::Let { init, .. } => walk_expr(info, hir, init, errs),
         Stmt::Expr(e) => walk_expr(info, hir, e, errs),
         Stmt::Return(Some(e)) => walk_expr(info, hir, e, errs),

@@ -9,6 +9,8 @@
 - [Annotation](rua-annotations.md)：schema、target、retention、compiler index、聚合 runtime registry 和 IDE 能力。
 - [工具链架构](rua-architecture.md)：crate 边界、双 parser、compiler、增量 analysis、LSP 生命周期和验证门禁。
 - [LSP 功能](rua-lsp-features.md)：编辑器协议能力、语义保证、workspace 行为和 VS Code 配置。
+- [Lua 堆栈转换](rua-stacktrace.md)：Lua traceback 解析、source map 映射和未映射 runtime frame 处理。
+- [Rua Artifact](rua-artifact.md)：版本化 source-map sidecar、bundle/modules manifest 和跨进程加载契约。
 
 测试 fixture 的规则和覆盖矩阵：
 
