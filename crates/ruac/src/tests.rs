@@ -1,4 +1,4 @@
-use crate::compile_str;
+use crate::{compile_str, compile_str_artifact};
 
 #[test]
 fn parser_preserves_top_level_chunk_order() {
@@ -3582,5 +3582,19 @@ fn uninferred_hashmap_does_not_flag_inserts() {
         diags.iter().all(|d| !d.msg.contains("mismatch")),
         "a single insert cannot mismatch itself, got {:?}",
         diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn compile_str_artifact_produces_source_map() {
+    let src = "fn main() { print(\"hi\"); }\nlet x = 42;\n";
+    let artifact = compile_str_artifact(src).unwrap();
+    assert!(
+        !artifact.source_map.is_empty(),
+        "source map should have entries"
+    );
+    assert!(
+        artifact.source_map.iter().any(|m| m.source.file == 0),
+        "at least one mapping should belong to the user source"
     );
 }

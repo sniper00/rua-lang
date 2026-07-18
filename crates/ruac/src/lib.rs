@@ -333,6 +333,52 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
     Ok(codegen::generate(&typed, &rules))
 }
 
+/// Compile a single Rua source string and retain generated-to-Rua source maps.
+pub fn compile_str_artifact(src: &str) -> Result<codegen::GeneratedLua, CompileFailure> {
+    _compile_str_artifact(src, None)
+}
+
+fn _compile_str_artifact(
+    src: &str,
+    builtins_dir: Option<&Path>,
+) -> Result<codegen::GeneratedLua, CompileFailure> {
+    let files = vec![String::new()];
+    let mut program = parser::parse(src).map_err(|error| {
+        CompileFailure::single(
+            Diag::from_structured(
+                error.diagnostic().clone(),
+                error.line(),
+                format!("parse error: {}", error.message()),
+            ),
+            files.clone(),
+        )
+    })?;
+    attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()).map_err(|error| {
+        CompileFailure::single(
+            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            files.clone(),
+        )
+    })?;
+    load_builtins(&mut program, builtins_dir)
+        .map_err(|error| CompileFailure::single(error, files.clone()))?;
+    let hir = hir::resolve(&program);
+    check::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let info = typeck::check_resolved(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let rules = builtins::CodegenRules::default();
+    let annotations = annotations::build(&program, &hir).map_err(|diagnostics| CompileFailure {
+        diagnostics,
+        files: files.clone(),
+    })?;
+    let typed = typed_ir::TypedProgram::new(program, hir, info, annotations);
+    Ok(codegen::generate_with_source_map(&typed, &rules))
+}
+
 /// Compile a Rua source tree to Lua 5.5. Every `.rua` below the entry file's
 /// directory is discovered by path; source-level `mod` declarations are
 /// rejected. Uses default builtins resolution.
