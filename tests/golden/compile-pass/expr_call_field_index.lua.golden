@@ -10,5 +10,5 @@ end
 
 ---@return integer
 local function read(item, values)
-    return id(item.value) + values[0]
+    return id(item.value) + values[1]
 end

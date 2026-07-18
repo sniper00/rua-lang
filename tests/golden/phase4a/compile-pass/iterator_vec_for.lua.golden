@@ -5,9 +5,9 @@ local vec = rua_std.vec
 
 ---@return integer
 local function main()
-    local values = vec.from_table({ [0] = 1, 2, 3, n = 3 })
+    local values = vec.from_table({ 1, 2, 3, n = 3 })
     local total = 0
-    for __t2 = 0, values.n - 1 do
+    for __t2 = 1, values.n do
         local __t1 = values[__t2]
         local value = __t1
         total = total + value

@@ -21,11 +21,11 @@ fn main() {
     print("repeat    = {}", "ab".repeat(3));
     print("shout     = {}", shout("rua"));
 
-    // `split` / `chars` return `Vec<String>` (0-based, with `.len()`/`.get()`).
+    // `split` / `chars` return `Vec<String>` (1-based, with `.len()`/`.get()`).
     let parts = s.split(", ");
-    print("parts     = {} / {}", parts.get(0), parts.get(1));
+    print("parts     = {} / {}", parts.get(1), parts.get(2));
 
     let letters = "abc".chars();
     print("chars len = {}", letters.len());
-    print("chars[2]  = {}", letters.get(2));
+    print("chars[3]  = {}", letters.get(3));
 }

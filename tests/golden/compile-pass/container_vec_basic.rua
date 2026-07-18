@@ -1,6 +1,6 @@
 fn main() {
     let mut values = [1, 2];
     values.push(3);
-    let first = values.get(0);
+    let first = values.get(1);
     let size = values.len();
 }

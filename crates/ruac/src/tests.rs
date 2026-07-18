@@ -24,10 +24,10 @@ fn parser_preserves_top_level_chunk_order() {
 fn compound_assignment_and_loop_expression_lower_without_duplicate_lvalues() {
     let lua = compile_str(
         r#"
-        fn index() -> i64 { print("index"); 0 }
+        fn index() -> i64 { print("index"); 1 }
         let mut values = [1];
         values[index()] += 4;
-        let answer = loop { break values[0]; };
+        let answer = loop { break values[1]; };
         print("{}", answer);
         "#,
     )
@@ -70,7 +70,11 @@ fn membership_and_map_literals_lower_through_typed_runtime_operations() {
     )
     .expect("compile membership and map literal");
 
-    assert!(lua.contains("map.new(2)"), "{lua}");
+    assert!(
+        lua.contains("map.from_table({ [\"alice\"] = 10, [\"bob\"] = 20 })"),
+        "{lua}"
+    );
+    assert!(!lua.contains(":insert(\"alice\""), "{lua}");
     assert!(lua.contains(":contains_key("), "{lua}");
     assert!(lua.contains(":contains("), "{lua}");
 }
@@ -587,7 +591,7 @@ fn main() -> Vec<i64> {
 "#;
     let lua = crate::compile_str(source).expect("compile fused iterator chain");
     assert_eq!(lua.matches("for ").count(), 1, "expected one loop: {lua}");
-    assert!(lua.contains(".n - 1 do"), "Vec loop must use `.n`: {lua}");
+    assert!(lua.contains(".n do"), "Vec loop must use `.n`: {lua}");
     for forbidden in [
         ":iter(",
         ":map(",
@@ -812,7 +816,7 @@ fn immutable_assignment_requires_mutable_binding_identity() {
     for source in [
         "let value = 1; value = 2;",
         "struct Point { x: i64 } let point = Point { x: 1 }; point.x = 2;",
-        "let values = [1]; values[0] = 2;",
+        "let values = [1]; values[1] = 2;",
         "struct Point { x: i64 } impl Point { fn update(&self) { self.x = 2; } }",
     ] {
         let diagnostics = compile_str(source).unwrap_err();
@@ -1255,14 +1259,14 @@ fn for_over_vec() {
         }
     "#,
     );
-    assert!(lua.contains(".n - 1 do"), "iterates by length; got: {lua}");
+    assert!(lua.contains(".n do"), "iterates by length; got: {lua}");
 }
 
 #[test]
-fn vec_literal_is_zero_based() {
-    let lua = compile("fn f() -> i64 { let v = [10, 20]; v[0] }");
+fn vec_literal_is_one_based() {
+    let lua = compile("fn f() -> i64 { let v = [10, 20]; v[1] }");
     assert!(
-        lua.contains("vec.from_table({ [0] = 10, 20, n = 2 })"),
+        lua.contains("vec.from_table({ 10, 20, n = 2 })"),
         "got: {lua}"
     );
     assert!(
@@ -1274,8 +1278,8 @@ fn vec_literal_is_zero_based() {
 
 #[test]
 fn index_expr() {
-    let lua = compile("fn f() -> i64 { let v = [1, 2]; let a = v[0]; a }");
-    assert!(lua.contains("local a = v[0]"), "0-based index; got: {lua}");
+    let lua = compile("fn f() -> i64 { let v = [1, 2]; let a = v[1]; a }");
+    assert!(lua.contains("local a = v[1]"), "1-based index; got: {lua}");
 }
 
 #[test]
@@ -1664,8 +1668,8 @@ fn typeck_vec_and_map_methods_not_flagged() {
 
 #[test]
 fn typeck_vec_element_index_type() {
-    // v[0] : i64, used as an `if` condition -> non-bool error (element tracked).
-    let err = compile_str("fn f() { let v = [1, 2]; if v[0] { } }").unwrap_err();
+    // v[1] : i64, used as an `if` condition -> non-bool error (element tracked).
+    let err = compile_str("fn f() { let v = [1, 2]; if v[1] { } }").unwrap_err();
     assert!(err.contains("`if` condition must be `bool`"), "got: {err}");
 }
 
@@ -1829,7 +1833,7 @@ fn typeck_string_len_is_i64() {
 fn typeck_string_split_returns_vec_of_string() {
     // `split` is lazy; collecting yields `Vec<String>`, whose element is not bool.
     let err = compile_str(
-        r#"fn f(s: String) { let v = s.split(",").collect::<Vec<String>>(); if v.get(0) { } }"#,
+        r#"fn f(s: String) { let v = s.split(",").collect::<Vec<String>>(); if v.get(1) { } }"#,
     )
     .unwrap_err();
     assert!(err.contains("must be `bool`"), "got: {err}");

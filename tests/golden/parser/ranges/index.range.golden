@@ -26,6 +26,6 @@ SourceFile 0..52
             Ident 40..46 "values"
           LBracket 46..47 "["
           LiteralExpr 47..48
-            Int 47..48 "0"
+            Int 47..48 "1"
           RBracket 48..49 "]"
       RBrace 50..51 "}"

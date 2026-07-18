@@ -9,6 +9,6 @@ local function escaped()
         local function __t1(value)
             return value + 1
         end
-        return vec.from_table({ [0] = 1, 2, 3, n = 3 }):iter():map(__t1)
+        return vec.from_table({ 1, 2, 3, n = 3 }):iter():map(__t1)
     end
 end

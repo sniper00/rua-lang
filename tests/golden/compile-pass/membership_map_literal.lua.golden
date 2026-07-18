@@ -8,16 +8,13 @@ local string = rua_std.string
 local vec = rua_std.vec
 
 ---@type table
-local __t1 = map.new(2)
-__t1:insert("alice", 10)
-__t1:insert("bob", 20)
-local scores = __t1
+local scores = map.from_table({ ["alice"] = 10, ["bob"] = 20 })
 
-local __t2 = scores:get("alice")
-if __t2 == nil then error("called Option::unwrap on None", 2) end
-fmt.print("{}", __t2)
+local __t1 = scores:get("alice")
+if __t1 == nil then error("called Option::unwrap on None", 2) end
+fmt.print("{}", __t1)
 fmt.print("{}", scores:contains_key("alice"))
 fmt.print("{}", scores:contains_key("carol"))
-fmt.print("{}", vec.from_table({ [0] = 1, 2, 3, n = 3 }):contains(2))
+fmt.print("{}", vec.from_table({ 1, 2, 3, n = 3 }):contains(2))
 fmt.print("{}", string.contains("Rua", "ua"))
 fmt.print("{}", iter.range(0, 5, false):contains(3))

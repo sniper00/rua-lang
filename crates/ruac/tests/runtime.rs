@@ -87,17 +87,44 @@ fn runtime_annotation_registry_is_available_to_top_level_code() {
 }
 
 #[test]
-fn native_vec_literal_uses_the_zero_based_vec_runtime() {
+fn native_vec_literal_uses_the_one_based_vec_runtime() {
     let (lua, output) = compile_and_run(
         "native_vec_literal",
         r#"
         let values = [10, 20, 30];
         let empty: Vec<String> = [];
-        print("{}:{}:{}", values.len(), values[0], empty.len());
+        print("{}:{}:{}", values.len(), values[1], empty.len());
         "#,
     );
     assert_success(&output, "3:10:0\n", &lua);
     assert!(!lua.contains("vec!"));
+}
+
+#[test]
+fn vec_mutation_and_lookup_use_one_based_indices() {
+    let source = r#"
+let mut values = [10, 20];
+values.push(30);
+values.set(2, 25);
+print("{} {} {}", values.get(1).unwrap(), values.get(2).unwrap(), values.pop().unwrap());
+print("{}", values.len());
+"#;
+    let (lua, output) = compile_and_run("vec-one-based-mutation", source);
+    assert_success(&output, "10 25 30\n2\n", &lua);
+}
+
+#[test]
+fn vec_first_and_last_return_options() {
+    let source = r#"
+let values = [10, 20, 30];
+let empty: Vec<i64> = [];
+print("{} {}", values.first().unwrap(), values.last().unwrap());
+print("{} {}", empty.first().is_none(), empty.last().is_none());
+"#;
+    let (lua, output) = compile_and_run("vec-first-last", source);
+    assert_success(&output, "10 30\ntrue true\n", &lua);
+    assert!(lua.contains(":first()"), "{lua}");
+    assert!(lua.contains(":last()"), "{lua}");
 }
 
 fn compile_and_run_with_prelude(label: &str, prelude: &str, source: &str) -> (String, Output) {
@@ -150,7 +177,7 @@ fn compound_assignment_and_loop_values_execute() {
     let source = r#"
 fn index() -> i64 {
     print("index");
-    0
+    1
 }
 
 let mut values = [1];
@@ -160,7 +187,7 @@ let mut text = "Rua";
 text += " 5.5";
 
 let answer = loop {
-    break values[0];
+    break values[1];
 };
 
 print("{} {}", answer, text);
@@ -221,7 +248,11 @@ print("{}", 5 in 0..5);
 "#;
     let (lua, output) = compile_and_run("membership-map", source);
     assert_success(&output, "10\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\n", &lua);
-    assert!(lua.contains("map.new(2)"), "{lua}");
+    assert!(
+        lua.contains("map.from_table({ [\"alice\"] = 10, [\"bob\"] = 20 })"),
+        "{lua}"
+    );
+    assert!(!lua.contains(":insert(\"alice\""), "{lua}");
 }
 
 #[test]
@@ -745,7 +776,7 @@ fn exact_size_collect_uses_lua_table_capacity_without_changing_vec_layout() {
             .iter()
             .map(|value| value * 10)
             .collect::<Vec<i64>>();
-        print("{} {} {}", mapped.len(), mapped[0], mapped[2]);
+        print("{} {} {}", mapped.len(), mapped[1], mapped[3]);
         "#,
     );
     assert_success(&output, "3 10 30\n", &lua);
@@ -889,7 +920,7 @@ fn result_remains_tagged_in_vec_and_with_nil_payload() {
         "result-containers",
         r#"
         let values = [Err("inside")];
-        match values[0] {
+        match values[1] {
             Ok(_) => print("wrong"),
             Err(message) => print("{}", message),
         }

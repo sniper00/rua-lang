@@ -4,8 +4,8 @@ assert(rua_std.ABI_VERSION == 2, "incompatible rua_std ABI")
 local vec = rua_std.vec
 
 local function main()
-    local values = vec.from_table({ [0] = 1, 2, n = 2 })
+    local values = vec.from_table({ 1, 2, n = 2 })
     values:push(3)
-    values:get(0)
+    values:get(1)
     values:len()
 end

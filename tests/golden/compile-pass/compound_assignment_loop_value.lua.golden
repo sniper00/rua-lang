@@ -6,10 +6,10 @@ local vec = rua_std.vec
 
 ---@return integer
 local function index()
-    return 0
+    return 1
 end
 
-local values = vec.from_table({ [0] = 1, n = 1 })
+local values = vec.from_table({ 1, n = 1 })
 local __t1 = values
 local __t2 = index()
 __t1[__t2] = __t1[__t2] + 4
@@ -19,7 +19,7 @@ label = (label .. " 5.5")
 
 local __t3
 while true do
-    __t3 = values[0]
+    __t3 = values[1]
     break
 end
 local answer = __t3

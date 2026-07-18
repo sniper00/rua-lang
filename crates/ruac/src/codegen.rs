@@ -2875,17 +2875,15 @@ impl Codegen<'_> {
             }
             self.lua.end_block();
         } else {
-            // General iterable: a Vec `{ [0..n-1], n = len }`.
+            // General iterable: a Vec `{ [1..n], n = len }`.
             let it = self.gen_inline(iter);
             let holder = self.fresh_tmp();
             self.local(&holder, Some(it));
             let idx = self.fresh_tmp();
             self.lua.begin_numeric_for(
                 &idx,
-                LuaExpr::integer("0"),
-                LuaExpr::name(&holder)
-                    .field("n")
-                    .binary(LuaBinaryOp::Sub, LuaExpr::integer("1")),
+                LuaExpr::integer("1"),
+                LuaExpr::name(&holder).field("n"),
             );
             self.local(
                 &variable,
@@ -3085,8 +3083,7 @@ impl Codegen<'_> {
                 };
                 let preallocated = exact_capacity.is_some();
                 let storage = if let Some(capacity) = exact_capacity {
-                    // Rua Vec uses key 0 plus an `n` record field, so reserve two
-                    // non-sequence slots in addition to the exact element count.
+                    // Rua Vec uses a one-based sequence plus an `n` record field.
                     self.table_create(capacity, 2)
                 } else {
                     LuaExpr::named_table(vec![("n".into(), LuaExpr::integer("0"))])
@@ -3139,11 +3136,8 @@ impl Codegen<'_> {
                 let index = self.fresh_tmp();
                 self.lua.begin_numeric_for(
                     &index,
-                    LuaExpr::integer("0"),
-                    holder
-                        .clone()
-                        .field("n")
-                        .binary(LuaBinaryOp::Sub, LuaExpr::integer("1")),
+                    LuaExpr::integer("1"),
+                    holder.clone().field("n"),
                 );
                 self.local(&item, Some(holder.clone().index(LuaExpr::name(index))));
             }
@@ -3188,7 +3182,7 @@ impl Codegen<'_> {
                     self.assign(
                         LuaExpr::name(&item),
                         LuaExpr::Table(vec![
-                            TableField::Indexed(LuaExpr::integer("0"), LuaExpr::name(counter)),
+                            TableField::Value(LuaExpr::name(counter)),
                             TableField::Value(LuaExpr::name(&item)),
                             TableField::Named("n".into(), LuaExpr::integer("2")),
                         ]),
@@ -3236,7 +3230,14 @@ impl Codegen<'_> {
             IterConsumerKind::CollectVec => {
                 let result = &result.as_ref().unwrap().0;
                 let length = result.clone().field("n");
-                self.assign(result.clone().index(length.clone()), LuaExpr::name(&item));
+                self.assign(
+                    result.clone().index(
+                        length
+                            .clone()
+                            .binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
+                    ),
+                    LuaExpr::name(&item),
+                );
                 self.assign(
                     length.clone(),
                     length.binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
@@ -4315,22 +4316,11 @@ impl Codegen<'_> {
     }
 
     fn gen_map_literal(&mut self, entries: &[(Expr, Expr)]) -> LuaExpr {
-        let map = self.fresh_tmp();
-        let constructor = self.standard_call(
-            "std::hashmap",
-            "new",
-            vec![LuaExpr::integer(entries.len().to_string())],
-        );
-        self.local(&map, Some(constructor));
-        for (key, value) in entries {
-            let key = self.gen_inline(key);
-            let value = self.gen_inline(value);
-            self.expression_statement(
-                LuaExpr::name(&map)
-                    .method_call(self.layout.member_name("insert"), vec![key, value]),
-            );
-        }
-        LuaExpr::name(map)
+        let fields = entries
+            .iter()
+            .map(|(key, value)| TableField::Indexed(self.gen_inline(key), self.gen_inline(value)))
+            .collect();
+        self.standard_call("std::hashmap", "from_table", vec![LuaExpr::Table(fields)])
     }
 
     fn target_place(
@@ -4456,12 +4446,9 @@ impl Codegen<'_> {
 
     fn gen_vec_literal(&mut self, elements: &[Expr]) -> LuaExpr {
         let length = elements.len();
-        let mut values = elements.iter().map(|element| self.gen_inline(element));
+        let values = elements.iter().map(|element| self.gen_inline(element));
         let mut fields = Vec::with_capacity(length + 1);
-        if let Some(first) = values.next() {
-            fields.push(TableField::Indexed(LuaExpr::integer("0"), first));
-            fields.extend(values.map(TableField::Value));
-        }
+        fields.extend(values.map(TableField::Value));
         fields.push(TableField::Named(
             "n".into(),
             LuaExpr::integer(length.to_string()),

@@ -7,5 +7,5 @@ fn id(value: i64) -> i64 {
 }
 
 fn read(item: Item, values: Vec<i64>) -> i64 {
-    id(item.value) + values[0]
+    id(item.value) + values[1]
 }

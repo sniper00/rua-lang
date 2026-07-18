@@ -21,7 +21,7 @@ local function main()
         end
         ::__t7_done::
         __t4 = __t6
-        __t3[__t3.n] = __t4
+        __t3[__t3.n + 1] = __t4
         __t3.n = __t3.n + 1
     end
     return __t3

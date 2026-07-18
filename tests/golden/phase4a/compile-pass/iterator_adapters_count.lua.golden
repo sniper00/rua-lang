@@ -5,18 +5,18 @@ local vec = rua_std.vec
 
 ---@return integer
 local function main()
-    local values = vec.from_table({ [0] = 1, 2, 3, 4, n = 4 })
+    local values = vec.from_table({ 1, 2, 3, 4, n = 4 })
     local __t1 = 0
     local __t2 = 1
     local __t3 = 0
     local __t4 = 2
     local __t5 = 0
     local __t6 = 0
-    for __t8 = 0, values.n - 1 do
+    for __t8 = 1, values.n do
         local __t7 = values[__t8]
         if __t7 ~= nil then
             __t7 = __t7
-            __t7 = { [0] = __t1, __t7, n = 2 }
+            __t7 = { __t1, __t7, n = 2 }
             __t1 = __t1 + 1
             if __t3 < __t2 then
                 __t3 = __t3 + 1

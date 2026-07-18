@@ -466,7 +466,7 @@ pub enum ExprKind {
         end: Box<Expr>,
         inclusive: bool,
     },
-    /// `base[index]` (0-based, matching Rust).
+    /// `base[index]` (1-based, matching Lua tables).
     Index {
         base: Box<Expr>,
         index: Box<Expr>,

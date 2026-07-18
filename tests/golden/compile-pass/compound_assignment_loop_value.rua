@@ -1,5 +1,5 @@
 fn index() -> i64 {
-    0
+    1
 }
 
 let mut values = [1];
@@ -9,7 +9,7 @@ let mut label = "Rua";
 label += " 5.5";
 
 let answer = loop {
-    break values[0];
+    break values[1];
 };
 
 print("{} {}", answer, label);

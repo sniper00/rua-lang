@@ -145,14 +145,11 @@ function Product:label()
     return fmt.format("{}: {}", self.sku, self.price)
 end
 
-local products = vec.from_table({ [0] = Product.new("book", 4500), Product.new("keyboard", 12000), n = 2 })
+local products = vec.from_table({ Product.new("book", 4500), Product.new("keyboard", 12000), n = 2 })
 ---@type table
-local __t3 = map.new(2)
-__t3:insert("book", 4500)
-__t3:insert("keyboard", 12000)
-local prices = __t3
+local prices = map.from_table({ ["book"] = 4500, ["keyboard"] = 12000 })
 local total = 0
-for __t5 = 0, products.n - 1 do
+for __t5 = 1, products.n do
     local __t4 = products[__t5]
     __t4 = __t4.price
     total = total + __t4
@@ -174,8 +171,8 @@ Key semantic mappings item by item:
 | `Ok(value)` / `Err(error)` | `result__runtime.ok(value)` / `result__runtime.err(error)` |
 | `positive_quantity(...) ?` | Checks `[1]` tag, early-returns tagged Result on error |
 | `Checkout::Paid(product)` | `{ tag = "Paid", product }` |
-| `[a, b]` | 0-based table with explicit `n`, wrapped by `vec.from_table` |
-| `#{ key: value }` | `map.new(capacity)` followed by insertions in source order |
+| `[a, b]` | 1-based table with explicit `n`, wrapped by `vec.from_table` |
+| `#{ key: value }` | `map.from_table({ [key] = value, ... })` |
 | `map(...).fold(...)` | A direct accumulating Lua `for` loop |
 | `expect("message")` | Nil guard with caller-provided message |
 
@@ -242,7 +239,7 @@ fn bucket(value: i64) -> String {
 }
 
 fn search(values: Vec<i64>, wanted: i64) -> Option<i64> {
-    for index in 0..values.len() {
+    for index in 1..=values.len() {
         if values[index] == wanted {
             return Some(index);
         }
@@ -344,7 +341,9 @@ if let Some(value) = optional_value {
 ```rua
 let mut values = [1, 2, 3];
 values.push(4);
-let first = values[0];
+let first = values[1];
+let first_again = values.first().unwrap();
+let last = values.last().unwrap();
 
 let scores: HashMap<String, i64> = #{
     "alice": 10,
@@ -365,7 +364,7 @@ let selected = values
 let total = selected.iter().fold(0, |sum, value| sum + value);
 ```
 
-Iterators support range/Vec sources, `map`, `filter`, `filter_map`, `find`, `any`, `all`, `count`, `fold`, `collect`, and other adapter/consumer methods; provably one-shot chains generate fused loops directly.
+`Vec::first()` and `Vec::last()` return `Option<T>` and yield `None` for an empty Vec. Iterators support range/Vec sources, `map`, `filter`, `filter_map`, `find`, `any`, `all`, `count`, `fold`, `collect`, and other adapter/consumer methods; provably one-shot chains generate fused loops directly.
 
 ### Modules, extern, attributes, and annotations
 
@@ -453,7 +452,7 @@ Other core mappings:
 | `String` | string |
 | `Option<T>` | `T` / `nil` |
 | `Result<T, E>` | `{ is_ok, payload }` tagged array table |
-| `Vec<T>` | 0-based table with `n` length |
+| `Vec<T>` | 1-based table with `n` length |
 | `HashMap<K, V>` | runtime map table |
 | `struct` | table + class metatable |
 | `enum` | tagged table |

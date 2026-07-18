@@ -14,6 +14,12 @@ impl<T> Vec<T> {
     /// Get the element at `index`, or `None` if out of bounds.
     pub fn get(&self, index: i64) -> Option<T> {}
 
+    /// Return the first element, or `None` if empty.
+    pub fn first(&self) -> Option<T> {}
+
+    /// Return the last element, or `None` if empty.
+    pub fn last(&self) -> Option<T> {}
+
     /// Append `value` to the end.
     pub fn push(&mut self, value: T) {}
 

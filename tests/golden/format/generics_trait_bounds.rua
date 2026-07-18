@@ -86,8 +86,8 @@ fn main() {
 
     let nums = pair(10, 20);
     print("pair len = {}", nums.len());
-    print("pair[0]  = {}", nums.get(0));
     print("pair[1]  = {}", nums.get(1));
+    print("pair[2]  = {}", nums.get(2));
 
     print("echo     = {}", echo(Circle { r: 1.0 }, 7));
 }

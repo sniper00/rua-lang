@@ -37,7 +37,7 @@ function annotations.find(annotation)
     local found = { n = 0 }
     for _, entry in ipairs(annotations.entries) do
         if entry.annotation == annotation then
-            found[found.n] = entry
+            found[found.n + 1] = entry
             found.n = found.n + 1
         end
     end
@@ -206,7 +206,7 @@ function Iter:enumerate()
     return iter.new(function()
         local value = source:next()
         if value == nil then return nil end
-        local pair = { [0] = index, value, n = 2 }
+        local pair = { index, value, n = 2 }
         index = index + 1
         return pair
     end)
@@ -237,7 +237,7 @@ function Iter:collect()
     while true do
         local value = self:next()
         if value == nil then break end
-        values[values.n] = value
+        values[values.n + 1] = value
         values.n = values.n + 1
     end
     return vec.from_table(values)
@@ -308,15 +308,15 @@ function Vec:len()
 end
 
 function Vec:push(value)
-    self[self.n] = value
+    self[self.n + 1] = value
     self.n = self.n + 1
 end
 
 function Vec:pop()
     if self.n == 0 then return nil end
-    self.n = self.n - 1
     local value = self[self.n]
     self[self.n] = nil
+    self.n = self.n - 1
     return value
 end
 
@@ -324,21 +324,31 @@ function Vec:get(index)
     return self[index]
 end
 
+function Vec:first()
+    if self.n == 0 then return nil end
+    return self[1]
+end
+
+function Vec:last()
+    if self.n == 0 then return nil end
+    return self[self.n]
+end
+
 function Vec:set(index, value)
     self[index] = value
 end
 
 function Vec:contains(needle)
-    for index = 0, self.n - 1 do
+    for index = 1, self.n do
         if self[index] == needle then return true end
     end
     return false
 end
 
 function Vec:iter()
-    local vector, index = self, 0
+    local vector, index = self, 1
     return iter.new(function()
-        if index >= vector.n then return nil end
+        if index > vector.n then return nil end
         local value = vector[index]
         index = index + 1
         return value
@@ -388,6 +398,12 @@ end
 
 function map.new(capacity)
     return setmetatable({ values = table.create(0, capacity or 0), n = 0 }, Map)
+end
+
+function map.from_table(values)
+    local count = 0
+    for _ in pairs(values) do count = count + 1 end
+    return setmetatable({ values = values, n = count }, Map)
 end
 
 function string_api.new()
