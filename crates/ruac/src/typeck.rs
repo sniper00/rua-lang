@@ -615,6 +615,9 @@ pub struct TypeInfo {
     /// Method-call expressions whose receiver is a `String` and whose method is
     /// a recognized std string method, so codegen routes them through its configured module.
     str_methods: std::collections::HashSet<ExprId>,
+    /// Primitive values whose `to_string` call lowers directly to Lua's
+    /// conversion primitive instead of a table method dispatch.
+    primitive_to_strings: std::collections::HashSet<ExprId>,
     /// `+` expressions whose operands are both `String`, so codegen emits Lua
     /// string concatenation (`..`) instead of arithmetic.
     str_concats: std::collections::HashSet<ExprId>,
@@ -661,6 +664,10 @@ impl TypeInfo {
 
     pub fn is_str_method(&self, expression: ExprId) -> bool {
         self.str_methods.contains(&expression)
+    }
+
+    pub fn is_primitive_to_string(&self, expression: ExprId) -> bool {
+        self.primitive_to_strings.contains(&expression)
     }
 
     pub fn is_str_concat(&self, expression: ExprId) -> bool {
@@ -789,6 +796,7 @@ pub fn check_resolved_diagnostics(
             int_divs: tc.int_divs,
             int_rems: tc.int_rems,
             str_methods: tc.str_methods,
+            primitive_to_strings: tc.primitive_to_strings,
             str_concats: tc.str_concats,
             option_maps: tc.option_maps,
             standard_methods: tc.standard_methods,
@@ -837,6 +845,8 @@ struct Tc {
     int_rems: std::collections::HashSet<ExprId>,
     /// Recognized `String` method calls.
     str_methods: std::collections::HashSet<ExprId>,
+    /// Primitive `to_string` calls.
+    primitive_to_strings: std::collections::HashSet<ExprId>,
     /// `String + String` concatenations.
     str_concats: std::collections::HashSet<ExprId>,
     /// `Option::map` calls that need inline codegen.
@@ -869,6 +879,7 @@ impl Tc {
             int_divs: std::collections::HashSet::new(),
             int_rems: std::collections::HashSet::new(),
             str_methods: std::collections::HashSet::new(),
+            primitive_to_strings: std::collections::HashSet::new(),
             str_concats: std::collections::HashSet::new(),
             option_maps: std::collections::HashSet::new(),
             standard_methods: HashMap::new(),
@@ -2343,6 +2354,13 @@ impl Tc {
                     (receiver_ty, false)
                 };
                 let result = (|| {
+                    if matches!(rt, Ty::I64 | Ty::F64 | Ty::Bool)
+                        && method == "to_string"
+                        && args.is_empty()
+                    {
+                        self.primitive_to_strings.insert(e.id);
+                        return Ty::Str;
+                    }
                     let standard_method = self.standard_method_definition(&rt, method);
                     if let Some(definition) = standard_method {
                         self.standard_methods.insert(e.id, definition);

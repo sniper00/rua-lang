@@ -1814,6 +1814,19 @@ fn codegen_string_method_on_literal_uses_call_form() {
 }
 
 #[test]
+fn codegen_primitive_to_string_uses_lua_conversion() {
+    let lua = compile(
+        r#"
+        fn f() -> String { 123.to_string() }
+        fn g() -> String { true.to_string() }
+        "#,
+    );
+    assert!(lua.contains("tostring(123)"), "got: {lua}");
+    assert!(lua.contains("tostring(true)"), "got: {lua}");
+    assert!(!lua.contains(":to_string()"), "got: {lua}");
+}
+
+#[test]
 fn codegen_string_concat_uses_dotdot() {
     let lua = compile(r#"fn f(a: String, b: String) -> String { a + b }"#);
     assert!(lua.contains("(a .. b)"), "got: {lua}");

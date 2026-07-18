@@ -4048,6 +4048,9 @@ impl Codegen<'_> {
                 };
                 let r = optional_target.as_ref().map_or(receiver, LuaExpr::name);
                 let computed = (|| {
+                    if self.info.is_primitive_to_string(e.id) {
+                        return LuaExpr::name("tostring").call(vec![r]);
+                    }
                     if let Some(definition) = self.info.standard_method(e.id) {
                         use crate::builtins::LanguageItem as L;
                         match self.hir.language_item(definition) {
