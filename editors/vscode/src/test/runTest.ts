@@ -128,9 +128,6 @@ function bundledPlatformTarget(): string | undefined {
   if (process.platform === "linux" && process.arch === "arm64") {
     return "linux-arm64";
   }
-  if (process.platform === "darwin" && process.arch === "x64") {
-    return "darwin-x64";
-  }
   if (process.platform === "darwin" && process.arch === "arm64") {
     return "darwin-arm64";
   }

@@ -28,10 +28,6 @@ jobs:
             platform: linux-arm64
             rust_target: aarch64-unknown-linux-gnu
             suffix: ""
-          - os: macos-13
-            platform: darwin-x64
-            rust_target: x86_64-apple-darwin
-            suffix: ""
           - os: macos-14
             platform: darwin-arm64
             rust_target: aarch64-apple-darwin
@@ -121,14 +117,13 @@ jobs:
           chmod 755 \
             bin/linux-x64/rua-lsp bin/linux-x64/ruac \
             bin/linux-arm64/rua-lsp bin/linux-arm64/ruac \
-            bin/darwin-x64/rua-lsp bin/darwin-x64/ruac \
             bin/darwin-arm64/rua-lsp bin/darwin-arm64/ruac
 
       - name: Verify bundled toolchains
         shell: bash
         run: |
           set -euo pipefail
-          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+          for platform in linux-x64 linux-arm64 darwin-arm64; do
             test -x "bin/${platform}/rua-lsp"
             test -x "bin/${platform}/ruac"
           done

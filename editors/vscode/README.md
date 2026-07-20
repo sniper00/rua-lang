@@ -21,8 +21,11 @@ auto-close) from this extension.
 Release VSIX files include `rua-lsp` and `ruac` for these platforms:
 
 - Linux x64 and arm64
-- macOS x64 and arm64
+- macOS arm64
 - Windows x64
+
+macOS x64 (Intel) is not bundled. To use Rua on that platform, set
+`rua.server.path` and `rua.compiler.path` to locally installed binaries.
 
 The extension selects the matching binary automatically. The `rua.server.path`
 and `rua.compiler.path` settings override the bundled binaries when they are
