@@ -402,6 +402,25 @@ fn invalid_control() {
 }
 
 #[test]
+fn inference_control_flow_reports_concrete_non_iterable_containers() {
+    const SOURCE: &str = r#"
+fn invalid_control(values: HashMap<String, i64>) {
+    for item in values { item; }
+}
+"#;
+    let fixture = fixture(SOURCE, "invalid_control");
+    assert!(
+        fixture
+            .inference
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, InferenceDiagnostic::NotIterable { .. })),
+        "expected a non-iterable HashMap diagnostic: {:?}",
+        fixture.inference.diagnostics()
+    );
+}
+
+#[test]
 fn inference_control_flow_explicit_returns_do_not_report_tail_mismatches() {
     const SOURCE: &str = r#"
 fn early() -> i64 { return 1; }
@@ -559,6 +578,7 @@ fn invalid_calls() -> bool {
     false
 }
 "#;
+
     let fixture = fixture(SOURCE, "invalid_calls");
     assert!(
         fixture
@@ -596,6 +616,25 @@ fn invalid_calls() -> bool {
             .expect("unresolved call info")
             .target(),
         CallTarget::Unresolved
+    );
+}
+
+#[test]
+fn inference_calls_report_unknown_method_on_concrete_receiver() {
+    const SOURCE: &str = r#"
+fn invalid_method(values: Vec<i64>) {
+    values.typo();
+}
+"#;
+    let fixture = fixture(SOURCE, "invalid_method");
+    assert!(
+        fixture
+            .inference
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, InferenceDiagnostic::UnknownMethod { .. })),
+        "expected an unknown method diagnostic: {:?}",
+        fixture.inference.diagnostics()
     );
 }
 

@@ -1336,7 +1336,7 @@ fn no_require_when_runtime_is_unused() {
 #[test]
 fn vec_method_call() {
     // `.push()` / `.len()` lower to method calls resolved by the Vec metatable.
-    let lua = compile("fn f() { let v = [1]; v.push(2); let n = v.len(); }");
+    let lua = compile("fn f() { let mut v = [1]; v.push(2); let n = v.len(); }");
     assert!(lua.contains("v:push(2)"), "got: {lua}");
     assert!(lua.contains("v:len()"), "got: {lua}");
 }
@@ -1448,7 +1448,7 @@ fn hashmap_new_and_methods() {
 
 #[test]
 fn vec_new_uses_standard_runtime_module() {
-    let lua = compile("fn f() { let v = Vec::new(); v.push(1); }");
+    let lua = compile("fn f() { let mut v = Vec::new(); v.push(1); }");
     assert!(
         lua.contains("local rua_std = require(\"rua_std\")")
             && lua.contains("local vec = rua_std.vec")
@@ -1554,6 +1554,50 @@ fn typeck_non_bool_while_condition() {
 fn typeck_return_type_mismatch() {
     let err = compile_str("fn f() -> bool { 1 }").unwrap_err();
     assert!(err.contains("expected return type `bool`"), "got: {err}");
+}
+
+#[test]
+fn typeck_explicit_return_statement_mismatch() {
+    let err = compile_str("fn f() -> i64 { return true; }").unwrap_err();
+    assert!(
+        err.contains("expected return type `i64`, found `bool`"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn typeck_match_pattern_type_mismatch() {
+    let err =
+        compile_str("fn f(value: i64) -> i64 { match value { true => 1, _ => 0 } }").unwrap_err();
+    assert!(
+        err.contains("pattern value has type `bool`, cannot match `i64`"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn typeck_missing_match_arm_is_rejected() {
+    let err = compile_str("fn f(value: Option<i64>) -> i64 { match value { Some(v) => v } }")
+        .unwrap_err();
+    assert!(err.contains("non-exhaustive match"), "got: {err}");
+}
+
+#[test]
+fn typeck_mutable_method_requires_mutable_binding() {
+    let err = compile_str("fn f() { let v = [1]; v.push(2); }").unwrap_err();
+    assert!(
+        err.contains("cannot call mutable method `push` on immutable binding `v`"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn typeck_unknown_method_on_concrete_receiver_is_rejected() {
+    let err = compile_str("fn f() { let v = [1]; v.typo(); }").unwrap_err();
+    assert!(
+        err.contains("type `Vec<i64>` has no method `typo`"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1690,8 +1734,9 @@ fn typeck_inherited_default_method_arity_checked() {
 #[test]
 fn typeck_vec_and_map_methods_not_flagged() {
     // Receiver types for Vec/HashMap are Unknown -> method calls never flagged.
-    let lua =
-        compile("fn f() { let v = [1]; v.push(2); let m = HashMap::new(); m.insert(\"a\", 1); }");
+    let lua = compile(
+        "fn f() { let mut v = [1]; v.push(2); let mut m = HashMap::new(); m.insert(\"a\", 1); }",
+    );
     assert!(lua.contains("v:push(2)"), "got: {lua}");
     assert!(lua.contains("m:insert"), "got: {lua}");
 }

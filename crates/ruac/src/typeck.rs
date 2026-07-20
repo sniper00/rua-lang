@@ -678,6 +678,7 @@ struct FnSig {
     params: Arc<[Ty]>,
     ret: Ty,
     variadic: bool,
+    receiver_mutable: bool,
     /// Generic parameters (with bounds) declared on this function, used to check
     /// bound satisfaction at call sites. Empty for non-generic fns and for
     /// methods/trait signatures (where call-site checking is not yet done).
@@ -926,6 +927,11 @@ struct Tc<'hir> {
     closure_mutable_capture_allowed: Vec<bool>,
     /// Explicit return expression types for the currently inferred closure.
     closure_returns: Vec<Vec<Ty>>,
+    /// Return type expected by the currently checked ordinary function.
+    function_return_ty: Option<Ty>,
+    /// Function parameters are mutable by default until mutable parameter
+    /// syntax is introduced; local `let` bindings still require `mut`.
+    implicitly_mutable_locals: std::collections::HashSet<crate::hir::LocalId>,
     /// Innermost loop first. `Some` collects values for a `loop` expression;
     /// `None` marks `while`/`for`, which only accept a bare `break`.
     loop_breaks: Vec<Option<Vec<(Ty, SourceRange)>>>,
@@ -969,6 +975,8 @@ impl<'hir> Tc<'hir> {
             closure_boundaries: Vec::new(),
             closure_mutable_capture_allowed: Vec::new(),
             closure_returns: Vec::new(),
+            function_return_ty: None,
+            implicitly_mutable_locals: std::collections::HashSet::new(),
             loop_breaks: Vec::new(),
             table_loops: Vec::new(),
             errs: Vec::new(),
@@ -1001,6 +1009,7 @@ impl<'hir> Tc<'hir> {
             params: Arc::from(params.iter().map(|p| self.ty_of(&p.ty)).collect::<Vec<_>>()),
             ret: ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit),
             variadic: false,
+            receiver_mutable: false,
             generics: Arc::from(Vec::<GenericParam>::new()),
             generic_bounds: Arc::new(HashMap::new()),
         }
@@ -1324,6 +1333,7 @@ impl<'hir> Tc<'hir> {
                                 merge_generics(&implementation.generics, &method.generics);
                             self.set_gen_bounds(&generics);
                             let mut signature = self.sig_of(&method.params, method.ret.as_ref());
+                            signature.receiver_mutable = method.receiver_mutable;
                             signature.generic_bounds = Arc::new(self.gen_bounds.clone());
                             self.gen_bounds.clear();
                             signature.generics = Arc::from(generics);
@@ -1347,6 +1357,7 @@ impl<'hir> Tc<'hir> {
                         let generics = merge_generics(&trait_decl.generics, &method.generics);
                         self.set_gen_bounds(&generics);
                         let mut signature = self.sig_of(&method.params, method.ret.as_ref());
+                        signature.receiver_mutable = method.receiver_mutable;
                         signature.generic_bounds = Arc::new(self.gen_bounds.clone());
                         self.gen_bounds.clear();
                         signature.generics = Arc::from(method.generics.clone());
@@ -1477,6 +1488,16 @@ impl<'hir> Tc<'hir> {
         self.bind(name, ty);
         if mutable && let Some(scope) = self.mutable_scopes.last_mut() {
             scope.insert(name.to_string());
+        }
+    }
+
+    fn mark_parameter_mutable(&mut self, span: SourceRange) {
+        if let Some(&local) = self
+            .hir
+            .binding_targets
+            .get(&(span.file, span.start, span.len))
+        {
+            self.implicitly_mutable_locals.insert(local);
         }
     }
 
@@ -1663,8 +1684,11 @@ impl<'hir> Tc<'hir> {
         for p in params {
             let ty = self.ty_of(&p.ty);
             self.bind(&p.name, ty);
+            self.mark_parameter_mutable(p.name_span);
         }
-        let ret_ty = ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit);
+        let declared_ret_ty = ret.map(|t| self.ty_of(t));
+        let ret_ty = declared_ret_ty.clone().unwrap_or(Ty::Unit);
+        let previous_return_ty = std::mem::replace(&mut self.function_return_ty, declared_ret_ty);
         let actual = self.block(body);
         // Only check a concrete, non-unit declared return against a concrete tail.
         if let Some(tail) = &body.tail
@@ -1682,6 +1706,7 @@ impl<'hir> Tc<'hir> {
                 ),
             );
         }
+        self.function_return_ty = previous_return_ty;
         self.pop();
         self.gen_bounds.clear();
     }
@@ -1794,11 +1819,20 @@ impl<'hir> Tc<'hir> {
                 let ty = self.infer(e);
                 if let Some(returns) = self.closure_returns.last_mut() {
                     returns.push(ty);
+                } else if let Some(expected) = self.function_return_ty.clone() {
+                    self.check_return_type(expected, &ty, e.span);
                 }
             }
             Stmt::Return(None) => {
                 if let Some(returns) = self.closure_returns.last_mut() {
                     returns.push(Ty::Unit);
+                } else if let Some(expected) = self.function_return_ty.clone()
+                    && expected != Ty::Unit
+                {
+                    self.err(
+                        SourceRange::EMPTY,
+                        format!("expected return type `{}`, found `()`", expected.name()),
+                    );
                 }
             }
             Stmt::While { cond, body } => {
@@ -1870,6 +1904,7 @@ impl<'hir> Tc<'hir> {
             Stmt::WhileLet { pat, expr, body } => {
                 let scrut = self.infer(expr);
                 self.push();
+                self.check_pattern_type(pat, &scrut, expr.span);
                 self.bind_pattern(pat, &scrut);
                 self.loop_breaks.push(None);
                 self.block(body);
@@ -1899,6 +1934,19 @@ impl<'hir> Tc<'hir> {
             self.err(
                 sp,
                 format!("{} must be `bool`, found `{}`", what, ty.name()),
+            );
+        }
+    }
+
+    fn check_return_type(&mut self, expected: Ty, actual: &Ty, span: SourceRange) {
+        if expected.is_concrete() && actual.is_concrete() && !compatible(&expected, actual) {
+            self.err(
+                span,
+                format!(
+                    "expected return type `{}`, found `{}`",
+                    expected.name(),
+                    actual.name()
+                ),
             );
         }
     }
@@ -2679,7 +2727,7 @@ impl<'hir> Tc<'hir> {
                     } = &rt
                         && let Some(&definition) =
                             self.hir.associated_items.get(&(*owner, method.clone()))
-                        && let Some(signature) = self.method_sigs.get(&definition)
+                        && let Some(signature) = self.method_sigs.get(&definition).cloned()
                     {
                         self.user_methods
                             .insert(e.id, UserMethodDispatch::Static(definition));
@@ -2687,6 +2735,7 @@ impl<'hir> Tc<'hir> {
                         let ret = signature.ret.clone();
                         let generics = signature.generics.clone();
                         let generic_bounds = signature.generic_bounds.clone();
+                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         self.check_method_call(type_name, method, &params, &arg_tys, args, sp);
                         if !generics.is_empty() {
                             let mut substitution = HashMap::new();
@@ -2711,11 +2760,12 @@ impl<'hir> Tc<'hir> {
                     } = &rt
                         && let Some(&definition) =
                             self.hir.trait_items.get(&(*trait_id, method.clone()))
-                        && let Some(signature) = self.method_sigs.get(&definition)
+                        && let Some(signature) = self.method_sigs.get(&definition).cloned()
                     {
                         self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
                         let params = signature.params.clone();
                         let ret = signature.ret.clone();
+                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         self.check_method_call(trait_name, method, &params, &arg_tys, args, sp);
                         return ret;
                     }
@@ -2726,6 +2776,7 @@ impl<'hir> Tc<'hir> {
                         && let Some((tname, signature)) = self.resolve_generic_method(*id, method)
                     {
                         self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
+                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         self.check_method_call(
                             &tname,
                             method,
@@ -2776,11 +2827,20 @@ impl<'hir> Tc<'hir> {
                         return ret;
                     }
                     if let Some(definition) = standard_method {
+                        if let Some(signature) = self.method_sigs.get(&definition).cloned() {
+                            self.check_mutable_method_receiver(recv, method, &signature, sp);
+                        }
                         if matches!(rt, Ty::Str) {
                             self.str_methods.insert(e.id);
                         }
                         return self.infer_standard_method_call(
                             definition, &rt, method, &arg_tys, args, sp,
+                        );
+                    }
+                    if self.has_known_method_set(&rt) {
+                        self.err(
+                            sp,
+                            format!("type `{}` has no method `{}`", rt.name(), method),
                         );
                     }
                     Ty::Unknown
@@ -2999,6 +3059,7 @@ impl<'hir> Tc<'hir> {
                 else_block,
             } => {
                 let scrut = self.infer(expr);
+                self.check_pattern_type(pat, &scrut, expr.span);
                 self.push();
                 self.bind_pattern(pat, &scrut);
                 let t = self.block(then_block);
@@ -3088,6 +3149,7 @@ impl<'hir> Tc<'hir> {
                 for arm in arms {
                     self.push();
                     for p in &arm.pats {
+                        self.check_pattern_type(p, &scrut_ty, arm.body.span);
                         self.bind_pattern(p, &scrut_ty);
                     }
                     if let Some(g) = &arm.guard {
@@ -3101,6 +3163,13 @@ impl<'hir> Tc<'hir> {
                     } else if !compatible(&result, &bt) {
                         result = Ty::Unknown;
                     }
+                }
+                if scrut_ty.is_concrete() && !self.match_is_exhaustive(&scrut_ty, arms) {
+                    self.err_with_code(
+                        rua_core::DiagnosticCode::TypeMissingMatchArm,
+                        scrut.span,
+                        "non-exhaustive match".to_string(),
+                    );
                 }
                 result
             }
@@ -3444,6 +3513,41 @@ impl<'hir> Tc<'hir> {
             .copied()
     }
 
+    fn has_known_method_set(&self, receiver: &Ty) -> bool {
+        // String methods may be supplied by the configured Lua runtime, so
+        // preserve the existing dynamic extension point for string values.
+        !matches!(
+            receiver,
+            Ty::Unknown | Ty::Generic { .. } | Ty::Never | Ty::Str
+        )
+    }
+
+    fn check_mutable_method_receiver(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        signature: &FnSig,
+        span: SourceRange,
+    ) {
+        if !signature.receiver_mutable {
+            return;
+        }
+        let Some(local) = self.root_local_target(receiver) else {
+            return;
+        };
+        if !self.hir.locals[local.index()].is_mutable
+            && !self.implicitly_mutable_locals.contains(&local)
+        {
+            self.err(
+                span,
+                format!(
+                    "cannot call mutable method `{method}` on immutable binding `{}`",
+                    self.hir.locals[local.index()].name
+                ),
+            );
+        }
+    }
+
     fn infer_standard_method_call(
         &mut self,
         definition: crate::hir::DefId,
@@ -3738,7 +3842,207 @@ impl<'hir> Tc<'hir> {
         }
     }
 
-    /// Bind identifiers introduced by a pattern (all `Unknown` for now).
+    fn check_pattern_type(&mut self, pattern: &Pattern, scrutinee: &Ty, fallback: SourceRange) {
+        match pattern {
+            Pattern::Wildcard | Pattern::Binding(_, _) => {}
+            Pattern::Literal(literal) => {
+                let actual = self.infer(literal);
+                if scrutinee.is_concrete()
+                    && actual.is_concrete()
+                    && !compatible(scrutinee, &actual)
+                {
+                    self.err(
+                        literal.span,
+                        format!(
+                            "pattern value has type `{}`, cannot match `{}`",
+                            actual.name(),
+                            scrutinee.name()
+                        ),
+                    );
+                }
+            }
+            Pattern::Range { lo, hi, .. } => {
+                let lo_ty = self.infer(lo);
+                let hi_ty = self.infer(hi);
+                for (bound, actual) in [(lo.as_ref(), lo_ty), (hi.as_ref(), hi_ty)] {
+                    if scrutinee.is_concrete()
+                        && actual.is_concrete()
+                        && !compatible(scrutinee, &actual)
+                    {
+                        self.err(
+                            bound.span,
+                            format!(
+                                "range bound has type `{}`, cannot match `{}`",
+                                actual.name(),
+                                scrutinee.name()
+                            ),
+                        );
+                    }
+                }
+            }
+            Pattern::Path { id, path } => {
+                self.check_variant_pattern(*id, path, scrutinee, fallback);
+            }
+            Pattern::TupleVariant {
+                id, path, elems, ..
+            } => {
+                self.check_variant_pattern(*id, path, scrutinee, fallback);
+                let payload = self.tuple_payload(*id, path, scrutinee);
+                for (index, element) in elems.iter().enumerate() {
+                    let element_ty = payload
+                        .as_ref()
+                        .and_then(|types| types.get(index).cloned())
+                        .unwrap_or(Ty::Unknown);
+                    self.check_pattern_type(element, &element_ty, fallback);
+                }
+            }
+            Pattern::StructVariant {
+                id, path, fields, ..
+            } => {
+                self.check_variant_pattern(*id, path, scrutinee, fallback);
+                let field_types = self.struct_payload(*id, path, scrutinee);
+                for (name, pattern) in fields {
+                    let field_ty = field_types
+                        .as_ref()
+                        .and_then(|types| {
+                            types
+                                .iter()
+                                .find(|(field, _)| field == name)
+                                .map(|(_, ty)| ty.clone())
+                        })
+                        .unwrap_or(Ty::Unknown);
+                    self.check_pattern_type(pattern, &field_ty, fallback);
+                }
+            }
+        }
+    }
+
+    fn check_variant_pattern(
+        &mut self,
+        id: PatternId,
+        path: &[String],
+        scrutinee: &Ty,
+        fallback: SourceRange,
+    ) {
+        let Some(target) = self.resolved_pattern_variant(id) else {
+            return;
+        };
+        let display = path.join("::");
+        let valid = match target {
+            crate::hir::ResolvedTarget::Builtin(builtin) => match builtin {
+                rua_core::BuiltinId::VariantOptionSome | rua_core::BuiltinId::VariantOptionNone => {
+                    matches!(scrutinee, Ty::Option(_))
+                }
+                rua_core::BuiltinId::VariantResultOk | rua_core::BuiltinId::VariantResultErr => {
+                    matches!(scrutinee, Ty::Result(_, _))
+                }
+                _ => true,
+            },
+            target => self.resolved_enum_variant_ids(target).is_some_and(
+                |(owner, _)| matches!(scrutinee, Ty::Named { def, .. } if *def == owner),
+            ),
+        };
+        if !valid && scrutinee.is_concrete() {
+            self.err(
+                fallback,
+                format!("pattern `{display}` cannot match `{}`", scrutinee.name()),
+            );
+        }
+    }
+
+    fn match_is_exhaustive(&self, scrutinee: &Ty, arms: &[MatchArm]) -> bool {
+        let unguarded_patterns = arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .flat_map(|arm| arm.pats.iter());
+        if unguarded_patterns
+            .clone()
+            .any(|pattern| matches!(pattern, Pattern::Wildcard | Pattern::Binding(_, _)))
+        {
+            return true;
+        }
+
+        match scrutinee {
+            Ty::Bool => {
+                let mut values = std::collections::HashSet::new();
+                for pattern in unguarded_patterns {
+                    if let Pattern::Literal(expression) = pattern
+                        && let ExprKind::Bool(value) = expression.kind
+                    {
+                        values.insert(value);
+                    }
+                }
+                values.len() == 2
+            }
+            Ty::Option(_) => {
+                let mut some = false;
+                let mut none = false;
+                for pattern in unguarded_patterns {
+                    match self.pattern_builtin(pattern) {
+                        Some(rua_core::BuiltinId::VariantOptionSome) => some = true,
+                        Some(rua_core::BuiltinId::VariantOptionNone) => none = true,
+                        _ => {}
+                    }
+                }
+                some && none
+            }
+            Ty::Result(_, _) => {
+                let mut ok = false;
+                let mut err = false;
+                for pattern in unguarded_patterns {
+                    match self.pattern_builtin(pattern) {
+                        Some(rua_core::BuiltinId::VariantResultOk) => ok = true,
+                        Some(rua_core::BuiltinId::VariantResultErr) => err = true,
+                        _ => {}
+                    }
+                }
+                ok && err
+            }
+            Ty::Named { def: owner, .. } => {
+                let mut variants = std::collections::HashSet::new();
+                for pattern in unguarded_patterns {
+                    let Some(id) = self.pattern_id(pattern) else {
+                        continue;
+                    };
+                    let Some(target) = self.resolved_pattern_variant(id) else {
+                        continue;
+                    };
+                    if let Some((pattern_owner, variant)) = self.resolved_enum_variant_ids(target)
+                        && pattern_owner == *owner
+                    {
+                        variants.insert(variant);
+                    }
+                }
+                let total = self
+                    .hir
+                    .enum_variants
+                    .keys()
+                    .filter(|(variant_owner, _)| *variant_owner == *owner)
+                    .count();
+                total > 0 && variants.len() == total
+            }
+            _ => false,
+        }
+    }
+
+    fn pattern_builtin(&self, pattern: &Pattern) -> Option<rua_core::BuiltinId> {
+        let id = self.pattern_id(pattern)?;
+        match self.resolved_pattern_variant(id)? {
+            crate::hir::ResolvedTarget::Builtin(builtin) => Some(builtin),
+            _ => None,
+        }
+    }
+
+    fn pattern_id(&self, pattern: &Pattern) -> Option<PatternId> {
+        match pattern {
+            Pattern::Path { id, .. }
+            | Pattern::TupleVariant { id, .. }
+            | Pattern::StructVariant { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Bind identifiers introduced by a pattern.
     /// Bind every name introduced by pattern `p`, propagating the scrutinee type
     /// `ty` so bindings get a concrete type where inferable. Only the built-in
     /// refutable payloads (`Some`/`Ok`/`Err`) are destructured; user enum

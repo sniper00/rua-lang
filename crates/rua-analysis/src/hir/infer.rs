@@ -73,6 +73,11 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         actual: Ty,
     },
+    UnknownMethod {
+        call: ExprId,
+        receiver: Ty,
+        method: String,
+    },
     InvalidUnary {
         expr: ExprId,
         operand: Ty,
@@ -739,6 +744,13 @@ impl<'a> InferenceContext<'a> {
                         self.diagnostics.push(InferenceDiagnostic::NotIterable {
                             expr: *iterable,
                             actual: iterable_ty,
+                        });
+                        (Ty::Unknown, false)
+                    }
+                    other if other.is_concrete() => {
+                        self.diagnostics.push(InferenceDiagnostic::NotIterable {
+                            expr: *iterable,
+                            actual: other,
                         });
                         (Ty::Unknown, false)
                     }
@@ -1786,6 +1798,13 @@ impl<'a> InferenceContext<'a> {
                 {
                     return result;
                 }
+                if known_method_receiver(&receiver_ty, name) {
+                    self.diagnostics.push(InferenceDiagnostic::UnknownMethod {
+                        call,
+                        receiver: receiver_ty.clone(),
+                        method: name.to_string(),
+                    });
+                }
                 return self.infer_unresolved_member_call(call, args);
             };
             let Ty::Function(callable) = resolution.ty() else {
@@ -2798,6 +2817,12 @@ fn standard_owner_type(name: &str, expected: Option<&Ty>) -> Option<Ty> {
         },
         _ => return None,
     })
+}
+
+fn known_method_receiver(ty: &Ty, method: &str) -> bool {
+    !matches!(ty, Ty::Unknown | Ty::GenericParam(_) | Ty::Never)
+        && !matches!(ty, Ty::Primitive(primitive) if primitive.name() == "String")
+        && !(matches!(ty, Ty::Primitive(_)) && method == "to_string")
 }
 
 fn literal_ty(kind: LiteralKind) -> Ty {

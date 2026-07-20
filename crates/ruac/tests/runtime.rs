@@ -514,9 +514,9 @@ fn variant_aliases_use_identity_in_construction_and_patterns() {
         let ready = R;
         let code = C(7);
         let movement = M { x: 5 };
-        match ready { R => print("ready") }
-        match code { C(value) => print("{}", value) }
-        match movement { M { x } => print("{}", x) }
+        match ready { R => print("ready"), _ => {} }
+        match code { C(value) => print("{}", value), _ => {} }
+        match movement { M { x } => print("{}", x), _ => {} }
         "#,
         &[(
             "api.rua",

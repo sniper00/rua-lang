@@ -737,6 +737,18 @@ fn convert_inference_diagnostic(
                 range,
             )
         }
+        InferenceDiagnostic::UnknownMethod {
+            call,
+            receiver,
+            method,
+        } => {
+            let range = expr_range(*call, source_map)?;
+            (
+                DiagnosticCode::TypeUnknownMethod,
+                format!("type `{receiver}` has no method `{method}`"),
+                range,
+            )
+        }
         InferenceDiagnostic::InvalidUnary { expr, operand, op } => {
             let range = expr_range(*expr, source_map)?;
             (
