@@ -14,6 +14,7 @@ use crate::ast::*;
 use crate::diag::Diag;
 use crate::token::SourceRange;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IterSourceKind {
@@ -73,10 +74,14 @@ pub struct IterPlan {
     pub output_type: String,
 }
 
+/// Persistent iterator pipeline state. Each adapter points at its predecessor
+/// so extending a long chain only allocates the new node; the public plan is
+/// materialized once when a consumer is reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IterDraft {
-    source: IterSource,
-    adapters: Vec<IterAdapter>,
+    source: Arc<IterSource>,
+    parent: Option<Arc<IterDraft>>,
+    adapter: Option<IterAdapter>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -90,36 +95,36 @@ enum Ty {
     /// A user struct or enum, keyed by its declaration identity.
     Named {
         def: crate::hir::DefId,
-        name: String,
+        name: Arc<str>,
     },
     /// A user trait object. It stays non-concrete for compatibility checks but
     /// carries identity so method calls use Rua's metatable dispatch.
     Trait {
         def: crate::hir::DefId,
-        name: String,
+        name: Arc<str>,
     },
     /// `Vec<T>` / `[T]`.
-    Vec(Box<Ty>),
+    Vec(Arc<Ty>),
     /// `Option<T>` (represented at runtime as pure nil, but typed here).
-    Option(Box<Ty>),
+    Option(Arc<Ty>),
     /// `Result<T, E>`.
-    Result(Box<Ty>, Box<Ty>),
+    Result(Arc<Ty>, Arc<Ty>),
     /// `HashMap<K, V>`.
-    Map(Box<Ty>, Box<Ty>),
+    Map(Arc<Ty>, Arc<Ty>),
     /// A lazy iterator item type. Step 4A.5 attaches the corresponding IterPlan;
     /// this slot already supplies closure context without materializing values.
-    Iter(Box<Ty>, Box<IterDraft>),
+    Iter(Arc<Ty>, Arc<IterDraft>),
     /// `(A, B, ...)`, currently introduced by `enumerate()`.
-    Tuple(Vec<Ty>),
+    Tuple(Arc<[Ty]>),
     /// A Phase 4A closure signature. Unknown parameter/return slots preserve
     /// the checker's zero-false-positive behavior until context proves them.
-    Closure(Vec<Ty>, Box<Ty>),
+    Closure(Arc<[Ty]>, Arc<Ty>),
     /// A generic type parameter in scope (e.g. `T`). Behaves like `Unknown` for
     /// compatibility (never a mismatch), but carries its name so method calls can
     /// be resolved through the parameter's trait bounds.
     Generic {
         id: GenericParamId,
-        name: String,
+        name: Arc<str>,
     },
     /// Unknown / any — unifies with everything, suppresses all errors.
     Unknown,
@@ -142,7 +147,7 @@ impl Ty {
             Ty::Str => "String".into(),
             Ty::Unit => "()".into(),
             Ty::Never => "!".into(),
-            Ty::Named { name, .. } => name.clone(),
+            Ty::Named { name, .. } => name.to_string(),
             Ty::Trait { name, .. } => format!("dyn {name}"),
             Ty::Vec(t) => format!("Vec<{}>", t.name()),
             Ty::Option(t) => format!("Option<{}>", t.name()),
@@ -158,7 +163,7 @@ impl Ty {
                 params.iter().map(Ty::name).collect::<Vec<_>>().join(", "),
                 ret.name()
             ),
-            Ty::Generic { name, .. } => name.clone(),
+            Ty::Generic { name, .. } => name.to_string(),
             Ty::Unknown => "?".into(),
         }
     }
@@ -184,11 +189,11 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Map(k1, v1), Ty::Map(k2, v2)) => compatible(k1, k2) && compatible(v1, v2),
         (Ty::Iter(x, _), Ty::Iter(y, _)) => compatible(x, y),
         (Ty::Tuple(x), Ty::Tuple(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| compatible(a, b))
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| compatible(a, b))
         }
         (Ty::Closure(p1, r1), Ty::Closure(p2, r2)) => {
             p1.len() == p2.len()
-                && p1.iter().zip(p2).all(|(x, y)| compatible(x, y))
+                && p1.iter().zip(p2.iter()).all(|(x, y)| compatible(x, y))
                 && compatible(r1, r2)
         }
         _ => a == b,
@@ -557,14 +562,14 @@ fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<GenericParamId, Ty>) 
         (Ty::Iter(p, _), Ty::Iter(a, _)) => unify_generic(p, a, subst),
         (Ty::Tuple(p), Ty::Tuple(a)) if p.len() == a.len() => {
             let mut compatible = true;
-            for (p, a) in p.iter().zip(a) {
+            for (p, a) in p.iter().zip(a.iter()) {
                 compatible &= unify_generic(p, a, subst);
             }
             compatible
         }
         (Ty::Closure(p1, r1), Ty::Closure(p2, r2)) if p1.len() == p2.len() => {
             let mut compatible = true;
-            for (p, a) in p1.iter().zip(p2) {
+            for (p, a) in p1.iter().zip(p2.iter()) {
                 compatible &= unify_generic(p, a, subst);
             }
             compatible && unify_generic(r1, r2, subst)
@@ -576,32 +581,93 @@ fn unify_generic(param: &Ty, arg: &Ty, subst: &mut HashMap<GenericParamId, Ty>) 
 /// Replace generic parameters in `ty` with their inferred bindings; unbound
 /// generics become `Unknown` (they carry no meaning outside the callee).
 fn subst_ty(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Ty {
+    subst_ty_changed(ty, subst).unwrap_or_else(|| ty.clone())
+}
+
+/// Return a substituted type only when this subtree contains a generic slot.
+/// Keeping the unchanged branch as-is is important for nested collection and
+/// closure types: generic call checking is common, while allocating every
+/// enclosing `Arc` on a no-op substitution is pure churn.
+fn subst_ty_changed(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Option<Ty> {
     match ty {
-        Ty::Generic { id, .. } => subst.get(id).cloned().unwrap_or(Ty::Unknown),
-        Ty::Vec(t) => Ty::Vec(Box::new(subst_ty(t, subst))),
-        Ty::Option(t) => Ty::Option(Box::new(subst_ty(t, subst))),
-        Ty::Result(t, e) => Ty::Result(Box::new(subst_ty(t, subst)), Box::new(subst_ty(e, subst))),
-        Ty::Map(k, v) => Ty::Map(Box::new(subst_ty(k, subst)), Box::new(subst_ty(v, subst))),
-        Ty::Iter(item, draft) => Ty::Iter(Box::new(subst_ty(item, subst)), draft.clone()),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|item| subst_ty(item, subst)).collect()),
-        Ty::Closure(params, ret) => Ty::Closure(
-            params.iter().map(|param| subst_ty(param, subst)).collect(),
-            Box::new(subst_ty(ret, subst)),
-        ),
-        other => other.clone(),
+        Ty::Generic { id, .. } => Some(subst.get(id).cloned().unwrap_or(Ty::Unknown)),
+        Ty::Vec(t) => subst_ty_changed(t, subst).map(|inner| Ty::Vec(Arc::new(inner))),
+        Ty::Option(t) => subst_ty_changed(t, subst).map(|inner| Ty::Option(Arc::new(inner))),
+        Ty::Result(ok, err) => {
+            let new_ok = subst_ty_changed(ok, subst);
+            let new_err = subst_ty_changed(err, subst);
+            match (new_ok, new_err) {
+                (None, None) => None,
+                (new_ok, new_err) => Some(Ty::Result(
+                    Arc::new(new_ok.unwrap_or_else(|| ok.as_ref().clone())),
+                    Arc::new(new_err.unwrap_or_else(|| err.as_ref().clone())),
+                )),
+            }
+        }
+        Ty::Map(key, value) => {
+            let new_key = subst_ty_changed(key, subst);
+            let new_value = subst_ty_changed(value, subst);
+            match (new_key, new_value) {
+                (None, None) => None,
+                (new_key, new_value) => Some(Ty::Map(
+                    Arc::new(new_key.unwrap_or_else(|| key.as_ref().clone())),
+                    Arc::new(new_value.unwrap_or_else(|| value.as_ref().clone())),
+                )),
+            }
+        }
+        Ty::Iter(item, draft) => subst_ty_changed(item, subst)
+            .map(|new_item| Ty::Iter(Arc::new(new_item), draft.clone())),
+        Ty::Tuple(items) => {
+            let mut changed = false;
+            let substituted = items
+                .iter()
+                .map(|item| match subst_ty_changed(item, subst) {
+                    Some(new_item) => {
+                        changed = true;
+                        new_item
+                    }
+                    None => item.clone(),
+                })
+                .collect::<Vec<_>>();
+            changed.then(|| Ty::Tuple(Arc::from(substituted)))
+        }
+        Ty::Closure(params, ret) => {
+            let mut changed = false;
+            let substituted_params = params
+                .iter()
+                .map(|param| match subst_ty_changed(param, subst) {
+                    Some(new_param) => {
+                        changed = true;
+                        new_param
+                    }
+                    None => param.clone(),
+                })
+                .collect::<Vec<_>>();
+            let substituted_ret = subst_ty_changed(ret, subst);
+            if substituted_ret.is_some() {
+                changed = true;
+            }
+            changed.then(|| {
+                Ty::Closure(
+                    Arc::from(substituted_params),
+                    Arc::new(substituted_ret.unwrap_or_else(|| ret.as_ref().clone())),
+                )
+            })
+        }
+        _ => None,
     }
 }
 
 #[derive(Clone)]
 struct FnSig {
-    params: Vec<Ty>,
+    params: Arc<[Ty]>,
     ret: Ty,
     variadic: bool,
     /// Generic parameters (with bounds) declared on this function, used to check
     /// bound satisfaction at call sites. Empty for non-generic fns and for
     /// methods/trait signatures (where call-site checking is not yet done).
-    generics: Vec<GenericParam>,
-    generic_bounds: HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
+    generics: Arc<[GenericParam]>,
+    generic_bounds: Arc<HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>>,
 }
 
 /// Type-derived facts the backend needs: the sets of `/` and `%` expressions
@@ -735,9 +801,9 @@ impl TypeInfo {
 #[derive(Debug, Clone)]
 enum VariantPayload {
     /// Tuple variant element types, positionally aligned with the pattern.
-    Tuple(Vec<Ty>),
+    Tuple(Arc<[Ty]>),
     /// Struct variant field types, keyed by field name.
-    Struct(Vec<(String, Ty)>),
+    Struct(Arc<[(String, Ty)]>),
 }
 
 /// Payload element types for a built-in refutable pattern (`Some(x)`, `Ok(v)`,
@@ -814,18 +880,18 @@ pub fn check_resolved_diagnostics(
     }
 }
 
-struct Tc {
-    hir: crate::hir::ResolvedHir,
+struct Tc<'hir> {
+    hir: &'hir crate::hir::ResolvedHir,
     /// Resolved function declaration -> signature. Calls consume the target
     /// selected by name resolution; the type checker never reconstructs it from
     /// source path strings.
-    fn_sigs: HashMap<crate::hir::DefId, FnSig>,
+    fn_sigs: HashMap<crate::hir::DefId, Arc<FnSig>>,
     /// Resolved struct declaration -> fields.
     struct_defs: HashMap<crate::hir::DefId, Vec<(String, Ty, SourceRange)>>,
     /// Resolved enum variant declaration -> payload.
     variant_payloads: HashMap<crate::hir::DefId, VariantPayload>,
     /// Resolved impl/trait method declaration -> callable signature.
-    method_sigs: HashMap<crate::hir::DefId, FnSig>,
+    method_sigs: HashMap<crate::hir::DefId, Arc<FnSig>>,
     /// Generic parameters in scope for the function being checked: name -> the
     /// trait names it is bounded by. Set on entry to each `check_fn`.
     gen_bounds: HashMap<GenericParamId, Vec<crate::hir::TraitTarget>>,
@@ -862,10 +928,10 @@ struct Tc {
     contains: HashMap<ExprId, ContainsKind>,
 }
 
-impl Tc {
-    fn new(prog: &Program, hir: &crate::hir::ResolvedHir) -> Tc {
+impl<'hir> Tc<'hir> {
+    fn new(prog: &Program, hir: &'hir crate::hir::ResolvedHir) -> Tc<'hir> {
         let mut tc = Tc {
-            hir: hir.clone(),
+            hir,
             fn_sigs: HashMap::new(),
             struct_defs: HashMap::new(),
             variant_payloads: HashMap::new(),
@@ -904,11 +970,11 @@ impl Tc {
 
     fn sig_of(&self, params: &[Param], ret: Option<&Type>) -> FnSig {
         FnSig {
-            params: params.iter().map(|p| self.ty_of(&p.ty)).collect(),
+            params: Arc::from(params.iter().map(|p| self.ty_of(&p.ty)).collect::<Vec<_>>()),
             ret: ret.map(|t| self.ty_of(t)).unwrap_or(Ty::Unit),
             variadic: false,
-            generics: Vec::new(),
-            generic_bounds: HashMap::new(),
+            generics: Arc::from(Vec::<GenericParam>::new()),
+            generic_bounds: Arc::new(HashMap::new()),
         }
     }
 
@@ -967,7 +1033,7 @@ impl Tc {
     fn named_type(&self, definition: crate::hir::DefId) -> Ty {
         Ty::Named {
             def: definition,
-            name: self.hir.definition(definition).name.clone(),
+            name: Arc::from(self.hir.definition(definition).name.as_str()),
         }
     }
 
@@ -982,11 +1048,11 @@ impl Tc {
                 Item::Fn(f) => {
                     self.set_gen_bounds(&f.generics);
                     let mut sig = self.sig_of(&f.params, f.ret.as_ref());
-                    sig.generic_bounds = self.gen_bounds.clone();
+                    sig.generic_bounds = Arc::new(self.gen_bounds.clone());
                     self.gen_bounds.clear();
-                    sig.generics = f.generics.clone();
+                    sig.generics = Arc::from(f.generics.clone());
                     if let Some(&definition) = self.hir.module(module).scope.values.get(&f.name) {
-                        self.fn_sigs.insert(definition, sig);
+                        self.fn_sigs.insert(definition, Arc::new(sig));
                     }
                 }
                 Item::Struct(structure) => {
@@ -1021,15 +1087,15 @@ impl Tc {
                             };
                             let payload = match &variant.kind {
                                 VariantKind::Unit => continue,
-                                VariantKind::Tuple(types) => VariantPayload::Tuple(
-                                    types.iter().map(|ty| self.ty_of(ty)).collect(),
-                                ),
-                                VariantKind::Struct(fields) => VariantPayload::Struct(
+                                VariantKind::Tuple(types) => VariantPayload::Tuple(Arc::from(
+                                    types.iter().map(|ty| self.ty_of(ty)).collect::<Vec<_>>(),
+                                )),
+                                VariantKind::Struct(fields) => VariantPayload::Struct(Arc::from(
                                     fields
                                         .iter()
                                         .map(|field| (field.name.clone(), self.ty_of(&field.ty)))
-                                        .collect(),
-                                ),
+                                        .collect::<Vec<_>>(),
+                                )),
                             };
                             self.variant_payloads.insert(definition, payload);
                         }
@@ -1041,13 +1107,13 @@ impl Tc {
                         self.set_gen_bounds(&ef.generics);
                         let mut sig = self.sig_of(&ef.params, ef.ret.as_ref());
                         sig.variadic = ef.variadic;
-                        sig.generic_bounds = self.gen_bounds.clone();
-                        sig.generics = ef.generics.clone();
+                        sig.generic_bounds = Arc::new(self.gen_bounds.clone());
+                        sig.generics = Arc::from(ef.generics.clone());
                         self.gen_bounds.clear();
                         if let Some(&definition) =
                             self.hir.module(module).scope.values.get(&ef.name)
                         {
-                            self.fn_sigs.insert(definition, sig);
+                            self.fn_sigs.insert(definition, Arc::new(sig));
                         }
                     }
                 }
@@ -1068,9 +1134,10 @@ impl Tc {
                                 merge_generics(&implementation.generics, &method.generics);
                             self.set_gen_bounds(&generics);
                             let mut signature = self.sig_of(&method.params, method.ret.as_ref());
-                            signature.generic_bounds = self.gen_bounds.clone();
+                            signature.generic_bounds = Arc::new(self.gen_bounds.clone());
                             self.gen_bounds.clear();
-                            signature.generics = generics;
+                            signature.generics = Arc::from(generics);
+                            let signature = Arc::new(signature);
                             self.fn_sigs.insert(definition, signature.clone());
                             self.method_sigs.insert(definition, signature);
                         }
@@ -1090,9 +1157,10 @@ impl Tc {
                         let generics = merge_generics(&trait_decl.generics, &method.generics);
                         self.set_gen_bounds(&generics);
                         let mut signature = self.sig_of(&method.params, method.ret.as_ref());
-                        signature.generic_bounds = self.gen_bounds.clone();
+                        signature.generic_bounds = Arc::new(self.gen_bounds.clone());
                         self.gen_bounds.clear();
-                        signature.generics = method.generics.clone();
+                        signature.generics = Arc::from(method.generics.clone());
+                        let signature = Arc::new(signature);
                         self.fn_sigs.insert(definition, signature.clone());
                         self.method_sigs.insert(definition, signature);
                     }
@@ -1130,10 +1198,20 @@ impl Tc {
             Type::Never => Ty::Never,
             Type::Ref { inner, .. } => self.ty_of(inner),
             Type::Function { params, ret } => Ty::Closure(
-                params.iter().map(|param| self.ty_of(param)).collect(),
-                Box::new(self.ty_of(ret)),
+                Arc::from(
+                    params
+                        .iter()
+                        .map(|param| self.ty_of(param))
+                        .collect::<Vec<_>>(),
+                ),
+                Arc::new(self.ty_of(ret)),
             ),
-            Type::Tuple(items) => Ty::Tuple(items.iter().map(|item| self.ty_of(item)).collect()),
+            Type::Tuple(items) => Ty::Tuple(Arc::from(
+                items
+                    .iter()
+                    .map(|item| self.ty_of(item))
+                    .collect::<Vec<_>>(),
+            )),
             Type::Path { id, name, args } => {
                 let arg = |i: usize| args.get(i).map(|t| self.ty_of(t)).unwrap_or(Ty::Unknown);
                 match self.hir.type_targets.get(id).copied() {
@@ -1153,16 +1231,16 @@ impl Tc {
                         Ty::Str
                     }
                     Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeVec)) => {
-                        Ty::Vec(Box::new(arg(0)))
+                        Ty::Vec(Arc::new(arg(0)))
                     }
                     Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeOption)) => {
-                        Ty::Option(Box::new(arg(0)))
+                        Ty::Option(Arc::new(arg(0)))
                     }
                     Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeResult)) => {
-                        Ty::Result(Box::new(arg(0)), Box::new(arg(1)))
+                        Ty::Result(Arc::new(arg(0)), Arc::new(arg(1)))
                     }
                     Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeHashMap)) => {
-                        Ty::Map(Box::new(arg(0)), Box::new(arg(1)))
+                        Ty::Map(Arc::new(arg(0)), Arc::new(arg(1)))
                     }
                     Some(crate::hir::TypeTarget::Item(definition))
                         if matches!(
@@ -1177,12 +1255,12 @@ impl Tc {
                     {
                         Ty::Trait {
                             def: definition,
-                            name: self.hir.definition(definition).name.clone(),
+                            name: Arc::from(self.hir.definition(definition).name.as_str()),
                         }
                     }
                     Some(crate::hir::TypeTarget::Generic(id)) => Ty::Generic {
                         id,
-                        name: name.clone(),
+                        name: Arc::from(name.as_str()),
                     },
                     _ => Ty::Unknown,
                 }
@@ -1284,7 +1362,7 @@ impl Tc {
                         }
                     }
                 }
-                Ty::Vec(Box::new(elem))
+                Ty::Vec(Arc::new(elem))
             }
             Ty::Map(k, v) => {
                 let mut kt = (**k).clone();
@@ -1308,7 +1386,7 @@ impl Tc {
                         break;
                     }
                 }
-                Ty::Map(Box::new(kt), Box::new(vt))
+                Ty::Map(Arc::new(kt), Arc::new(vt))
             }
             _ => ty.clone(),
         }
@@ -1551,7 +1629,7 @@ impl Tc {
                 let iter_ty = self.infer(iter);
                 let elem = match iter_ty {
                     Ty::Iter(item, draft) => {
-                        let item = *item;
+                        let item = item.as_ref().clone();
                         self.finish_iter_plan(
                             &draft,
                             IterConsumerKind::For,
@@ -1563,7 +1641,7 @@ impl Tc {
                         item
                     }
                     Ty::Vec(item) => {
-                        let item = *item;
+                        let item = item.as_ref().clone();
                         let draft = self.iter_source(IterSourceKind::Vec, iter.span, &item);
                         self.finish_iter_plan(
                             &draft,
@@ -1734,17 +1812,18 @@ impl Tc {
             inferred_ret = declared;
         }
 
-        Ty::Closure(param_tys, Box::new(inferred_ret))
+        Ty::Closure(Arc::from(param_tys), Arc::new(inferred_ret))
     }
 
     fn iter_source(&self, kind: IterSourceKind, range: SourceRange, item: &Ty) -> IterDraft {
         IterDraft {
-            source: IterSource {
+            source: Arc::new(IterSource {
                 kind,
                 range,
                 item_type: item.name(),
-            },
-            adapters: Vec::new(),
+            }),
+            parent: None,
+            adapter: None,
         }
     }
 
@@ -1757,11 +1836,20 @@ impl Tc {
         item: &Ty,
         output: &Ty,
     ) {
+        let mut adapters = Vec::new();
+        let mut current = Some(draft);
+        while let Some(node) = current {
+            if let Some(adapter) = &node.adapter {
+                adapters.push(adapter.clone());
+            }
+            current = node.parent.as_deref();
+        }
+        adapters.reverse();
         self.iter_plans.insert(
             consumer_expression,
             IterPlan {
-                source: draft.source.clone(),
-                adapters: draft.adapters.clone(),
+                source: draft.source.as_ref().clone(),
+                adapters,
                 consumer,
                 consumer_range,
                 item_type: item.name(),
@@ -1862,7 +1950,7 @@ impl Tc {
             };
             return Some(Ty::Iter(
                 item.clone(),
-                Box::new(self.iter_source(kind, span, item)),
+                Arc::new(self.iter_source(kind, span, item)),
             ));
         }
 
@@ -1876,7 +1964,7 @@ impl Tc {
                 Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
                 _ => Ty::Unknown,
             };
-            return Some(Ty::Option(Box::new(ret_ty)));
+            return Some(Ty::Option(Arc::new(ret_ty)));
         }
 
         // Result<T, E>::map(fn) -> Result<U, E>
@@ -1888,7 +1976,7 @@ impl Tc {
                 Ty::Closure(params, ret) if params.len() == 1 => (**ret).clone(),
                 _ => Ty::Unknown,
             };
-            return Some(Ty::Result(Box::new(ret_ty), error.clone()));
+            return Some(Ty::Result(Arc::new(ret_ty), error.clone()));
         }
 
         let Ty::Iter(item, draft) = recv else {
@@ -1933,14 +2021,20 @@ impl Tc {
             _ => None,
         };
         let append = |kind: IterAdapterKind, output: Ty| {
-            let mut next = (**draft).clone();
-            next.adapters.push(IterAdapter {
-                kind,
-                range: span,
-                input_type: item.name(),
-                output_type: output.name(),
-            });
-            Ty::Iter(Box::new(output), Box::new(next))
+            let output_type = output.name();
+            Ty::Iter(
+                Arc::new(output),
+                Arc::new(IterDraft {
+                    source: draft.source.clone(),
+                    parent: Some(draft.clone()),
+                    adapter: Some(IterAdapter {
+                        kind,
+                        range: span,
+                        input_type: item.name(),
+                        output_type,
+                    }),
+                }),
+            )
         };
 
         match method {
@@ -1983,7 +2077,7 @@ impl Tc {
             }
             "filter_map" if args.len() == 1 => {
                 let mapped = match closure_ret(0) {
-                    Some(Ty::Option(inner)) => *inner,
+                    Some(Ty::Option(inner)) => inner.as_ref().clone(),
                     Some(ret) if ret.is_concrete() => {
                         self.err(
                             args[0].span,
@@ -2014,7 +2108,7 @@ impl Tc {
             }
             "enumerate" if args.is_empty() => Some(append(
                 IterAdapterKind::Enumerate,
-                Ty::Tuple(vec![Ty::I64, (**item).clone()]),
+                Ty::Tuple(Arc::from(vec![Ty::I64, (**item).clone()])),
             )),
             "take" | "skip" if args.len() == 1 => {
                 let count = &arg_tys[0];
@@ -2060,7 +2154,7 @@ impl Tc {
                     match self.ty_of(&type_args[0]) {
                         Ty::Vec(target) => {
                             let target = if matches!(*target, Ty::Unknown) {
-                                Box::new((**item).clone())
+                                Arc::new((**item).clone())
                             } else {
                                 target
                             };
@@ -2084,7 +2178,7 @@ impl Tc {
                                     target.name()
                                 ),
                             );
-                            Ty::Vec(Box::new(Ty::Unknown))
+                            Ty::Vec(Arc::new(Ty::Unknown))
                         }
                     }
                 } else {
@@ -2232,12 +2326,12 @@ impl Tc {
                     match target {
                         crate::hir::ResolvedTarget::Builtin(
                             rua_core::BuiltinId::VariantOptionNone,
-                        ) => return Ty::Option(Box::new(Ty::Unknown)),
+                        ) => return Ty::Option(Arc::new(Ty::Unknown)),
                         crate::hir::ResolvedTarget::Builtin(
                             rua_core::BuiltinId::VariantResultOk
                             | rua_core::BuiltinId::VariantResultErr,
                         ) => {
-                            return Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown));
+                            return Ty::Result(Arc::new(Ty::Unknown), Arc::new(Ty::Unknown));
                         }
                         _ => {}
                     }
@@ -2340,7 +2434,7 @@ impl Tc {
                 let receiver_ty = self.infer(recv);
                 let (rt, optional_chain) = if *optional {
                     match receiver_ty {
-                        Ty::Option(item) => (*item, true),
+                        Ty::Option(item) => (item.as_ref().clone(), true),
                         Ty::Unknown => (Ty::Unknown, true),
                         other => {
                             self.err(
@@ -2453,7 +2547,7 @@ impl Tc {
                             );
                             return subst_ty(&signature.ret, &subst);
                         }
-                        return signature.ret;
+                        return signature.ret.clone();
                     }
                     if standard_method.is_some()
                         && matches!(rt, Ty::Str)
@@ -2466,8 +2560,8 @@ impl Tc {
                             IterSourceKind::StringSplit
                         };
                         return Ty::Iter(
-                            Box::new(Ty::Str),
-                            Box::new(self.iter_source(kind, e.span, &Ty::Str)),
+                            Arc::new(Ty::Str),
+                            Arc::new(self.iter_source(kind, e.span, &Ty::Str)),
                         );
                     }
                     if standard_method.is_some()
@@ -2490,7 +2584,7 @@ impl Tc {
                     if matches!(result, Ty::Option(_)) {
                         result
                     } else {
-                        Ty::Option(Box::new(result))
+                        Ty::Option(Arc::new(result))
                     }
                 } else {
                     result
@@ -2505,7 +2599,7 @@ impl Tc {
                 let base_ty = self.infer(base);
                 let (bt, optional_chain) = if *optional {
                     match base_ty {
-                        Ty::Option(item) => (*item, true),
+                        Ty::Option(item) => (item.as_ref().clone(), true),
                         Ty::Unknown => (Ty::Unknown, true),
                         other => {
                             self.err(
@@ -2552,7 +2646,7 @@ impl Tc {
                     if matches!(result, Ty::Option(_)) {
                         result
                     } else {
-                        Ty::Option(Box::new(result))
+                        Ty::Option(Arc::new(result))
                     }
                 } else {
                     result
@@ -2562,7 +2656,7 @@ impl Tc {
                 let bt = self.infer(base);
                 self.infer(index);
                 match bt {
-                    Ty::Vec(t) => *t,
+                    Ty::Vec(t) => t.as_ref().clone(),
                     _ => Ty::Unknown,
                 }
             }
@@ -2590,8 +2684,8 @@ impl Tc {
                     IterSourceKind::ExclusiveRange
                 };
                 Ty::Iter(
-                    Box::new(Ty::I64),
-                    Box::new(self.iter_source(kind, e.span, &Ty::I64)),
+                    Arc::new(Ty::I64),
+                    Arc::new(self.iter_source(kind, e.span, &Ty::I64)),
                 )
             }
             ExprKind::StructLit { path, fields } => {
@@ -2650,7 +2744,7 @@ impl Tc {
                         value_ty = join(&value_ty, &current_value);
                     }
                 }
-                Ty::Map(Box::new(key_ty), Box::new(value_ty))
+                Ty::Map(Arc::new(key_ty), Arc::new(value_ty))
             }
             ExprKind::Try { expr } => {
                 // `e?` unwraps a Result<T,_> or Option<T> to T.
@@ -2847,7 +2941,7 @@ impl Tc {
                 element_ty = join(&element_ty, &actual);
             }
         }
-        Ty::Vec(Box::new(element_ty))
+        Ty::Vec(Arc::new(element_ty))
     }
 
     fn infer_binary(&mut self, op: BinOp, l: &Ty, r: &Ty, sp: SourceRange) -> Ty {
@@ -3065,16 +3159,16 @@ impl Tc {
             let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
             match builtin {
                 rua_core::BuiltinId::VariantOptionSome => {
-                    return Ty::Option(Box::new(a0()));
+                    return Ty::Option(Arc::new(a0()));
                 }
                 rua_core::BuiltinId::VariantOptionNone => {
-                    return Ty::Option(Box::new(Ty::Unknown));
+                    return Ty::Option(Arc::new(Ty::Unknown));
                 }
                 rua_core::BuiltinId::VariantResultOk => {
-                    return Ty::Result(Box::new(a0()), Box::new(Ty::Unknown));
+                    return Ty::Result(Arc::new(a0()), Arc::new(Ty::Unknown));
                 }
                 rua_core::BuiltinId::VariantResultErr => {
-                    return Ty::Result(Box::new(Ty::Unknown), Box::new(a0()));
+                    return Ty::Result(Arc::new(Ty::Unknown), Arc::new(a0()));
                 }
                 _ => {}
             }
@@ -3269,7 +3363,7 @@ impl Tc {
         &self,
         generic: GenericParamId,
         method: &str,
-    ) -> Option<(String, FnSig)> {
+    ) -> Option<(String, Arc<FnSig>)> {
         let bounds = self.gen_bounds.get(&generic)?;
         for target in bounds {
             let crate::hir::TraitTarget::Item(trait_id) = target else {
@@ -3478,10 +3572,10 @@ impl Tc {
     /// Tuple-variant payload element types for pattern `path` against scrutinee
     /// `ty`: built-in `Some`/`Ok`/`Err` first, then user enum variants (when the
     /// scrutinee is typed `Ty::Named(enum)`). `None` → bind elements as Unknown.
-    fn tuple_payload(&self, id: PatternId, _path: &[String], ty: &Ty) -> Option<Vec<Ty>> {
+    fn tuple_payload(&self, id: PatternId, _path: &[String], ty: &Ty) -> Option<Arc<[Ty]>> {
         let target = self.resolved_pattern_variant(id);
         if let Some(crate::hir::ResolvedTarget::Builtin(builtin)) = target {
-            return builtin_payload(builtin, ty);
+            return builtin_payload(builtin, ty).map(Arc::from);
         }
         if let Some((owner, variant)) =
             target.and_then(|target| self.resolved_enum_variant_ids(target))
@@ -3501,7 +3595,7 @@ impl Tc {
         id: PatternId,
         _path: &[String],
         ty: &Ty,
-    ) -> Option<Vec<(String, Ty)>> {
+    ) -> Option<Arc<[(String, Ty)]>> {
         let target = self.resolved_pattern_variant(id);
         if let Some((owner, variant)) =
             target.and_then(|target| self.resolved_enum_variant_ids(target))
@@ -3532,27 +3626,28 @@ mod tests {
     use super::*;
     use crate::parser;
 
-    /// Run type-checking and return the internal tables for inspection.
-    fn run_tc(src: &str) -> Tc {
+    /// Run type-checking while the borrowed HIR remains alive for inspection.
+    fn with_tc<R>(src: &str, f: impl for<'a> FnOnce(&Tc<'a>) -> R) -> R {
         let program = parser::parse(src).unwrap();
         let hir = crate::hir::resolve(&program);
         let mut tc = Tc::new(&program, &hir);
         tc.run(&program);
-        tc
+        f(&tc)
     }
 
-    fn root_type(tc: &Tc, name: &str) -> crate::hir::DefId {
+    fn root_type(tc: &Tc<'_>, name: &str) -> crate::hir::DefId {
         tc.hir.module(tc.hir.root).scope.types[name]
     }
 
     #[test]
     fn struct_fields_are_keyed_by_type_identity() {
-        let tc = run_tc("struct Point { x: f64, y: i64 }");
-        let point = root_type(&tc, "Point");
-        let fields = &tc.struct_defs[&point];
-        assert_eq!(fields.len(), 2);
-        assert_eq!((&fields[0].0, &fields[0].1), (&"x".to_string(), &Ty::F64));
-        assert_eq!((&fields[1].0, &fields[1].1), (&"y".to_string(), &Ty::I64));
+        with_tc("struct Point { x: f64, y: i64 }", |tc| {
+            let point = root_type(tc, "Point");
+            let fields = &tc.struct_defs[&point];
+            assert_eq!(fields.len(), 2);
+            assert_eq!((&fields[0].0, &fields[0].1), (&"x".to_string(), &Ty::F64));
+            assert_eq!((&fields[1].0, &fields[1].1), (&"y".to_string(), &Ty::I64));
+        });
     }
 
     #[test]
@@ -3564,12 +3659,16 @@ impl Point {
     fn move_to(&mut self, nx: f64, ny: f64) {}
 }
 "#;
-        let tc = run_tc(src);
-        let point = root_type(&tc, "Point");
-        let dist = tc.hir.associated_items[&(point, "dist".to_string())];
-        let move_to = tc.hir.associated_items[&(point, "move_to".to_string())];
-        assert_eq!(tc.method_sigs[&dist].ret, Ty::F64);
-        assert_eq!(tc.method_sigs[&move_to].params, vec![Ty::F64, Ty::F64]);
+        with_tc(src, |tc| {
+            let point = root_type(tc, "Point");
+            let dist = tc.hir.associated_items[&(point, "dist".to_string())];
+            let move_to = tc.hir.associated_items[&(point, "move_to".to_string())];
+            assert_eq!(tc.method_sigs[&dist].ret, Ty::F64);
+            assert_eq!(
+                tc.method_sigs[&move_to].params.as_ref(),
+                &[Ty::F64, Ty::F64]
+            );
+        });
     }
 
     #[test]
@@ -3580,12 +3679,13 @@ trait Area {
     fn name(&self) -> String { "shape".to_string() }
 }
 "#;
-        let tc = run_tc(src);
-        let area_trait = root_type(&tc, "Area");
-        let area = tc.hir.trait_items[&(area_trait, "area".to_string())];
-        let name = tc.hir.trait_items[&(area_trait, "name".to_string())];
-        assert_eq!(tc.method_sigs[&area].ret, Ty::F64);
-        assert_eq!(tc.method_sigs[&name].ret, Ty::Str);
+        with_tc(src, |tc| {
+            let area_trait = root_type(tc, "Area");
+            let area = tc.hir.trait_items[&(area_trait, "area".to_string())];
+            let name = tc.hir.trait_items[&(area_trait, "name".to_string())];
+            assert_eq!(tc.method_sigs[&area].ret, Ty::F64);
+            assert_eq!(tc.method_sigs[&name].ret, Ty::Str);
+        });
     }
 
     #[test]
@@ -3600,12 +3700,13 @@ impl Shape for Circle {
     fn area(&self) -> f64 { 3.14 * self.r * self.r }
 }
 "#;
-        let tc = run_tc(src);
-        let shape = root_type(&tc, "Shape");
-        let circle = root_type(&tc, "Circle");
-        let trait_label = tc.hir.trait_items[&(shape, "label".to_string())];
-        let inherited = tc.hir.associated_items[&(circle, "label".to_string())];
-        assert_eq!(tc.hir.method_origins[&inherited], trait_label);
-        assert_eq!(tc.method_sigs[&inherited].ret, Ty::Str);
+        with_tc(src, |tc| {
+            let shape = root_type(tc, "Shape");
+            let circle = root_type(tc, "Circle");
+            let trait_label = tc.hir.trait_items[&(shape, "label".to_string())];
+            let inherited = tc.hir.associated_items[&(circle, "label".to_string())];
+            assert_eq!(tc.hir.method_origins[&inherited], trait_label);
+            assert_eq!(tc.method_sigs[&inherited].ret, Ty::Str);
+        });
     }
 }

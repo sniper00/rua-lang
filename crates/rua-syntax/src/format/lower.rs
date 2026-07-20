@@ -608,6 +608,7 @@ fn stmt_doc(s: &Stmt) -> Doc {
             Some(e) => Doc::concat([expr_inline(&e), Doc::text(";")]),
             None => Doc::Nil,
         },
+        Stmt::LuaBlock(block) => Doc::text(block.syntax().text().to_string()),
         Stmt::While(w) => {
             let body = w
                 .body()

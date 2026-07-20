@@ -4,7 +4,7 @@
 //! lowered conservatively: names that the caller cannot prove are types become
 //! [`Ty::Unknown`].
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use super::{DefId, TypeRef};
 
@@ -38,16 +38,16 @@ impl PrimitiveTy {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NamedTy {
     definition: DefId,
-    path: String,
-    args: Vec<Ty>,
+    path: Arc<str>,
+    args: Arc<[Ty]>,
 }
 
 impl NamedTy {
     pub fn new(definition: DefId, path: impl Into<String>, args: Vec<Ty>) -> Self {
         Self {
             definition,
-            path: path.into(),
-            args,
+            path: Arc::from(path.into()),
+            args: Arc::from(args),
         }
     }
 
@@ -93,14 +93,14 @@ impl GenericParamId {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenericParamTy {
     id: GenericParamId,
-    name: String,
+    name: Arc<str>,
 }
 
 impl GenericParamTy {
     pub fn new(id: GenericParamId, name: impl Into<String>) -> Self {
         Self {
             id,
-            name: name.into(),
+            name: Arc::from(name.into()),
         }
     }
 
@@ -117,16 +117,16 @@ impl GenericParamTy {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallableTy {
     target: Option<DefId>,
-    params: Vec<Ty>,
-    return_ty: Box<Ty>,
+    params: Arc<[Ty]>,
+    return_ty: Arc<Ty>,
 }
 
 impl CallableTy {
     pub fn new(params: Vec<Ty>, return_ty: Ty) -> Self {
         Self {
             target: None,
-            params,
-            return_ty: Box::new(return_ty),
+            params: Arc::from(params),
+            return_ty: Arc::new(return_ty),
         }
     }
 
@@ -154,14 +154,14 @@ pub enum Ty {
     Primitive(PrimitiveTy),
     Named(NamedTy),
     GenericParam(GenericParamTy),
-    Tuple(Vec<Ty>),
+    Tuple(Arc<[Ty]>),
     Function(CallableTy),
     Closure(CallableTy),
-    Vec(Box<Ty>),
-    HashMap(Box<Ty>, Box<Ty>),
-    Option(Box<Ty>),
-    Result(Box<Ty>, Box<Ty>),
-    Iterator(Box<Ty>),
+    Vec(Arc<Ty>),
+    HashMap(Arc<Ty>, Arc<Ty>),
+    Option(Arc<Ty>),
+    Result(Arc<Ty>, Arc<Ty>),
+    Iterator(Arc<Ty>),
     Unknown,
     Never,
 }
@@ -270,13 +270,13 @@ impl Ty {
                         Self::Named(NamedTy {
                             definition: left.definition,
                             path: left.path.clone(),
-                            args,
+                            args: Arc::from(args),
                         })
                     })
                     .unwrap_or(Self::Unknown)
             }
             (Self::Tuple(left), Self::Tuple(right)) => join_slices(left, right)
-                .map(Self::Tuple)
+                .map(|items| Self::Tuple(Arc::from(items)))
                 .unwrap_or(Self::Unknown),
             (Self::Function(left), Self::Function(right)) => join_callables(left, right)
                 .map(Self::Function)
@@ -288,20 +288,20 @@ impl Ty {
             | (Self::Closure(left), Self::Function(right)) => join_callables(left, right)
                 .map(Self::Function)
                 .unwrap_or(Self::Unknown),
-            (Self::Vec(left), Self::Vec(right)) => Self::Vec(Box::new(left.join(right))),
-            (Self::Option(left), Self::Option(right)) => Self::Option(Box::new(left.join(right))),
+            (Self::Vec(left), Self::Vec(right)) => Self::Vec(Arc::new(left.join(right))),
+            (Self::Option(left), Self::Option(right)) => Self::Option(Arc::new(left.join(right))),
             (Self::Iterator(left), Self::Iterator(right)) => {
-                Self::Iterator(Box::new(left.join(right)))
+                Self::Iterator(Arc::new(left.join(right)))
             }
             (Self::HashMap(left_key, left_value), Self::HashMap(right_key, right_value)) => {
                 Self::HashMap(
-                    Box::new(left_key.join(right_key)),
-                    Box::new(left_value.join(right_value)),
+                    Arc::new(left_key.join(right_key)),
+                    Arc::new(left_value.join(right_value)),
                 )
             }
             (Self::Result(left_ok, left_err), Self::Result(right_ok, right_err)) => Self::Result(
-                Box::new(left_ok.join(right_ok)),
-                Box::new(left_err.join(right_err)),
+                Arc::new(left_ok.join(right_ok)),
+                Arc::new(left_err.join(right_err)),
             ),
             _ => Self::Unknown,
         }
@@ -488,21 +488,21 @@ impl<'a> TypeLoweringContext<'a> {
         let builtin = match rua_core::builtin_type(&path) {
             Some(rua_core::BuiltinId::TypeString) if args.is_empty() => Some(Ty::STRING),
             Some(rua_core::BuiltinId::TypeOption) if args.len() == 1 => {
-                Some(Ty::Option(Box::new(args[0].clone())))
+                Some(Ty::Option(Arc::new(args[0].clone())))
             }
             Some(rua_core::BuiltinId::TypeResult) if args.len() == 2 => Some(Ty::Result(
-                Box::new(args[0].clone()),
-                Box::new(args[1].clone()),
+                Arc::new(args[0].clone()),
+                Arc::new(args[1].clone()),
             )),
             Some(rua_core::BuiltinId::TypeVec) if args.len() == 1 => {
-                Some(Ty::Vec(Box::new(args[0].clone())))
+                Some(Ty::Vec(Arc::new(args[0].clone())))
             }
             Some(rua_core::BuiltinId::TypeHashMap) if args.len() == 2 => Some(Ty::HashMap(
-                Box::new(args[0].clone()),
-                Box::new(args[1].clone()),
+                Arc::new(args[0].clone()),
+                Arc::new(args[1].clone()),
             )),
             Some(rua_core::BuiltinId::TypeIter) if args.len() == 1 => {
-                Some(Ty::Iterator(Box::new(args[0].clone())))
+                Some(Ty::Iterator(Arc::new(args[0].clone())))
             }
             _ => match path.as_str() {
                 "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
@@ -655,7 +655,7 @@ impl<'source, 'context> TypeParser<'source, 'context> {
                 return None;
             }
         }
-        Some(Ty::Tuple(items))
+        Some(Ty::Tuple(Arc::from(items)))
     }
 
     fn function(&mut self) -> Option<Ty> {
@@ -804,55 +804,125 @@ impl Substitution {
     }
 
     fn apply_with(&self, ty: &Ty, erase_unbound: bool) -> Ty {
+        self.apply_with_changed(ty, erase_unbound)
+            .unwrap_or_else(|| ty.clone())
+    }
+
+    fn apply_with_changed(&self, ty: &Ty, erase_unbound: bool) -> Option<Ty> {
         match ty {
             Ty::GenericParam(param) => match self.get(param.id()) {
-                Some(ty) => ty.clone(),
-                None if erase_unbound => Ty::Unknown,
-                None => ty.clone(),
+                Some(ty) => Some(ty.clone()),
+                None if erase_unbound => Some(Ty::Unknown),
+                None => None,
             },
-            Ty::Named(named) => Ty::Named(NamedTy {
-                definition: named.definition,
-                path: named.path.clone(),
-                args: named
+            Ty::Named(named) => {
+                let mut changed = false;
+                let args = named
                     .args
                     .iter()
-                    .map(|arg| self.apply_with(arg, erase_unbound))
-                    .collect(),
-            }),
-            Ty::Tuple(items) => Ty::Tuple(
-                items
+                    .map(|arg| match self.apply_with_changed(arg, erase_unbound) {
+                        Some(applied) => {
+                            changed = true;
+                            applied
+                        }
+                        None => arg.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                changed.then(|| {
+                    Ty::Named(NamedTy {
+                        definition: named.definition,
+                        path: named.path.clone(),
+                        args: Arc::from(args),
+                    })
+                })
+            }
+            Ty::Tuple(items) => {
+                let mut changed = false;
+                let items = items
                     .iter()
-                    .map(|item| self.apply_with(item, erase_unbound))
-                    .collect(),
-            ),
-            Ty::Function(callable) => Ty::Function(self.apply_callable(callable, erase_unbound)),
-            Ty::Closure(callable) => Ty::Closure(self.apply_callable(callable, erase_unbound)),
-            Ty::Vec(item) => Ty::Vec(Box::new(self.apply_with(item, erase_unbound))),
-            Ty::HashMap(key, value) => Ty::HashMap(
-                Box::new(self.apply_with(key, erase_unbound)),
-                Box::new(self.apply_with(value, erase_unbound)),
-            ),
-            Ty::Option(item) => Ty::Option(Box::new(self.apply_with(item, erase_unbound))),
-            Ty::Result(ok, error) => Ty::Result(
-                Box::new(self.apply_with(ok, erase_unbound)),
-                Box::new(self.apply_with(error, erase_unbound)),
-            ),
-            Ty::Iterator(item) => Ty::Iterator(Box::new(self.apply_with(item, erase_unbound))),
-            Ty::Primitive(_) | Ty::Unknown | Ty::Never => ty.clone(),
+                    .map(|item| match self.apply_with_changed(item, erase_unbound) {
+                        Some(applied) => {
+                            changed = true;
+                            applied
+                        }
+                        None => item.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                changed.then(|| Ty::Tuple(Arc::from(items)))
+            }
+            Ty::Function(callable) => self
+                .apply_callable_changed(callable, erase_unbound)
+                .map(Ty::Function),
+            Ty::Closure(callable) => self
+                .apply_callable_changed(callable, erase_unbound)
+                .map(Ty::Closure),
+            Ty::Vec(item) => self
+                .apply_with_changed(item, erase_unbound)
+                .map(|item| Ty::Vec(Arc::new(item))),
+            Ty::HashMap(key, value) => {
+                let applied_key = self.apply_with_changed(key, erase_unbound);
+                let applied_value = self.apply_with_changed(value, erase_unbound);
+                match (applied_key, applied_value) {
+                    (None, None) => None,
+                    (applied_key, applied_value) => Some(Ty::HashMap(
+                        Arc::new(applied_key.unwrap_or_else(|| key.as_ref().clone())),
+                        Arc::new(applied_value.unwrap_or_else(|| value.as_ref().clone())),
+                    )),
+                }
+            }
+            Ty::Option(item) => self
+                .apply_with_changed(item, erase_unbound)
+                .map(|item| Ty::Option(Arc::new(item))),
+            Ty::Result(ok, error) => {
+                let applied_ok = self.apply_with_changed(ok, erase_unbound);
+                let applied_error = self.apply_with_changed(error, erase_unbound);
+                match (applied_ok, applied_error) {
+                    (None, None) => None,
+                    (applied_ok, applied_error) => Some(Ty::Result(
+                        Arc::new(applied_ok.unwrap_or_else(|| ok.as_ref().clone())),
+                        Arc::new(applied_error.unwrap_or_else(|| error.as_ref().clone())),
+                    )),
+                }
+            }
+            Ty::Iterator(item) => self
+                .apply_with_changed(item, erase_unbound)
+                .map(|item| Ty::Iterator(Arc::new(item))),
+            Ty::Primitive(_) | Ty::Unknown | Ty::Never => None,
         }
     }
 
-    fn apply_callable(&self, callable: &CallableTy, erase_unbound: bool) -> CallableTy {
+    fn apply_callable_changed(
+        &self,
+        callable: &CallableTy,
+        erase_unbound: bool,
+    ) -> Option<CallableTy> {
+        let mut changed = false;
+        let params = callable
+            .params
+            .iter()
+            .map(
+                |param| match self.apply_with_changed(param, erase_unbound) {
+                    Some(applied) => {
+                        changed = true;
+                        applied
+                    }
+                    None => param.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let return_ty = self.apply_with_changed(&callable.return_ty, erase_unbound);
+        if return_ty.is_some() {
+            changed = true;
+        }
+        if !changed {
+            return None;
+        }
         let mut applied = CallableTy::new(
-            callable
-                .params
-                .iter()
-                .map(|param| self.apply_with(param, erase_unbound))
-                .collect(),
-            self.apply_with(&callable.return_ty, erase_unbound),
+            params,
+            return_ty.unwrap_or_else(|| callable.return_ty.as_ref().clone()),
         );
         applied.target = callable.target;
-        applied
+        Some(applied)
     }
 }
 
@@ -975,6 +1045,8 @@ fn unify_callables(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
         CallableTy, GenericParamId, GenericParamTy, PrimitiveTy, Substitution, Ty,
         TypeLoweringContext, UnifyResult, unify,
@@ -996,14 +1068,14 @@ mod tests {
         assert_eq!(context.lower_syntax("&mut String"), Ty::STRING);
         assert_eq!(
             context.lower_syntax("Vec<Option<Result<T, String>>>"),
-            Ty::Vec(Box::new(Ty::Option(Box::new(Ty::Result(
-                Box::new(generic(t, "T")),
-                Box::new(Ty::STRING),
+            Ty::Vec(Arc::new(Ty::Option(Arc::new(Ty::Result(
+                Arc::new(generic(t, "T")),
+                Arc::new(Ty::STRING),
             )))))
         );
         assert_eq!(
             context.lower_syntax("Box<(i64, f64)>"),
-            Ty::Tuple(vec![Ty::I64, Ty::F64])
+            Ty::Tuple(Arc::from(vec![Ty::I64, Ty::F64]))
         );
     }
 
@@ -1086,12 +1158,12 @@ mod tests {
         let t = GenericParamId::new(owner, 0);
         let e = GenericParamId::new(owner, 1);
         let expected = Ty::Function(CallableTy::new(
-            vec![Ty::Vec(Box::new(generic(t, "T")))],
-            Ty::Option(Box::new(generic(t, "T"))),
+            vec![Ty::Vec(Arc::new(generic(t, "T")))],
+            Ty::Option(Arc::new(generic(t, "T"))),
         ));
         let actual = Ty::Closure(CallableTy::new(
-            vec![Ty::Vec(Box::new(Ty::I64))],
-            Ty::Option(Box::new(Ty::I64)),
+            vec![Ty::Vec(Arc::new(Ty::I64))],
+            Ty::Option(Arc::new(Ty::I64)),
         ));
         let mut substitution = Substitution::new();
         assert_eq!(
@@ -1101,10 +1173,10 @@ mod tests {
         assert_eq!(substitution.get(t), Some(&Ty::I64));
         assert_eq!(
             substitution.instantiate(&Ty::Result(
-                Box::new(generic(t, "T")),
-                Box::new(generic(e, "E")),
+                Arc::new(generic(t, "T")),
+                Arc::new(generic(e, "E")),
             )),
-            Ty::Result(Box::new(Ty::I64), Box::new(Ty::Unknown))
+            Ty::Result(Arc::new(Ty::I64), Arc::new(Ty::Unknown))
         );
 
         let mut cyclic = Substitution::new();
@@ -1119,8 +1191,8 @@ mod tests {
     #[test]
     fn mismatch_does_not_partially_update_substitution() {
         let t = GenericParamId::new(DefId::new(4), 0);
-        let expected = Ty::Tuple(vec![generic(t, "T"), Ty::BOOL]);
-        let actual = Ty::Tuple(vec![Ty::I64, Ty::STRING]);
+        let expected = Ty::Tuple(Arc::from(vec![generic(t, "T"), Ty::BOOL]));
+        let actual = Ty::Tuple(Arc::from(vec![Ty::I64, Ty::STRING]));
         let mut substitution = Substitution::new();
         assert_eq!(
             unify(&expected, &actual, &mut substitution),

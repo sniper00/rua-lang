@@ -1,6 +1,9 @@
 //! Declaration-derived standard-library member index.
 
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 use rua_core::StdSymbolId;
 
@@ -10,7 +13,7 @@ use super::{
 };
 use crate::base::TextRange;
 
-static STANDARD_LIBRARY: OnceLock<Result<StdLibraryIndex, String>> = OnceLock::new();
+static STANDARD_LIBRARY: OnceLock<Result<Arc<StdLibraryIndex>, String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StdMemberKind {
@@ -205,8 +208,35 @@ impl StdMember {
         self.documentation.as_deref()
     }
 
+    pub fn signature(&self) -> String {
+        let return_type = self
+            .return_type
+            .as_deref()
+            .map(|ty| format!(" -> {ty}"))
+            .unwrap_or_default();
+        format!("fn {}({}){return_type}", self.name, self.params.join(", "))
+    }
+
     pub fn instantiate(&self, owner_ty: &Ty) -> Option<Ty> {
         let (_, owner_args) = std_owner(owner_ty)?;
+        self.instantiate_with_owner_args(Some(owner_ty), owner_args)
+    }
+
+    /// Instantiate an associated member owned by a standard declaration that
+    /// is not represented by one of the analysis' native container types.
+    /// These declarations currently have no generic owner arguments (for
+    /// example `Annotations`), but still need the same callable lowering as
+    /// built-in members so IDE resolution can point at them.
+    pub fn instantiate_named(&self) -> Option<Ty> {
+        self.owner_generics.is_empty().then_some(())?;
+        self.instantiate_with_owner_args(None, Vec::new())
+    }
+
+    fn instantiate_with_owner_args(
+        &self,
+        owner_ty: Option<&Ty>,
+        owner_args: Vec<Ty>,
+    ) -> Option<Ty> {
         let aliases = self.owner_generics.iter().cloned().zip(owner_args).chain(
             self.method_generics
                 .iter()
@@ -215,13 +245,13 @@ impl StdMember {
         );
         let lowering = TypeLoweringContext::new().with_type_aliases(aliases);
         match (self.kind, self.variant_kind) {
-            (StdMemberKind::Variant, Some(VariantKind::Unit)) => Some(owner_ty.clone()),
+            (StdMemberKind::Variant, Some(VariantKind::Unit)) => Some(owner_ty?.clone()),
             (StdMemberKind::Variant, _) => Some(Ty::Function(CallableTy::new(
                 self.params
                     .iter()
                     .map(|parameter| lowering.lower_syntax(parameter))
                     .collect(),
-                owner_ty.clone(),
+                owner_ty?.clone(),
             ))),
             (StdMemberKind::Method | StdMemberKind::AssociatedFunction, _) => {
                 Some(Ty::Function(CallableTy::new(
@@ -280,18 +310,35 @@ impl StdLibraryIndex {
             .iter()
             .filter(move |member| owner.is_some_and(|owner| member.owner == owner))
     }
+
+    pub fn members_for_owner<'a>(
+        &'a self,
+        owner: &'a str,
+    ) -> impl Iterator<Item = &'a StdMember> + 'a {
+        self.members
+            .iter()
+            .filter(move |member| member.owner == owner)
+    }
 }
 
 pub fn standard_library() -> Result<&'static StdLibraryIndex, &'static str> {
-    STANDARD_LIBRARY
-        .get_or_init(build_standard_library)
-        .as_ref()
-        .map_err(String::as_str)
+    match STANDARD_LIBRARY.get_or_init(build_standard_library) {
+        Ok(index) => Ok(index.as_ref()),
+        Err(error) => Err(error.as_str()),
+    }
 }
 
-fn build_standard_library() -> Result<StdLibraryIndex, String> {
+/// Shared read-only standard-library metadata for cache owners.
+pub fn shared_standard_library() -> Result<Arc<StdLibraryIndex>, &'static str> {
+    match STANDARD_LIBRARY.get_or_init(build_standard_library) {
+        Ok(index) => Ok(Arc::clone(index)),
+        Err(error) => Err(error.as_str()),
+    }
+}
+
+fn build_standard_library() -> Result<Arc<StdLibraryIndex>, String> {
     let library = rua_resources::embedded_std().map_err(ToString::to_string)?;
-    StdLibraryIndex::build(library)
+    StdLibraryIndex::build(library).map(Arc::new)
 }
 
 impl StdLibraryIndex {
@@ -517,7 +564,7 @@ mod tests {
     fn standard_members_come_from_ruai_declarations() {
         let library = standard_library().expect("standard member index");
         let names = library
-            .members_for(&Ty::Option(Box::new(Ty::I64)))
+            .members_for(&Ty::Option(Arc::new(Ty::I64)))
             .map(StdMember::name)
             .collect::<Vec<_>>();
         assert_eq!(
@@ -535,7 +582,7 @@ mod tests {
         );
 
         let names = library
-            .members_for(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
+            .members_for(&Ty::Result(Arc::new(Ty::I64), Arc::new(Ty::STRING)))
             .map(StdMember::name)
             .collect::<Vec<_>>();
         assert_eq!(

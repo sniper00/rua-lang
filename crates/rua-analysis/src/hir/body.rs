@@ -899,6 +899,12 @@ impl BodyLowerer {
                     has_semicolon: statement.has_semicolon(),
                 }
             }
+            AstStmt::LuaBlock(statement) => Statement::Expr {
+                // Embedded Lua is compiled by `ruac` but has no Rua
+                // expression semantics in the analysis model.
+                expr: self.alloc_expr(Expr::Missing, node_range(statement.syntax())),
+                has_semicolon: true,
+            },
             AstStmt::Return(statement) => {
                 let value = match statement.value() {
                     Some(value) => Some(self.lower_expr(value)),

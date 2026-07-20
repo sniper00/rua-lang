@@ -60,7 +60,7 @@ fn main() -> i64 {
 }
 "#;
     let fixture = single_file_fixture(SOURCE, "main");
-    assert_eq!(binding_ty(&fixture, "doubled"), Ty::Vec(Box::new(Ty::I64)));
+    assert_eq!(binding_ty(&fixture, "doubled"), Ty::Vec(Arc::new(Ty::I64)));
     assert!(fixture.inference.diagnostics().is_empty());
 }
 
@@ -92,7 +92,7 @@ fn main() -> Vec<i64> {
     let fixture = single_file_fixture(SOURCE, "main");
     assert_eq!(
         fixture.inference.type_of_expr(fixture.body.root_expr()),
-        Some(&Ty::Vec(Box::new(Ty::I64)))
+        Some(&Ty::Vec(Arc::new(Ty::I64)))
     );
     assert!(fixture.inference.diagnostics().is_empty());
 }
@@ -123,7 +123,7 @@ fn main() -> i64 {
 }
 "#;
     let fixture = single_file_fixture(SOURCE, "main");
-    assert_eq!(binding_ty(&fixture, "filtered"), Ty::Vec(Box::new(Ty::I64)));
+    assert_eq!(binding_ty(&fixture, "filtered"), Ty::Vec(Arc::new(Ty::I64)));
     assert!(fixture.inference.diagnostics().is_empty());
 }
 
@@ -154,7 +154,7 @@ fn main() -> Option<i64> {
     let fixture = single_file_fixture(SOURCE, "main");
     assert_eq!(
         fixture.inference.type_of_expr(fixture.body.root_expr()),
-        Some(&Ty::Option(Box::new(Ty::I64)))
+        Some(&Ty::Option(Arc::new(Ty::I64)))
     );
     assert!(fixture.inference.diagnostics().is_empty());
 }
@@ -200,6 +200,6 @@ fn main() -> i64 {
 }
 "#;
     let fixture = single_file_fixture(SOURCE, "main");
-    assert_eq!(binding_ty(&fixture, "result"), Ty::Vec(Box::new(Ty::I64)));
+    assert_eq!(binding_ty(&fixture, "result"), Ty::Vec(Arc::new(Ty::I64)));
     assert!(fixture.inference.diagnostics().is_empty());
 }

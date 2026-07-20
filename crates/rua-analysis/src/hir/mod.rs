@@ -44,7 +44,8 @@ pub use scope::{
     LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,
 };
 pub use std_library::{
-    StdFunction, StdLibraryIndex, StdMember, StdMemberKind, StdType, standard_library,
+    StdFunction, StdLibraryIndex, StdMember, StdMemberKind, StdType, shared_standard_library,
+    standard_library,
 };
 pub use ty::{
     CallableTy, GenericParamId, GenericParamTy, NamedTy, NamedTypeResolver, PrimitiveTy,

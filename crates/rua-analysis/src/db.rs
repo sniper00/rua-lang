@@ -22,7 +22,7 @@ use crate::{
         ModuleId, SignatureFingerprint, StdLibraryIndex,
         body::{lower_chunk_body, lower_fn_body, lower_trait_method_body},
         infer::infer_body,
-        standard_library,
+        shared_standard_library,
     },
     semantic::ReferenceIndex,
     vfs::{
@@ -90,11 +90,8 @@ impl Default for BaseDb {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             vfs: Vfs::default(),
             identity_interner: Arc::new(Mutex::new(IdentityInterner::default())),
-            standard_library: Arc::new(
-                standard_library()
-                    .expect("embedded standard library must be valid")
-                    .clone(),
-            ),
+            standard_library: shared_standard_library()
+                .expect("embedded standard library must be valid"),
             item_tree_cache: Mutex::new(HashMap::new()),
             project_item_tree_cache: Mutex::new(HashMap::new()),
             def_map_cache: Mutex::new(HashMap::new()),

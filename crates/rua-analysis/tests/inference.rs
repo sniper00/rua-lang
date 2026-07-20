@@ -876,11 +876,11 @@ fn containers() -> i64 {
     let fixture = fixture(SOURCE, "containers");
     let i64_ty = primitive(PrimitiveTy::I64);
     let string_ty = primitive(PrimitiveTy::String);
-    let vec_ty = Ty::Vec(Box::new(i64_ty.clone()));
-    let option_ty = Ty::Option(Box::new(i64_ty.clone()));
-    let result_ty = Ty::Result(Box::new(i64_ty.clone()), Box::new(string_ty.clone()));
-    let map_ty = Ty::HashMap(Box::new(string_ty), Box::new(i64_ty.clone()));
-    let range_ty = Ty::Iterator(Box::new(i64_ty.clone()));
+    let vec_ty = Ty::Vec(Arc::new(i64_ty.clone()));
+    let option_ty = Ty::Option(Arc::new(i64_ty.clone()));
+    let result_ty = Ty::Result(Arc::new(i64_ty.clone()), Arc::new(string_ty.clone()));
+    let map_ty = Ty::HashMap(Arc::new(string_ty), Arc::new(i64_ty.clone()));
+    let range_ty = Ty::Iterator(Arc::new(i64_ty.clone()));
 
     assert_binding_ty(&fixture, "/*values_def*/", &vec_ty);
     assert_binding_ty(&fixture, "/*option_def*/", &option_ty);
@@ -936,13 +936,13 @@ fn ergonomics(optional: Option<Profile>, values: Vec<i64>) -> String {
     assert_expr_ty(
         &fixture,
         "/*chain_expr*/",
-        &Ty::Option(Box::new(Ty::STRING)),
+        &Ty::Option(Arc::new(Ty::STRING)),
     );
     assert_expr_ty(&fixture, "/*coalesce_expr*/", &Ty::STRING);
     assert_expr_ty(
         &fixture,
         "/*map_expr*/",
-        &Ty::HashMap(Box::new(Ty::STRING), Box::new(Ty::I64)),
+        &Ty::HashMap(Arc::new(Ty::STRING), Arc::new(Ty::I64)),
     );
     assert_expr_ty(&fixture, "/*loop_expr*/", &Ty::I64);
     assert!(fixture.inference.diagnostics().is_empty());

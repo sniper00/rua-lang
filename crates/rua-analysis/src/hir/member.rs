@@ -14,7 +14,8 @@ use rua_core::{BuiltinTraitId, StdSymbolId};
 use super::{
     CallableSignature, CallableTy, DefId, DefKind, DefMap, GenericParamId, ItemSignature,
     ItemSourceKind, NamedTy, ReceiverKind, ResolveStrategy, StdLibraryIndex, StdMember,
-    StdMemberKind, Substitution, Ty, TypeLoweringContext, TypeRef, VariantKind, standard_library,
+    StdMemberKind, Substitution, Ty, TypeLoweringContext, TypeRef, VariantKind,
+    shared_standard_library,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,8 +101,8 @@ pub struct MemberResolution {
     ty: Ty,
     receiver: Option<ReceiverKind>,
     substitution: Substitution,
-    generic_params: Vec<GenericParamId>,
-    requirements: Vec<CallableRequirement>,
+    generic_params: Arc<[GenericParamId]>,
+    requirements: Arc<[CallableRequirement]>,
 }
 
 impl MemberResolution {
@@ -200,8 +201,8 @@ struct CallableTemplate {
     callable: CallableTy,
     receiver: Option<ReceiverKind>,
     receiver_ty: Option<Ty>,
-    method_generics: Vec<GenericParamId>,
-    requirements: Vec<CallableRequirement>,
+    method_generics: Arc<[GenericParamId]>,
+    requirements: Arc<[CallableRequirement]>,
 }
 
 #[derive(Clone, Debug)]
@@ -223,7 +224,7 @@ struct VariantTemplate {
 #[derive(Clone, Debug)]
 enum VariantPayload {
     Unit,
-    Tuple(Vec<Ty>),
+    Tuple(Arc<[Ty]>),
     Struct,
 }
 
@@ -299,11 +300,7 @@ impl MemberIndex {
     pub fn build(def_map: &DefMap) -> Self {
         Self::build_shared(
             Arc::new(def_map.clone()),
-            Arc::new(
-                standard_library()
-                    .expect("embedded standard library must be valid")
-                    .clone(),
-            ),
+            shared_standard_library().expect("embedded standard library must be valid"),
         )
     }
 
@@ -368,7 +365,7 @@ impl MemberIndex {
     pub(crate) fn callable_requirements(&self, definition: DefId) -> &[CallableRequirement] {
         self.callables
             .get(&definition)
-            .map_or(&[], |callable| callable.requirements.as_slice())
+            .map_or(&[], |callable| callable.requirements.as_ref())
     }
 
     pub fn builtin_callable(&self, builtin: StdSymbolId) -> Option<CallableTy> {
@@ -485,6 +482,19 @@ impl MemberIndex {
         unique_named(self.associated_candidates(owner_ty), name)
     }
 
+    /// Resolve an associated member on a standard declaration that is not
+    /// modeled as a native analysis type (for example `Annotations::find`).
+    pub fn resolve_standard_associated(&self, owner: &str, name: &str) -> Option<MemberResolution> {
+        unique_named(
+            self.standard_library
+                .members_for_owner(owner)
+                .filter(|member| member.kind() != StdMemberKind::Method)
+                .filter_map(std_candidate_named)
+                .collect(),
+            name,
+        )
+    }
+
     pub fn resolve_variant_field(
         &self,
         variant: DefId,
@@ -512,8 +522,8 @@ impl MemberIndex {
             ty: substitution.apply(&field.ty),
             receiver: None,
             substitution,
-            generic_params: Vec::new(),
-            requirements: Vec::new(),
+            generic_params: Arc::from([]),
+            requirements: Arc::from([]),
         })
     }
 
@@ -556,8 +566,8 @@ impl MemberIndex {
                     ty: substitution.apply(&field.ty),
                     receiver: None,
                     substitution: substitution.clone(),
-                    generic_params: Vec::new(),
-                    requirements: Vec::new(),
+                    generic_params: Arc::from([]),
+                    requirements: Arc::from([]),
                 },
             })
             .collect::<Vec<_>>();
@@ -813,13 +823,14 @@ impl MemberIndex {
                 .and(owner)
                 .and_then(|owner| self.owner_receiver_type(owner));
             let callable = self.lower_callable(definition, &signature);
-            let method_generics = self
-                .generic_params
-                .get(&definition)
-                .into_iter()
-                .flatten()
-                .map(|param| param.id)
-                .collect::<Vec<_>>();
+            let method_generics = Arc::from(
+                self.generic_params
+                    .get(&definition)
+                    .into_iter()
+                    .flatten()
+                    .map(|param| param.id)
+                    .collect::<Vec<_>>(),
+            );
             let (requirements, scoped_requirements) =
                 self.lower_callable_requirements(definition, &signature);
             for (target, bound) in &scoped_requirements {
@@ -840,7 +851,7 @@ impl MemberIndex {
                     receiver: signature.receiver(),
                     receiver_ty,
                     method_generics,
-                    requirements,
+                    requirements: Arc::from(requirements),
                 },
             );
         }
@@ -967,13 +978,13 @@ impl MemberIndex {
                 };
                 let payload = match signature.kind() {
                     VariantKind::Unit => VariantPayload::Unit,
-                    VariantKind::Tuple => VariantPayload::Tuple(
+                    VariantKind::Tuple => VariantPayload::Tuple(Arc::from(
                         signature
                             .tuple_types()
                             .iter()
                             .map(|ty| self.lower_type(variant.id(), ty))
-                            .collect(),
-                    ),
+                            .collect::<Vec<_>>(),
+                    )),
                     VariantKind::Struct => VariantPayload::Struct,
                 };
                 if matches!(payload, VariantPayload::Struct) {
@@ -1364,19 +1375,21 @@ impl MemberIndex {
                 receiver: template.receiver,
                 substitution: substitution.clone(),
                 generic_params: template.method_generics.clone(),
-                requirements: template
-                    .requirements
-                    .iter()
-                    .map(|(target, bound)| {
-                        (
-                            substitution.apply(target),
-                            TraitBound {
-                                trait_id: bound.trait_id,
-                                trait_ty: substitution.apply(&bound.trait_ty),
-                            },
-                        )
-                    })
-                    .collect(),
+                requirements: Arc::from(
+                    template
+                        .requirements
+                        .iter()
+                        .map(|(target, bound)| {
+                            (
+                                substitution.apply(target),
+                                TraitBound {
+                                    trait_id: bound.trait_id,
+                                    trait_ty: substitution.apply(&bound.trait_ty),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
             },
         }
     }
@@ -1409,8 +1422,8 @@ impl MemberIndex {
                 ty,
                 receiver: None,
                 substitution: substitution.clone(),
-                generic_params: Vec::new(),
-                requirements: Vec::new(),
+                generic_params: Arc::from([]),
+                requirements: Arc::from([]),
             },
         }
     }
@@ -1452,12 +1465,12 @@ impl MemberIndex {
     fn install_builtins(&mut self) {
         let unknown = Ty::Unknown;
         let receivers = [
-            Ty::Vec(Box::new(unknown.clone())),
-            Ty::HashMap(Box::new(unknown.clone()), Box::new(unknown.clone())),
+            Ty::Vec(Arc::new(unknown.clone())),
+            Ty::HashMap(Arc::new(unknown.clone()), Arc::new(unknown.clone())),
             Ty::STRING,
-            Ty::Option(Box::new(unknown.clone())),
-            Ty::Result(Box::new(unknown.clone()), Box::new(unknown.clone())),
-            Ty::Iterator(Box::new(unknown)),
+            Ty::Option(Arc::new(unknown.clone())),
+            Ty::Result(Arc::new(unknown.clone()), Arc::new(unknown.clone())),
+            Ty::Iterator(Arc::new(unknown)),
         ];
         for receiver in receivers {
             for member in self.standard_library.members_for(&receiver) {
@@ -1502,8 +1515,29 @@ fn std_candidate(member: &StdMember, owner_ty: &Ty) -> Option<MemberCandidate> {
             ty: member.instantiate(owner_ty)?,
             receiver: member.receiver(),
             substitution: Substitution::new(),
-            generic_params: Vec::new(),
-            requirements: Vec::new(),
+            generic_params: Arc::from([]),
+            requirements: Arc::from([]),
+        },
+    })
+}
+
+fn std_candidate_named(member: &StdMember) -> Option<MemberCandidate> {
+    let kind = match member.kind() {
+        StdMemberKind::Method => MemberKind::Method,
+        StdMemberKind::AssociatedFunction => MemberKind::AssociatedFunction,
+        StdMemberKind::Variant => MemberKind::Variant,
+    };
+    Some(MemberCandidate {
+        name: member.name().to_string(),
+        origin: MemberOrigin::Builtin,
+        resolution: MemberResolution {
+            target: MemberTarget::Builtin(member.id()),
+            kind,
+            ty: member.instantiate_named()?,
+            receiver: member.receiver(),
+            substitution: Substitution::new(),
+            generic_params: Arc::from([]),
+            requirements: Arc::from([]),
         },
     })
 }
@@ -1600,7 +1634,7 @@ fn bind_associated_type(
         }
         (Ty::Tuple(left), Ty::Tuple(right)) => {
             left.len() == right.len()
-                && left.iter().zip(right).all(|(left, right)| {
+                && left.iter().zip(right.iter()).all(|(left, right)| {
                     bind_associated_type(left, right, wildcard_owner, substitution)
                 })
         }

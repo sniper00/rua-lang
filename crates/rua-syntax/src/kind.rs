@@ -135,6 +135,7 @@ pub enum SyntaxKind {
     Block,
     LetStmt,
     ExprStmt,
+    LuaBlockStmt,
     // Expressions
     BinExpr,
     UnaryExpr,

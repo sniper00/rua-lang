@@ -920,6 +920,11 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self) {
         match self.current() {
+            K::LuaBlock => {
+                let cp = self.builder.checkpoint();
+                self.bump();
+                self.wrap(cp, K::LuaBlockStmt);
+            }
             K::KwLet => self.let_stmt(),
             K::KwReturn => self.return_stmt(),
             K::KwWhile => self.while_stmt(),
@@ -1528,6 +1533,15 @@ mod tests {
         let t = tree("fn f() { a.b().c(1, 2)?; }");
         assert!(t.contains("MethodCallExpr"));
         assert!(t.contains("TryExpr"));
+    }
+
+    #[test]
+    fn embedded_lua_block_is_a_statement() {
+        let source = "fn f() {\n  lua! {\n    print(1)\n  }\n}\n";
+        let parsed = parse_source_file(source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.syntax_node().text().to_string(), source);
+        assert!(tree(source).contains("LuaBlockStmt"));
     }
 
     #[test]

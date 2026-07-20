@@ -53,6 +53,24 @@ fn annotation_usage_has_hover_and_goto_definition() {
 }
 
 #[test]
+fn named_standard_associated_function_has_hover_and_builtin_goto() {
+    let source = "fn metadata() { let entries = Annotations::find(\"DemoFeature\"); entries; }\n";
+    let usage = source.find("find").unwrap();
+    let (analysis, file_id, project_id) = analysis(source);
+    let position = ProjectPosition::at(project_id, file_id, usage as u32 + 1);
+
+    let target = analysis
+        .goto_builtin_definition(position)
+        .expect("standard associated function goto definition");
+    assert_eq!(target.source_name(), "annotations.ruai");
+
+    let hover = analysis
+        .hover(position)
+        .expect("standard associated function hover");
+    assert_eq!(hover.signature(), "fn find(String) -> Vec<AnnotationEntry>");
+}
+
+#[test]
 fn inactive_member_tokens_keep_the_inactive_modifier() {
     let source = concat!(
         "struct Config {\n",

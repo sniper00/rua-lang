@@ -1320,7 +1320,7 @@ pub(crate) fn infer_dot_receiver(
             let receiver = inference.type_of_expr(expr_id).cloned()?;
             return if optional_receiver {
                 match receiver {
-                    Ty::Option(item) => Some(*item),
+                    Ty::Option(item) => Some(item.as_ref().clone()),
                     other => Some(other),
                 }
             } else {

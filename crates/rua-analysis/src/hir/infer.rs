@@ -1,5 +1,7 @@
 //! Native, error-tolerant type inference over lowered bodies.
 
+use std::sync::Arc;
+
 use rua_core::{BuiltinId, builtin_type, builtin_value};
 
 use super::body::MapLiteralEntry;
@@ -531,7 +533,7 @@ impl<'a> InferenceContext<'a> {
             } => {
                 let iterable_ty = self.infer_expr(*iterable, None);
                 let (item_ty, diverges) = match iterable_ty.clone() {
-                    Ty::Iterator(item) | Ty::Vec(item) => (*item, false),
+                    Ty::Iterator(item) | Ty::Vec(item) => (item.as_ref().clone(), false),
                     Ty::Never => (Ty::Unknown, true),
                     Ty::Primitive(_) => {
                         self.diagnostics.push(InferenceDiagnostic::NotIterable {
@@ -703,7 +705,7 @@ impl<'a> InferenceContext<'a> {
                 }
                 Some(field_types)
             }
-            Ty::Tuple(items) => Some(items.clone()),
+            Ty::Tuple(items) => Some(items.iter().cloned().collect()),
             _ => Some(Vec::new()),
         }
     }
@@ -881,8 +883,8 @@ impl<'a> InferenceContext<'a> {
             },
             BinaryOp::Contains => {
                 let element = match rhs_ty.clone() {
-                    Ty::Vec(item) | Ty::Iterator(item) => Some(*item),
-                    Ty::HashMap(key, _) => Some(*key),
+                    Ty::Vec(item) | Ty::Iterator(item) => Some(item.as_ref().clone()),
+                    Ty::HashMap(key, _) => Some(key.as_ref().clone()),
                     Ty::Primitive(crate::hir::PrimitiveTy::String) => Some(Ty::STRING),
                     Ty::Unknown => None,
                     _ => {
@@ -951,7 +953,7 @@ impl<'a> InferenceContext<'a> {
                 TypeMismatchContext::RangeBound,
             );
         }
-        diverge_or(diverges, Ty::Iterator(Box::new(Ty::I64)))
+        diverge_or(diverges, Ty::Iterator(Arc::new(Ty::I64)))
     }
 
     fn infer_loop_expr(&mut self, body: ExprId, expected: Option<&Ty>) -> Ty {
@@ -1078,8 +1080,8 @@ impl<'a> InferenceContext<'a> {
             Ty::Never
         } else {
             match base_ty {
-                Ty::Vec(item) | Ty::Iterator(item) => *item,
-                Ty::HashMap(_, value) => *value,
+                Ty::Vec(item) | Ty::Iterator(item) => item.as_ref().clone(),
+                Ty::HashMap(_, value) => value.as_ref().clone(),
                 _ => Ty::Unknown,
             }
         }
@@ -1180,9 +1182,6 @@ impl<'a> InferenceContext<'a> {
             else {
                 return Ty::Unknown;
             };
-            let Some(owner_ty) = standard_owner_type(owner_name, expected) else {
-                return Ty::Unknown;
-            };
             let Some(name) = self
                 .body
                 .name_ref(*member_ref)
@@ -1190,7 +1189,13 @@ impl<'a> InferenceContext<'a> {
             else {
                 return Ty::Unknown;
             };
-            let Some(resolution) = self.member_index.resolve_associated_ty(&owner_ty, name) else {
+            let resolution = standard_owner_type(owner_name, expected)
+                .and_then(|owner_ty| self.member_index.resolve_associated_ty(&owner_ty, name))
+                .or_else(|| {
+                    self.member_index
+                        .resolve_standard_associated(owner_name, name)
+                });
+            let Some(resolution) = resolution else {
                 return Ty::Unknown;
             };
             let mut ty = resolution.ty().clone();
@@ -1301,7 +1306,7 @@ impl<'a> InferenceContext<'a> {
         }
         let (receiver, optional_chain) = if optional {
             match raw_receiver {
-                Ty::Option(item) => (*item, true),
+                Ty::Option(item) => (item.as_ref().clone(), true),
                 Ty::Unknown => (Ty::Unknown, true),
                 found => {
                     self.diagnostics
@@ -1328,7 +1333,7 @@ impl<'a> InferenceContext<'a> {
             if matches!(ty, Ty::Option(_)) {
                 ty
             } else {
-                Ty::Option(Box::new(ty))
+                Ty::Option(Arc::new(ty))
             }
         } else {
             ty
@@ -1435,7 +1440,7 @@ impl<'a> InferenceContext<'a> {
                 value_ty.join(&value)
             };
         }
-        Ty::HashMap(Box::new(key_ty), Box::new(value_ty))
+        Ty::HashMap(Arc::new(key_ty), Arc::new(value_ty))
     }
 
     fn struct_literal_target(&mut self, path: &[NameRefId]) -> Option<(Ty, Option<DefId>)> {
@@ -1489,7 +1494,7 @@ impl<'a> InferenceContext<'a> {
         }
         let (receiver_ty, optional_chain) = if optional {
             match raw_receiver {
-                Ty::Option(item) => (*item, true),
+                Ty::Option(item) => (item.as_ref().clone(), true),
                 Ty::Unknown => (Ty::Unknown, true),
                 found => {
                     self.diagnostics
@@ -1600,7 +1605,7 @@ impl<'a> InferenceContext<'a> {
             if matches!(result, Ty::Option(_)) {
                 result
             } else {
-                Ty::Option(Box::new(result))
+                Ty::Option(Arc::new(result))
             }
         } else {
             result
@@ -1624,7 +1629,7 @@ impl<'a> InferenceContext<'a> {
             Ty::Closure(callable) | Ty::Function(callable) => callable.return_ty().clone(),
             _ => Ty::Unknown,
         };
-        let result = Ty::Option(Box::new(output));
+        let result = Ty::Option(Arc::new(output));
         self.calls[call.index() as usize] = Some(CallInfo {
             target: CallTarget::Builtin,
             parameters: vec![expected_closure],
@@ -1652,7 +1657,7 @@ impl<'a> InferenceContext<'a> {
             Ty::Closure(callable) | Ty::Function(callable) => callable.return_ty().clone(),
             _ => Ty::Unknown,
         };
-        let result = Ty::Result(Box::new(output), Box::new(error.clone()));
+        let result = Ty::Result(Arc::new(output), Arc::new(error.clone()));
         self.calls[call.index() as usize] = Some(CallInfo {
             target: CallTarget::Builtin,
             parameters: vec![expected_closure],
@@ -1686,7 +1691,7 @@ impl<'a> InferenceContext<'a> {
     ) -> Option<Ty> {
         match method_name {
             "iter" | "into_iter" if args.is_empty() => {
-                let result = Ty::Iterator(Box::new(item.clone()));
+                let result = Ty::Iterator(Arc::new(item.clone()));
                 self.calls[call.index() as usize] = Some(CallInfo {
                     target: CallTarget::Builtin,
                     parameters: Vec::new(),
@@ -1732,9 +1737,9 @@ impl<'a> InferenceContext<'a> {
                         Ty::Closure(CallableTy::new(vec![item.clone()], Ty::BOOL));
                     self.infer_expr(*predicate, Some(&pred_closure_ty));
                 }
-                Ty::Option(Box::new(item.clone()))
+                Ty::Option(Arc::new(item.clone()))
             }
-            "next" if args.is_empty() => Ty::Option(Box::new(item.clone())),
+            "next" if args.is_empty() => Ty::Option(Arc::new(item.clone())),
             "fold" => match args {
                 [init, closure] => {
                     let init_ty = self.infer_expr(*init, None);
@@ -1757,7 +1762,7 @@ impl<'a> InferenceContext<'a> {
                 for arg in args {
                     self.infer_expr(*arg, None);
                 }
-                Ty::Vec(Box::new(item.clone()))
+                Ty::Vec(Arc::new(item.clone()))
             }
             // Adapters that preserve the item type.
             "filter" | "take" | "skip" => {
@@ -1772,7 +1777,7 @@ impl<'a> InferenceContext<'a> {
                     ));
                     self.infer_expr(*arg, Some(&pred_closure_ty));
                 }
-                Ty::Iterator(Box::new(item.clone()))
+                Ty::Iterator(Arc::new(item.clone()))
             }
             // map: iterator item becomes the closure's return type.
             "map" => {
@@ -1788,9 +1793,9 @@ impl<'a> InferenceContext<'a> {
                         }
                         _ => Ty::Unknown,
                     };
-                    Ty::Iterator(Box::new(new_item))
+                    Ty::Iterator(Arc::new(new_item))
                 } else {
-                    Ty::Iterator(Box::new(item.clone()))
+                    Ty::Iterator(Arc::new(item.clone()))
                 }
             }
             // filter_map: extract Option<U>'s U as new item type.
@@ -1808,14 +1813,14 @@ impl<'a> InferenceContext<'a> {
                         }
                         _ => Ty::Unknown,
                     };
-                    Ty::Iterator(Box::new(new_item))
+                    Ty::Iterator(Arc::new(new_item))
                 } else {
-                    Ty::Iterator(Box::new(item.clone()))
+                    Ty::Iterator(Arc::new(item.clone()))
                 }
             }
             // enumerate: pair items with index. Takes no arguments.
             "enumerate" if args.is_empty() => {
-                Ty::Iterator(Box::new(Ty::Tuple(vec![Ty::I64, item.clone()])))
+                Ty::Iterator(Arc::new(Ty::Tuple(Arc::from(vec![Ty::I64, item.clone()]))))
             }
             _ => return None,
         };
@@ -2117,7 +2122,7 @@ impl<'a> InferenceContext<'a> {
                 let actual = self.infer_expr(*argument, expected_item.as_ref());
                 self.report_argument_mismatch(*argument, expected_item.as_ref(), &actual);
                 let item = prefer_expected_if_unknown(actual, expected_item);
-                (vec![item.clone()], Ty::Option(Box::new(item)))
+                (vec![item.clone()], Ty::Option(Arc::new(item)))
             }
             (BuiltinId::VariantResultOk, [argument]) => {
                 self.infer_result_constructor(true, *argument, expected)
@@ -2162,10 +2167,15 @@ impl<'a> InferenceContext<'a> {
         }
         let owner_name = self.body.name_ref(*owner_ref)?.name()?;
         let member_name = self.body.name_ref(*member_ref)?.name()?;
-        let owner_ty = standard_owner_type(owner_name, expected)?;
-        let resolution = self
-            .member_index
-            .resolve_associated_ty(&owner_ty, member_name)?;
+        let resolution = standard_owner_type(owner_name, expected)
+            .and_then(|owner_ty| {
+                self.member_index
+                    .resolve_associated_ty(&owner_ty, member_name)
+            })
+            .or_else(|| {
+                self.member_index
+                    .resolve_standard_associated(owner_name, member_name)
+            })?;
         if resolution.kind() != MemberKind::AssociatedFunction {
             return None;
         }
@@ -2217,12 +2227,12 @@ impl<'a> InferenceContext<'a> {
         if is_ok {
             (
                 vec![slot.clone()],
-                Ty::Result(Box::new(slot), Box::new(err_def)),
+                Ty::Result(Arc::new(slot), Arc::new(err_def)),
             )
         } else {
             (
                 vec![slot.clone()],
-                Ty::Result(Box::new(ok_def), Box::new(slot)),
+                Ty::Result(Arc::new(ok_def), Arc::new(slot)),
             )
         }
     }
@@ -2271,9 +2281,9 @@ impl<'a> InferenceContext<'a> {
         if diverges {
             Ty::Never
         } else if elements.is_empty() {
-            Ty::Vec(Box::new(expected_item.unwrap_or(Ty::Unknown)))
+            Ty::Vec(Arc::new(expected_item.unwrap_or(Ty::Unknown)))
         } else {
-            Ty::Vec(Box::new(item))
+            Ty::Vec(Arc::new(item))
         }
     }
 
@@ -2543,11 +2553,11 @@ fn builtin_constructor_owner(builtin: BuiltinId, expected: Option<&Ty>) -> Ty {
     match builtin {
         BuiltinId::VariantOptionSome | BuiltinId::VariantOptionNone => match expected {
             Some(Ty::Option(_)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Option(Box::new(Ty::Unknown)),
+            _ => Ty::Option(Arc::new(Ty::Unknown)),
         },
         BuiltinId::VariantResultOk | BuiltinId::VariantResultErr => match expected {
             Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+            _ => Ty::Result(Arc::new(Ty::Unknown), Arc::new(Ty::Unknown)),
         },
         _ => Ty::Unknown,
     }
@@ -2558,23 +2568,23 @@ fn standard_owner_type(name: &str, expected: Option<&Ty>) -> Option<Ty> {
         BuiltinId::TypeString => Ty::STRING,
         BuiltinId::TypeVec => match expected {
             Some(Ty::Vec(_)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Vec(Box::new(Ty::Unknown)),
+            _ => Ty::Vec(Arc::new(Ty::Unknown)),
         },
         BuiltinId::TypeHashMap => match expected {
             Some(Ty::HashMap(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::HashMap(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+            _ => Ty::HashMap(Arc::new(Ty::Unknown), Arc::new(Ty::Unknown)),
         },
         BuiltinId::TypeIter => match expected {
             Some(Ty::Iterator(_)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Iterator(Box::new(Ty::Unknown)),
+            _ => Ty::Iterator(Arc::new(Ty::Unknown)),
         },
         BuiltinId::TypeOption => match expected {
             Some(Ty::Option(_)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Option(Box::new(Ty::Unknown)),
+            _ => Ty::Option(Arc::new(Ty::Unknown)),
         },
         BuiltinId::TypeResult => match expected {
             Some(Ty::Result(_, _)) => expected.cloned().unwrap_or(Ty::Unknown),
-            _ => Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+            _ => Ty::Result(Arc::new(Ty::Unknown), Arc::new(Ty::Unknown)),
         },
         _ => return None,
     })
@@ -2608,7 +2618,7 @@ fn invalidate_generics(ty: &Ty, substitution: &mut Substitution) {
             }
         }
         Ty::Tuple(items) => {
-            for item in items {
+            for item in items.iter() {
                 invalidate_generics(item, substitution);
             }
         }
@@ -2644,7 +2654,7 @@ fn refine_generic_bindings(expected: &Ty, actual: &Ty, substitution: &mut Substi
             }
         }
         (Ty::Tuple(expected), Ty::Tuple(actual)) => {
-            for (expected, actual) in expected.iter().zip(actual) {
+            for (expected, actual) in expected.iter().zip(actual.iter()) {
                 refine_generic_bindings(expected, actual, substitution);
             }
         }

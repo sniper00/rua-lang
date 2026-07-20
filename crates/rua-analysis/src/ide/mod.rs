@@ -22,7 +22,7 @@ use crate::{
     hir::{
         Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, DefId, DefKind, DefMap,
         Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution, MemberTarget,
-        ResolveStrategy, StdFunction, StdLibraryIndex, StdMemberKind, StdType, Ty,
+        ResolveStrategy, StdFunction, StdLibraryIndex, StdMember, StdMemberKind, StdType, Ty,
     },
     semantic::Semantics,
     vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
@@ -122,6 +122,11 @@ fn builtin_hover_text(index: &MemberIndex, member: &BuiltinMemberAt) -> String {
     let resolution = &member.resolution;
     let standard_member = index.standard_member(member.id);
     let name = standard_member.map_or("<std>", |member| member.name());
+    if standard_member.is_some_and(|member| {
+        member.kind() == StdMemberKind::AssociatedFunction && member.receiver().is_none()
+    }) {
+        return standard_member.map_or_else(|| name.to_string(), StdMember::signature);
+    }
     if standard_member.is_some_and(|member| member.kind() == StdMemberKind::Variant) {
         return resolution.callable().map_or_else(
             || name.to_string(),

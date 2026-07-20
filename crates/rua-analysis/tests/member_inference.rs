@@ -853,23 +853,23 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
     let (host, file_id) = single_file_host(SOURCE);
     let index = host.analysis().member_index(file_id);
 
-    let vec_ty = Ty::Vec(Box::new(Ty::I64));
+    let vec_ty = Ty::Vec(Arc::new(Ty::I64));
     let vec_get = index.resolve_method(&vec_ty, "get").expect("Vec::get");
     assert_standard_target(&vec_get, "Vec", "get");
     assert_eq!(vec_get.kind(), MemberKind::Method);
     assert_eq!(
         vec_get.callable().expect("Vec::get callable").return_ty(),
-        &Ty::Option(Box::new(Ty::I64))
+        &Ty::Option(Arc::new(Ty::I64))
     );
     assert_standard_target(
         &index
-            .resolve_associated_ty(&Ty::Vec(Box::new(Ty::Unknown)), "new")
+            .resolve_associated_ty(&Ty::Vec(Arc::new(Ty::Unknown)), "new")
             .expect("Vec::new"),
         "Vec",
         "new",
     );
 
-    let map_ty = Ty::HashMap(Box::new(Ty::STRING), Box::new(Ty::I64));
+    let map_ty = Ty::HashMap(Arc::new(Ty::STRING), Arc::new(Ty::I64));
     let map_get = index.resolve_method(&map_ty, "get").expect("HashMap::get");
     assert_standard_target(&map_get, "HashMap", "get");
     assert_eq!(
@@ -877,7 +877,7 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
             .callable()
             .expect("HashMap::get callable")
             .return_ty(),
-        &Ty::Option(Box::new(Ty::I64))
+        &Ty::Option(Arc::new(Ty::I64))
     );
 
     let uppercase = index
@@ -893,20 +893,20 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
     );
 
     let option_names = index
-        .associated_candidates(&Ty::Option(Box::new(Ty::I64)))
+        .associated_candidates(&Ty::Option(Arc::new(Ty::I64)))
         .into_iter()
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
     assert_eq!(option_names, ["None", "Some"]);
     assert_standard_target(
         &index
-            .resolve_associated_ty(&Ty::Option(Box::new(Ty::I64)), "Some")
+            .resolve_associated_ty(&Ty::Option(Arc::new(Ty::I64)), "Some")
             .expect("Option::Some"),
         "Option",
         "Some",
     );
     let option_methods = index
-        .instance_candidates(&Ty::Option(Box::new(Ty::I64)))
+        .instance_candidates(&Ty::Option(Arc::new(Ty::I64)))
         .into_iter()
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
@@ -916,27 +916,27 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
     );
     assert_standard_target(
         &index
-            .resolve_method(&Ty::Option(Box::new(Ty::I64)), "map")
+            .resolve_method(&Ty::Option(Arc::new(Ty::I64)), "map")
             .expect("Option::map"),
         "Option",
         "map",
     );
 
     let result_names = index
-        .associated_candidates(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
+        .associated_candidates(&Ty::Result(Arc::new(Ty::I64), Arc::new(Ty::STRING)))
         .into_iter()
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
     assert_eq!(result_names, ["Err", "Ok"]);
     assert_standard_target(
         &index
-            .resolve_associated_ty(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)), "Err")
+            .resolve_associated_ty(&Ty::Result(Arc::new(Ty::I64), Arc::new(Ty::STRING)), "Err")
             .expect("Result::Err"),
         "Result",
         "Err",
     );
     let result_methods = index
-        .instance_candidates(&Ty::Result(Box::new(Ty::I64), Box::new(Ty::STRING)))
+        .instance_candidates(&Ty::Result(Arc::new(Ty::I64), Arc::new(Ty::STRING)))
         .into_iter()
         .map(|candidate| candidate.name().to_string())
         .collect::<Vec<_>>();
@@ -944,6 +944,21 @@ fn member_lookup_builtin_metadata_covers_core_containers_and_strings() {
         result_methods,
         ["expect", "is_err", "is_ok", "map", "unwrap", "unwrap_or"]
     );
+}
+
+#[test]
+fn member_lookup_resolves_named_standard_associated_functions() {
+    const SOURCE: &str = r#"
+fn metadata() {
+    let entries = Annotations::/*find*/find("domain::metadata::DemoFeature");
+    entries;
+}
+"#;
+    let fixture = fixture(SOURCE, "metadata");
+    let resolution = resolution_at(&fixture, "/*find*/", NameRefKind::Path);
+    assert_standard_target(&resolution, "Annotations", "find");
+    assert_eq!(resolution.kind(), MemberKind::AssociatedFunction);
+    assert!(fixture.inference.diagnostics().is_empty());
 }
 
 #[test]
@@ -970,13 +985,13 @@ fn builtin_calls() -> i64 {
             "/*option_map*/",
             "Option",
             "map",
-            Ty::Option(Box::new(Ty::BOOL)),
+            Ty::Option(Arc::new(Ty::BOOL)),
         ),
         (
             "/*map_insert*/",
             "HashMap",
             "insert",
-            Ty::Option(Box::new(Ty::Unknown)),
+            Ty::Option(Arc::new(Ty::Unknown)),
         ),
         ("/*map_len*/", "HashMap", "len", Ty::I64),
     ] {

@@ -968,6 +968,7 @@ impl TypeArgs {
 ast_node!(Block = Block);
 ast_node!(LetStmt = LetStmt);
 ast_node!(ExprStmt = ExprStmt);
+ast_node!(LuaBlockStmt = LuaBlockStmt);
 ast_node!(ReturnStmt = ReturnExpr);
 ast_node!(WhileStmt = WhileExpr);
 ast_node!(LoopStmt = LoopExpr);
@@ -980,6 +981,7 @@ ast_node!(ContinueStmt = ContinueExpr);
 pub enum Stmt {
     Let(LetStmt),
     Expr(ExprStmt),
+    LuaBlock(LuaBlockStmt),
     Return(ReturnStmt),
     While(WhileStmt),
     Loop(LoopStmt),
@@ -994,6 +996,7 @@ impl AstNode for Stmt {
             kind,
             K::LetStmt
                 | K::ExprStmt
+                | K::LuaBlockStmt
                 | K::ReturnExpr
                 | K::WhileExpr
                 | K::LoopExpr
@@ -1006,6 +1009,7 @@ impl AstNode for Stmt {
         Some(match node.kind() {
             K::LetStmt => Stmt::Let(LetStmt { syntax: node }),
             K::ExprStmt => Stmt::Expr(ExprStmt { syntax: node }),
+            K::LuaBlockStmt => Stmt::LuaBlock(LuaBlockStmt { syntax: node }),
             K::ReturnExpr => Stmt::Return(ReturnStmt { syntax: node }),
             K::WhileExpr => Stmt::While(WhileStmt { syntax: node }),
             K::LoopExpr => Stmt::Loop(LoopStmt { syntax: node }),
@@ -1019,6 +1023,7 @@ impl AstNode for Stmt {
         match self {
             Stmt::Let(n) => n.syntax(),
             Stmt::Expr(n) => n.syntax(),
+            Stmt::LuaBlock(n) => n.syntax(),
             Stmt::Return(n) => n.syntax(),
             Stmt::While(n) => n.syntax(),
             Stmt::Loop(n) => n.syntax(),
