@@ -1,6 +1,6 @@
 [package]
 name = "rua-syntax"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Lossless rowan CST for Rua, with the IDE/LSP-facing syntax tree, formatter, AstNode views, and LineIndex."
 

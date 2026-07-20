@@ -1,6 +1,6 @@
 [package]
 name = "rua-project"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "IO-free Rua project, source-root, and source-provider contracts."
 

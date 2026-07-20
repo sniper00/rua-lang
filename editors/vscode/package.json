@@ -2,7 +2,7 @@
   "name": "rua-lang",
   "displayName": "Rua Language",
   "description": "Language support for Rua (Rust-like syntax, transpiles to Lua 5.5) — powered by the rua-lsp language server.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "BruceZeros",
   "license": "MIT",
   "repository": {
