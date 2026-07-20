@@ -39,7 +39,7 @@ async function waitUntil(
 }
 
 export async function run(): Promise<void> {
-  const extension = vscode.extensions.getExtension("moon-rs.rua-lang");
+  const extension = vscode.extensions.getExtension("BruceZeros.rua-lang");
   assert.ok(extension, "Rua extension is installed in the Extension Host");
   await extension.activate();
 
