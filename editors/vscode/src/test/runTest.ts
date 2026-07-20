@@ -18,6 +18,31 @@ async function main(): Promise<void> {
     "debug",
     process.platform === "win32" ? "ruac.exe" : "ruac",
   );
+  const bundledTarget = bundledPlatformTarget();
+  const bundledDirectory = bundledTarget
+    ? path.join(extensionDevelopmentPath, "bin", bundledTarget)
+    : undefined;
+  const bundledLsp = bundledDirectory
+    ? path.join(
+        bundledDirectory,
+        process.platform === "win32" ? "rua-lsp.exe" : "rua-lsp",
+      )
+    : undefined;
+  const bundledCompiler = bundledDirectory
+    ? path.join(
+        bundledDirectory,
+        process.platform === "win32" ? "ruac.exe" : "ruac",
+      )
+    : undefined;
+  const useBundledToolchain =
+    bundledLsp !== undefined &&
+    bundledCompiler !== undefined &&
+    fs.existsSync(bundledLsp) &&
+    fs.existsSync(bundledCompiler);
+  if (useBundledToolchain && process.platform !== "win32") {
+    fs.chmodSync(bundledLsp, 0o755);
+    fs.chmodSync(bundledCompiler, 0o755);
+  }
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rua-vscode-test-"));
   const alpha = path.join(temp, "alpha");
   const beta = path.join(temp, "beta");
@@ -61,9 +86,9 @@ async function main(): Promise<void> {
       {
         folders: [{ path: alpha }, { path: beta }],
         settings: {
-          "rua.server.path": lspExecutable,
+          "rua.server.path": useBundledToolchain ? "" : lspExecutable,
           "rua.server.args": [],
-          "rua.compiler.path": compilerExecutable,
+          "rua.compiler.path": useBundledToolchain ? "" : compilerExecutable,
           "rua.compiler.args": [],
           "rua.trace.server": "off",
         },
@@ -95,3 +120,22 @@ main().catch((error: unknown) => {
   console.error(error);
   process.exit(1);
 });
+
+function bundledPlatformTarget(): string | undefined {
+  if (process.platform === "linux" && process.arch === "x64") {
+    return "linux-x64";
+  }
+  if (process.platform === "linux" && process.arch === "arm64") {
+    return "linux-arm64";
+  }
+  if (process.platform === "darwin" && process.arch === "x64") {
+    return "darwin-x64";
+  }
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return "darwin-arm64";
+  }
+  if (process.platform === "win32" && process.arch === "x64") {
+    return "win32-x64";
+  }
+  return undefined;
+}

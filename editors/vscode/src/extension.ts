@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import { spawn } from "child_process";
 import {
@@ -78,7 +79,7 @@ export async function activate(ctx: ExtensionContext): Promise<void> {
       window.showInformationMessage("Rua language server restarted.");
     }),
     commands.registerCommand("rua.buildFile", (resource?: Uri) =>
-      buildFile(resource, buildOutput),
+      buildFile(resource, buildOutput, ctx.extensionPath),
     ),
     commands.registerCommand(
       "rua.openLocation",
@@ -138,10 +139,13 @@ export function deactivate(): Thenable<void> | undefined {
   return stopClient();
 }
 
-async function startClient(_ctx: ExtensionContext): Promise<void> {
+async function startClient(ctx: ExtensionContext): Promise<void> {
   await stopClient();
   const config = workspace.getConfiguration("rua");
-  const command = resolveServerPath(config.get<string>("server.path", "rua-lsp"));
+  const command = resolveServerPath(
+    config.get<string>("server.path", ""),
+    ctx.extensionPath,
+  );
   const args = config.get<string[]>("server.args", []);
   const outputChannel = window.createOutputChannel("Rua Language Server");
   const fileWatcher = workspace.createFileSystemWatcher("**/*.{rua,ruai}");
@@ -194,8 +198,8 @@ async function startClient(_ctx: ExtensionContext): Promise<void> {
     disposeClientResources();
     window.showErrorMessage(
       `Failed to start the Rua language server (\`${command}\`). ` +
-        `Build it with \`cargo build -p rua-lsp --bin rua-lsp --features lsp\` and ` +
-        `set \`rua.server.path\`, or add it to PATH. Details: ${String(err)}`,
+        `Set \`rua.server.path\` to an installed binary, or reinstall the ` +
+        `extension with its platform toolchain. Details: ${String(err)}`,
     );
   }
 }
@@ -243,6 +247,7 @@ function readInitializationSettings(): RuaInitializationSettings {
 async function buildFile(
   resource: Uri | undefined,
   output: OutputChannel,
+  extensionPath: string,
 ): Promise<boolean> {
   const uri = resource ?? window.activeTextEditor?.document.uri;
   if (!uri || uri.scheme !== "file" || path.extname(uri.fsPath) !== ".rua") {
@@ -260,9 +265,11 @@ async function buildFile(
 
   const folder = workspace.getWorkspaceFolder(uri);
   const config = workspace.getConfiguration("rua", uri);
-  const command = resolveToolPath(
-    config.get<string>("compiler.path", "ruac"),
+  const command = resolveBundledToolPath(
+    config.get<string>("compiler.path", ""),
     folder,
+    extensionPath,
+    "ruac",
   );
   const extraArgs = config.get<string[]>("compiler.args", []);
   const args = ["build", uri.fsPath, ...extraArgs];
@@ -314,11 +321,73 @@ function quoteArgument(value: string): string {
 
 /**
  * Expand `${workspaceFolder}` and make a workspace-relative path absolute so a
- * a locally-built tool (e.g. `${workspaceFolder}/target/debug/ruac`) works out
+ * locally-built tool (e.g. `${workspaceFolder}/target/debug/ruac`) works out
  * of the box. Bare executable names are left untouched for PATH lookup.
  */
-function resolveServerPath(raw: string): string {
-  return resolveToolPath(raw, workspace.workspaceFolders?.[0]);
+function resolveServerPath(raw: string, extensionPath: string): string {
+  return resolveBundledToolPath(
+    raw,
+    workspace.workspaceFolders?.[0],
+    extensionPath,
+    "rua-lsp",
+  );
+}
+
+function resolveBundledToolPath(
+  raw: string,
+  folder: WorkspaceFolder | undefined,
+  extensionPath: string,
+  tool: "rua-lsp" | "ruac",
+): string {
+  const configured = raw.trim();
+  if (configured) {
+    return resolveToolPath(configured, folder);
+  }
+  return bundledToolPath(extensionPath, tool) ?? tool;
+}
+
+function bundledToolPath(
+  extensionPath: string,
+  tool: "rua-lsp" | "ruac",
+): string | undefined {
+  const platform = bundledPlatformTarget();
+  if (!platform) {
+    return undefined;
+  }
+  const executable = process.platform === "win32" ? `${tool}.exe` : tool;
+  const candidate = path.join(extensionPath, "bin", platform, executable);
+  if (!fs.existsSync(candidate)) {
+    return undefined;
+  }
+  // VSIX extraction normally preserves executable bits, but some installation
+  // paths do not. Best-effort repair keeps the bundled server runnable on Unix.
+  if (process.platform !== "win32") {
+    try {
+      fs.chmodSync(candidate, 0o755);
+    } catch {
+      // Let spawn report a useful error if the extension directory is read-only.
+    }
+  }
+  return candidate;
+}
+
+function bundledPlatformTarget(): string | undefined {
+  if (process.platform === "linux" && process.arch === "x64") {
+    return "linux-x64";
+  }
+  if (process.platform === "linux" && process.arch === "arm64") {
+    return "linux-arm64";
+  }
+  if (process.platform === "darwin" && process.arch === "x64") {
+    return "darwin-x64";
+  }
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return "darwin-arm64";
+  }
+  if (process.platform === "win32" && process.arch === "x64") {
+    return "win32-x64";
+  }
+  return undefined;
 }
 
 function resolveToolPath(

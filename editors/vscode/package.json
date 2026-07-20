@@ -3,7 +3,7 @@
   "displayName": "Rua Language",
   "description": "Language support for Rua (Rust-like syntax, transpiles to Lua 5.5) — powered by the rua-lsp language server.",
   "version": "0.1.0",
-  "publisher": "moon-rs",
+  "publisher": "BruceZeros",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -62,8 +62,8 @@
       "properties": {
         "rua.server.path": {
           "type": "string",
-          "default": "rua-lsp",
-          "markdownDescription": "Path to the `rua-lsp` executable. Use an absolute path, or leave as `rua-lsp` to find it on `PATH`. Supports `${workspaceFolder}`."
+          "default": "",
+          "markdownDescription": "Path to the `rua-lsp` executable. Leave empty to use the binary bundled for the current platform, or set an absolute path / `${workspaceFolder}`-relative path to override it."
         },
         "rua.server.args": {
           "type": "array",
@@ -76,8 +76,8 @@
         "rua.compiler.path": {
           "type": "string",
           "scope": "resource",
-          "default": "ruac",
-          "markdownDescription": "Path to the `ruac` executable used by **Rua: Build File**. Use an absolute path, or leave as `ruac` to find it on `PATH`. Supports `${workspaceFolder}`."
+          "default": "",
+          "markdownDescription": "Path to the `ruac` executable used by **Rua: Build File**. Leave empty to use the binary bundled for the current platform, or set an absolute path / `${workspaceFolder}`-relative path to override it."
         },
         "rua.compiler.args": {
           "type": "array",

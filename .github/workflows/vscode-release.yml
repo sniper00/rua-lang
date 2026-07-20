@@ -1,0 +1,179 @@
+name: VS Code Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-toolchain:
+    name: Build ${{ matrix.platform }} toolchain
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            suffix: ""
+          - os: ubuntu-24.04
+            platform: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+            suffix: ""
+          - os: macos-13
+            platform: darwin-x64
+            rust_target: x86_64-apple-darwin
+            suffix: ""
+          - os: macos-14
+            platform: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            suffix: ""
+          - os: windows-2022
+            platform: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            suffix: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux arm64 linker
+        if: matrix.platform == 'linux-arm64'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
+
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add "${{ matrix.rust_target }}"
+
+      - name: Build rua-lsp and ruac
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "linux-arm64" ]]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --locked --release \
+            --target "${{ matrix.rust_target }}" \
+            -p rua-lsp --bin rua-lsp --features lsp
+          cargo build --locked --release \
+            --target "${{ matrix.rust_target }}" \
+            -p ruac
+
+      - name: Stage toolchain for VSIX
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.rust_target }}"
+          platform="${{ matrix.platform }}"
+          suffix="${{ matrix.suffix }}"
+          destination="editors/vscode/bin/${platform}"
+          mkdir -p "$destination"
+          cp "target/${target}/release/rua-lsp${suffix}" "$destination/rua-lsp${suffix}"
+          cp "target/${target}/release/ruac${suffix}" "$destination/ruac${suffix}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod 755 "$destination/rua-lsp" "$destination/ruac"
+          fi
+
+      - name: Upload platform toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: rua-tools-${{ matrix.platform }}
+          path: editors/vscode/bin
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Package VSIX
+    needs: build-toolchain
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension dependencies
+        run: npm ci
+
+      - name: Download platform toolchains
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rua-tools-*
+          path: editors/vscode/bin
+          merge-multiple: true
+
+      - name: Prepare executable toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 755 \
+            bin/linux-x64/rua-lsp bin/linux-x64/ruac \
+            bin/linux-arm64/rua-lsp bin/linux-arm64/ruac \
+            bin/darwin-x64/rua-lsp bin/darwin-x64/ruac \
+            bin/darwin-arm64/rua-lsp bin/darwin-arm64/ruac
+
+      - name: Verify bundled toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            test -x "bin/${platform}/rua-lsp"
+            test -x "bin/${platform}/ruac"
+          done
+          test -f bin/win32-x64/rua-lsp.exe
+          test -f bin/win32-x64/ruac.exe
+          find bin -maxdepth 2 -type f -print
+
+      - name: Check tag version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          actual="$(node -p "require('./package.json').version")"
+          test "$expected" = "$actual" || {
+            echo "tag version $expected does not match package version $actual"
+            exit 1
+          }
+
+      - name: Type-check extension
+        run: npm run check-types
+
+      - name: Run Extension Host tests
+        run: xvfb-run --auto-servernum npm run test-extension
+
+      - name: Package VSIX
+        run: npm run package
+
+      - name: List VSIX contents
+        run: npx @vscode/vsce ls
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: rua-lang-vsix
+          path: editors/vscode/*.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish to Visual Studio Marketplace
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "VSCE_PAT is required for tag-triggered Marketplace publishing"
+            exit 1
+          fi
+          npx @vscode/vsce publish -p "$VSCE_PAT"

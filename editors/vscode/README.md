@@ -16,10 +16,19 @@ Provided by the `rua-lsp` server (see `crates/rua-lsp`):
 Plus TextMate syntax highlighting and basic editing config (comments, brackets,
 auto-close) from this extension.
 
-## Prerequisites: build the tools
+## Bundled toolchain
 
-The extension launches `rua-lsp` for editor features and `ruac` for **Rua:
-Build File**. Build both first:
+Release VSIX files include `rua-lsp` and `ruac` for these platforms:
+
+- Linux x64 and arm64
+- macOS x64 and arm64
+- Windows x64
+
+The extension selects the matching binary automatically. The `rua.server.path`
+and `rua.compiler.path` settings override the bundled binaries when they are
+non-empty, which is useful when developing a local compiler build.
+
+For local development, build the tools in the repository first:
 
 The `rua-lsp` binary is behind the `lsp` feature, so pass `--features lsp`:
 
@@ -40,7 +49,8 @@ Then point the extension at them, e.g.:
 }
 ```
 
-If both tools are on `PATH`, the defaults work without configuration.
+If both tools are on `PATH`, set the corresponding settings to `rua-lsp` and
+`ruac` to use them instead of the bundled binaries.
 
 ## Develop / debug
 
@@ -60,13 +70,28 @@ open any `.rua` / `.ruai` file.
 npm run package      # produces rua-lang-<version>.vsix
 ```
 
+The release workflow builds the native toolchain in parallel and places it
+under `bin/<platform>/` before running this command. A manually packaged VSIX
+only contains binaries that have already been staged in that directory.
+
+The repository workflow at `.github/workflows/vscode-release.yml` runs for
+`v*` tags and also supports manual builds. Before tagging a release:
+
+1. Update the extension `version` in `package.json`.
+2. Create a repository secret named `VSCE_PAT` with Marketplace publish scope.
+3. Commit and push a matching tag, for example `v0.1.1`.
+
+The workflow builds every supported platform, assembles one VSIX, uploads it as
+a workflow artifact, and publishes it to the Visual Studio Marketplace for a
+tag push. A manual workflow run only builds and uploads the VSIX.
+
 ## Settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `rua.server.path` | `rua-lsp` | Path to the server (absolute, `${workspaceFolder}`-relative, or on PATH). |
+| `rua.server.path` | empty | Path to the server; empty selects the bundled platform binary. |
 | `rua.server.args` | `[]` | Extra args passed to the server. |
-| `rua.compiler.path` | `ruac` | Path to the compiler used by **Rua: Build File**. |
+| `rua.compiler.path` | empty | Path to the compiler; empty selects the bundled platform binary. |
 | `rua.compiler.args` | `[]` | Extra args appended to `ruac build <file>`. |
 | `rua.trace.server` | `off` | Trace JSON-RPC traffic (`off`/`messages`/`verbose`). |
 
