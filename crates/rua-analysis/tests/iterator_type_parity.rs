@@ -128,6 +128,22 @@ fn main() -> i64 {
 }
 
 #[test]
+fn iterator_type_parity_reverse_preserves_item_type() {
+    const SOURCE: &str = r#"
+fn main() -> Vec<i64> {
+    let values: Vec<i64> = [1, 2, 3];
+    values.iter().rev().collect()
+}
+"#;
+    let fixture = single_file_fixture(SOURCE, "main");
+    assert_eq!(
+        fixture.inference.type_of_expr(fixture.body.root_expr()),
+        Some(&Ty::Vec(Arc::new(Ty::I64)))
+    );
+    assert!(fixture.inference.diagnostics().is_empty());
+}
+
+#[test]
 fn iterator_type_parity_any_all_return_bool() {
     const SOURCE: &str = r#"
 fn main() -> bool {

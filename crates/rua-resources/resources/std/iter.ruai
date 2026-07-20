@@ -23,6 +23,9 @@ impl<T> Iter<T> {
     /// Skip the first `n` elements.
     pub fn skip(self, n: i64) -> Iter<T> {}
 
+    /// Iterate over the remaining elements in reverse order.
+    pub fn rev(self) -> Iter<T> {}
+
     /// Collect into a collection type.
     pub fn collect<C>(self) -> C {}
 

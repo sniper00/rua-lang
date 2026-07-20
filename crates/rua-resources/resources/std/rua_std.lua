@@ -232,6 +232,23 @@ function Iter:skip(count)
     end)
 end
 
+function Iter:rev()
+    local values = { n = 0 }
+    while true do
+        local value = self:next()
+        if value == nil then break end
+        values.n = values.n + 1
+        values[values.n] = value
+    end
+    local index = values.n
+    return iter.new(function()
+        if index == 0 then return nil end
+        local value = values[index]
+        index = index - 1
+        return value
+    end)
+end
+
 function Iter:collect()
     local values = { n = 0 }
     while true do

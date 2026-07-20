@@ -1537,7 +1537,7 @@ impl Codegen<'_> {
                         return false;
                     }
                 }
-                IterAdapterKind::Enumerate => {}
+                IterAdapterKind::Enumerate | IterAdapterKind::Rev => {}
             }
         }
         match plan.consumer {
@@ -3080,7 +3080,7 @@ impl Codegen<'_> {
                 let preserves_length = chain.adapters.iter().all(|adapter| {
                     matches!(
                         adapter.kind,
-                        IterAdapterKind::Map | IterAdapterKind::Enumerate
+                        IterAdapterKind::Map | IterAdapterKind::Enumerate | IterAdapterKind::Rev
                     )
                 });
                 let exact_capacity = if preserves_length {
@@ -3125,6 +3125,13 @@ impl Codegen<'_> {
             }
         };
 
+        let reverse = chain
+            .adapters
+            .iter()
+            .filter(|adapter| adapter.kind == IterAdapterKind::Rev)
+            .count()
+            % 2
+            == 1;
         let item = self.fresh_tmp();
         match &source {
             IterLoopSource::Range {
@@ -3138,17 +3145,40 @@ impl Codegen<'_> {
                     LuaExpr::name(end).binary(LuaBinaryOp::Sub, LuaExpr::integer("1"))
                 };
                 let index = self.fresh_tmp();
-                self.lua
-                    .begin_numeric_for(&index, LuaExpr::name(start), stop);
+                if reverse {
+                    let reverse_start = if *inclusive {
+                        LuaExpr::name(end)
+                    } else {
+                        LuaExpr::name(end).binary(LuaBinaryOp::Sub, LuaExpr::integer("1"))
+                    };
+                    self.lua.begin_numeric_for_with_step(
+                        &index,
+                        reverse_start,
+                        LuaExpr::name(start),
+                        Some(LuaExpr::integer("-1")),
+                    );
+                } else {
+                    self.lua
+                        .begin_numeric_for(&index, LuaExpr::name(start), stop);
+                }
                 self.local(&item, Some(LuaExpr::name(index)));
             }
             IterLoopSource::Vec { holder } => {
                 let index = self.fresh_tmp();
-                self.lua.begin_numeric_for(
-                    &index,
-                    LuaExpr::integer("1"),
-                    holder.clone().field("n"),
-                );
+                if reverse {
+                    self.lua.begin_numeric_for_with_step(
+                        &index,
+                        holder.clone().field("n"),
+                        LuaExpr::integer("1"),
+                        Some(LuaExpr::integer("-1")),
+                    );
+                } else {
+                    self.lua.begin_numeric_for(
+                        &index,
+                        LuaExpr::integer("1"),
+                        holder.clone().field("n"),
+                    );
+                }
                 self.local(&item, Some(holder.clone().index(LuaExpr::name(index))));
             }
         }
@@ -3227,6 +3257,7 @@ impl Codegen<'_> {
                         LuaExpr::name(counter).binary(LuaBinaryOp::Add, LuaExpr::integer("1")),
                     );
                 }
+                IterAdapterKind::Rev => {}
             }
         }
 
@@ -4510,6 +4541,19 @@ fn extract_iter_chain<'a>(
     } else {
         (expr, &[])
     };
+
+    // A reverse adapter can be fused only while it still applies to the
+    // original source. Reversing after map/filter would change closure side
+    // effect order, so those chains stay on the runtime iterator path.
+    let mut seen_non_reverse = false;
+    for adapter in &plan.adapters {
+        if adapter.kind == IterAdapterKind::Rev && seen_non_reverse {
+            return None;
+        }
+        if adapter.kind != IterAdapterKind::Rev {
+            seen_non_reverse = true;
+        }
+    }
 
     let mut adapters = Vec::with_capacity(plan.adapters.len());
     for adapter in plan.adapters.iter().rev() {

@@ -31,9 +31,9 @@ pub use hir::{
     MemberResolution, MemberTarget, ModuleData, ModuleId, NameRef, NameRefId, NameRefKind, NamedTy,
     NamedTypeResolver, ParameterData, Pat, PatId, PatternField, PrimitiveTy, ReceiverKind,
     ScopeData, ScopeId, ScopeKind, SignatureFingerprint, Statement, StdFunction, StdMember,
-    StdMemberKind, StructField, Substitution, TraitBound, Ty, TypeLoweringContext,
-    TypeMismatchContext, TypeRef, UnaryOp, UnifyResult, VariantKind, VariantSignature, Visibility,
-    WherePredicateData, standard_library, unify,
+    StdMemberKind, StructField, Substitution, TableMutationKind, TraitBound, Ty,
+    TypeLoweringContext, TypeMismatchContext, TypeRef, UnaryOp, UnifyResult, VariantKind,
+    VariantSignature, Visibility, WherePredicateData, standard_library, unify,
 };
 pub use ide::{
     Analysis, AnalysisHost, BuiltinDefinitionTarget, CallHierarchyItem, ClosureParameterInfo,

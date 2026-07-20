@@ -804,10 +804,33 @@ fn convert_inference_diagnostic(
                 range,
             )
         }
+        InferenceDiagnostic::UnsafeTableMutation { expr, kind } => {
+            let range = expr_range(*expr, source_map)?;
+            let message = match kind {
+                crate::hir::TableMutationKind::ArrayDelete => {
+                    "deleting an array element while iterating may shift elements and skip values"
+                }
+                crate::hir::TableMutationKind::ArrayCurrentDelete => {
+                    "deleting the current array element while iterating may corrupt the iterator and skip elements"
+                }
+                crate::hir::TableMutationKind::ArrayLength => {
+                    "changing an array's length while iterating may skip elements or visit newly added values"
+                }
+                crate::hir::TableMutationKind::HashInsert => {
+                    "inserting a key while iterating a hash table may trigger rehashing and invalidate the iterator"
+                }
+            };
+            (
+                DiagnosticCode::LintUnsafeTableMutation,
+                message.to_string(),
+                range,
+            )
+        }
     };
     Some(
         fast_diag(file_id, range, message)
             .with_code(code)
+            .with_severity(code.severity())
             .with_source(DiagnosticSource::Type),
     )
 }

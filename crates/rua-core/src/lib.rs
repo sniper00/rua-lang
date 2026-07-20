@@ -430,6 +430,7 @@ pub enum DiagnosticCode {
     LintUnreachableCode = 302,
     LintUnusedFunction = 303,
     LintInfiniteLoop = 304,
+    LintUnsafeTableMutation = 305,
     HostSourceRead = 400,
     HostProjectInvalid = 401,
     HostBuiltinInvalid = 402,
@@ -484,6 +485,7 @@ impl DiagnosticCode {
             Self::LintUnreachableCode => "W0302",
             Self::LintUnusedFunction => "W0303",
             Self::LintInfiniteLoop => "W0304",
+            Self::LintUnsafeTableMutation => "W0305",
             Self::HostSourceRead => "E0400",
             Self::HostProjectInvalid => "E0401",
             Self::HostBuiltinInvalid => "E0402",
@@ -496,7 +498,8 @@ impl DiagnosticCode {
             | Self::LintRedundantMut
             | Self::LintUnreachableCode
             | Self::LintUnusedFunction
-            | Self::LintInfiniteLoop => DiagnosticSeverity::Warning,
+            | Self::LintInfiniteLoop
+            | Self::LintUnsafeTableMutation => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
     }
@@ -544,7 +547,8 @@ impl DiagnosticCode {
             | Self::LintRedundantMut
             | Self::LintUnreachableCode
             | Self::LintUnusedFunction
-            | Self::LintInfiniteLoop => DiagnosticCategory::Lint,
+            | Self::LintInfiniteLoop
+            | Self::LintUnsafeTableMutation => DiagnosticCategory::Lint,
             Self::HostSourceRead | Self::HostProjectInvalid | Self::HostBuiltinInvalid => {
                 DiagnosticCategory::Host
             }

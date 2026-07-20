@@ -301,6 +301,7 @@ enum Statement {
         variable: String,
         start: Expr,
         stop: Expr,
+        step: Option<Expr>,
         body: Block,
     },
     Function {
@@ -379,6 +380,7 @@ enum Frame {
         variable: String,
         start: Expr,
         stop: Expr,
+        step: Option<Expr>,
         body: Block,
     },
     Function {
@@ -497,10 +499,21 @@ impl Builder {
         start: Expr,
         stop: Expr,
     ) {
+        self.begin_numeric_for_with_step(variable, start, stop, None);
+    }
+
+    pub(crate) fn begin_numeric_for_with_step(
+        &mut self,
+        variable: impl Into<String>,
+        start: Expr,
+        stop: Expr,
+        step: Option<Expr>,
+    ) {
         self.frames.push(Frame::NumericFor {
             variable: variable.into(),
             start,
             stop,
+            step,
             body: Block::default(),
         });
     }
@@ -564,11 +577,13 @@ impl Builder {
                 variable,
                 start,
                 stop,
+                step,
                 body,
             } => Statement::NumericFor {
                 variable,
                 start,
                 stop,
+                step,
                 body,
             },
             Frame::Function {
@@ -744,12 +759,17 @@ impl Printer {
                 variable,
                 start,
                 stop,
+                step,
                 body,
             } => {
+                let step = step
+                    .as_ref()
+                    .map(|step| format!(", {}", self.expression(step)))
+                    .unwrap_or_default();
                 self.line(
                     indent,
                     &format!(
-                        "for {variable} = {}, {} do",
+                        "for {variable} = {}, {}{step} do",
                         self.expression(start),
                         self.expression(stop)
                     ),

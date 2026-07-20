@@ -35,6 +35,7 @@ pub enum IterAdapterKind {
     Enumerate,
     Take,
     Skip,
+    Rev,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,20 @@ pub enum IterConsumerKind {
     All,
     Find,
     Next,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableLoopKind {
+    Array,
+    Hash,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveTableLoop {
+    table: crate::hir::LocalId,
+    kind: TableLoopKind,
+    cursor: Option<crate::hir::LocalId>,
+    reverse: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -859,7 +874,11 @@ pub fn check_resolved_diagnostics(
 ) -> Result<TypeInfo, Vec<Diag>> {
     let mut tc = Tc::new(prog, hir);
     tc.run(prog);
-    if tc.errs.is_empty() {
+    let has_errors = tc
+        .errs
+        .iter()
+        .any(|diagnostic| diagnostic.severity() != rua_core::DiagnosticSeverity::Warning);
+    if !has_errors {
         Ok(TypeInfo {
             int_divs: tc.int_divs,
             int_rems: tc.int_rems,
@@ -876,7 +895,11 @@ pub fn check_resolved_diagnostics(
             contains: tc.contains,
         })
     } else {
-        Err(tc.errs)
+        Err(tc
+            .errs
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity() != rua_core::DiagnosticSeverity::Warning)
+            .collect())
     }
 }
 
@@ -906,6 +929,10 @@ struct Tc<'hir> {
     /// Innermost loop first. `Some` collects values for a `loop` expression;
     /// `None` marks `while`/`for`, which only accept a bare `break`.
     loop_breaks: Vec<Option<Vec<(Ty, SourceRange)>>>,
+    /// Tables known to be the source of an enclosing `for` loop. This is kept
+    /// separate from type inference so nested loops can shadow the source
+    /// table without weakening checks for the outer loop.
+    table_loops: Vec<ActiveTableLoop>,
     errs: Vec<Diag>,
     /// Every `i64 / i64` division expression.
     int_divs: std::collections::HashSet<ExprId>,
@@ -943,6 +970,7 @@ impl<'hir> Tc<'hir> {
             closure_mutable_capture_allowed: Vec::new(),
             closure_returns: Vec::new(),
             loop_breaks: Vec::new(),
+            table_loops: Vec::new(),
             errs: Vec::new(),
             int_divs: std::collections::HashSet::new(),
             int_rems: std::collections::HashSet::new(),
@@ -980,6 +1008,168 @@ impl<'hir> Tc<'hir> {
 
     fn resolved_target(&self, expression: &Expr) -> Option<crate::hir::ResolvedTarget> {
         self.hir.expression_targets.get(&expression.id).copied()
+    }
+
+    fn root_local_target(&self, expression: &Expr) -> Option<crate::hir::LocalId> {
+        match &expression.kind {
+            ExprKind::Path(_) => match self.resolved_target(expression) {
+                Some(crate::hir::ResolvedTarget::Local(local)) => Some(local),
+                _ => None,
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                self.root_local_target(base)
+            }
+            _ => None,
+        }
+    }
+
+    fn table_source_root(&self, expression: &Expr) -> Option<crate::hir::LocalId> {
+        match &expression.kind {
+            ExprKind::MethodCall { recv, method, .. }
+                if matches!(
+                    method.as_str(),
+                    "iter"
+                        | "into_iter"
+                        | "map"
+                        | "filter"
+                        | "filter_map"
+                        | "enumerate"
+                        | "take"
+                        | "skip"
+                ) =>
+            {
+                self.table_source_root(recv)
+            }
+            _ => self.root_local_target(expression),
+        }
+    }
+
+    fn is_reverse_iter(&self, expression: &Expr) -> bool {
+        match &expression.kind {
+            ExprKind::MethodCall { method, .. } if method == "rev" => true,
+            ExprKind::MethodCall { recv, method, .. }
+                if matches!(
+                    method.as_str(),
+                    "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip"
+                ) =>
+            {
+                self.is_reverse_iter(recv)
+            }
+            _ => false,
+        }
+    }
+
+    fn table_loop_for_iter(&self, iter: &Expr, iter_ty: &Ty) -> Option<ActiveTableLoop> {
+        if let ExprKind::Call { callee, args } = &iter.kind
+            && let ExprKind::Path(segments) = &callee.kind
+            && segments.len() == 1
+            && let Some(table) = args.first().and_then(|arg| self.root_local_target(arg))
+        {
+            let kind = match segments[0].as_str() {
+                "ipairs" => TableLoopKind::Array,
+                "pairs" => TableLoopKind::Hash,
+                _ => return None,
+            };
+            return Some(ActiveTableLoop {
+                table,
+                kind,
+                cursor: None,
+                reverse: false,
+            });
+        }
+
+        let kind = match iter_ty {
+            Ty::Vec(_) => TableLoopKind::Array,
+            Ty::Iter(_, draft)
+                if matches!(
+                    draft.source.kind,
+                    IterSourceKind::Vec | IterSourceKind::VecIter | IterSourceKind::VecIntoIter
+                ) =>
+            {
+                TableLoopKind::Array
+            }
+            _ => return None,
+        };
+        self.table_source_root(iter).map(|table| ActiveTableLoop {
+            table,
+            kind,
+            cursor: None,
+            reverse: self.is_reverse_iter(iter),
+        })
+    }
+
+    fn active_table_loop(&self, base: &Expr) -> Option<ActiveTableLoop> {
+        let table = self.root_local_target(base)?;
+        self.table_loops
+            .iter()
+            .rev()
+            .find(|context| context.table == table)
+            .copied()
+    }
+
+    fn is_none_expr(&self, expression: &Expr) -> bool {
+        matches!(&expression.kind, ExprKind::Path(segments) if segments.len() == 1 && segments[0] == "None")
+            && matches!(
+                self.resolved_target(expression),
+                Some(crate::hir::ResolvedTarget::Builtin(
+                    rua_core::BuiltinId::VariantOptionNone
+                ))
+            )
+    }
+
+    fn table_mutation_warning(&mut self, span: SourceRange, message: impl Into<String>) {
+        self.err_with_code(
+            rua_core::DiagnosticCode::LintUnsafeTableMutation,
+            span,
+            message.into(),
+        );
+    }
+
+    fn check_table_index_assignment(&mut self, target: &Expr, value: &Expr) {
+        let ExprKind::Index { base, index } = &target.kind else {
+            return;
+        };
+        let Some(context) = self.active_table_loop(base) else {
+            return;
+        };
+        if context.kind == TableLoopKind::Hash {
+            if !self.is_none_expr(value) {
+                self.table_mutation_warning(
+                    target.span,
+                    "assigning a value while iterating a hash table may add a new key and trigger rehashing",
+                );
+            }
+            return;
+        }
+        if context.reverse || !self.is_none_expr(value) {
+            return;
+        }
+        let current = context
+            .cursor
+            .is_some_and(|cursor| self.root_local_target(index) == Some(cursor));
+        let message = if current {
+            "deleting the current array element while iterating may corrupt the iterator and skip elements"
+        } else {
+            "deleting an array element while iterating may shift elements and skip values"
+        };
+        self.table_mutation_warning(target.span, message);
+    }
+
+    fn check_table_method_mutation(&mut self, recv: &Expr, method: &str, span: SourceRange) {
+        let Some(context) = self.active_table_loop(recv) else {
+            return;
+        };
+        let message = match (context.kind, method) {
+            (TableLoopKind::Array, "pop") if context.reverse => return,
+            (TableLoopKind::Array, "push" | "pop") => {
+                "changing an array's length while iterating may skip elements or visit newly added values"
+            }
+            (TableLoopKind::Hash, "insert") => {
+                "inserting a key while iterating a hash table may trigger rehashing and invalidate the iterator"
+            }
+            _ => return,
+        };
+        self.table_mutation_warning(span, message);
     }
 
     fn definition_for_target(
@@ -1624,9 +1814,13 @@ impl<'hir> Tc<'hir> {
                 self.loop_breaks.pop();
             }
             Stmt::For {
-                var, iter, body, ..
+                var,
+                var_span,
+                iter,
+                body,
             } => {
                 let iter_ty = self.infer(iter);
+                let mut table_loop = self.table_loop_for_iter(iter, &iter_ty);
                 let elem = match iter_ty {
                     Ty::Iter(item, draft) => {
                         let item = item.as_ref().clone();
@@ -1661,9 +1855,16 @@ impl<'hir> Tc<'hir> {
                 };
                 self.push();
                 self.bind(var, elem);
+                if let Some(context) = &mut table_loop {
+                    context.cursor = self.hir.binding_target(*var_span);
+                    self.table_loops.push(*context);
+                }
                 self.loop_breaks.push(None);
                 self.block(body);
                 self.loop_breaks.pop();
+                if table_loop.is_some() {
+                    self.table_loops.pop();
+                }
                 self.pop();
             }
             Stmt::WhileLet { pat, expr, body } => {
@@ -1990,6 +2191,7 @@ impl<'hir> Tc<'hir> {
                     | "enumerate"
                     | "take"
                     | "skip"
+                    | "rev"
                     | "collect"
                     | "fold"
                     | "count"
@@ -2134,7 +2336,8 @@ impl<'hir> Tc<'hir> {
                 };
                 Some(append(kind, (**item).clone()))
             }
-            "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip" => {
+            "rev" if args.is_empty() => Some(append(IterAdapterKind::Rev, (**item).clone())),
+            "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip" | "rev" => {
                 self.err(
                     span,
                     format!("iterator adapter `{method}` has invalid arguments"),
@@ -2145,6 +2348,7 @@ impl<'hir> Tc<'hir> {
                     "enumerate" => IterAdapterKind::Enumerate,
                     "take" => IterAdapterKind::Take,
                     "skip" => IterAdapterKind::Skip,
+                    "rev" => IterAdapterKind::Rev,
                     _ => IterAdapterKind::Map,
                 };
                 Some(append(kind, Ty::Unknown))
@@ -2432,6 +2636,7 @@ impl<'hir> Tc<'hir> {
                 ..
             } => {
                 let receiver_ty = self.infer(recv);
+                self.check_table_method_mutation(recv, method, e.span);
                 let (rt, optional_chain) = if *optional {
                     match receiver_ty {
                         Ty::Option(item) => (item.as_ref().clone(), true),
@@ -2813,6 +3018,7 @@ impl<'hir> Tc<'hir> {
             ExprKind::Assign { op, target, value } => {
                 let target_ty = self.infer(target);
                 let value_ty = self.infer(value);
+                self.check_table_index_assignment(target, value);
                 if let Some(op) = op {
                     if matches!(target_ty, Ty::I64) && matches!(value_ty, Ty::I64) {
                         if *op == BinOp::Div {

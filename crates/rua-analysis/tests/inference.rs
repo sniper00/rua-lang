@@ -3,7 +3,7 @@ use std::{fs, path::Path, sync::Arc};
 use rua_analysis::{
     Analysis, AnalysisHost, BinaryOp, BindingId, Body, BodySourceMap, CallTarget, Change, DefId,
     DefKind, Expr, ExprId, FileId, FileKind, InferenceDiagnostic, InferenceResult, PatId,
-    PrimitiveTy, SourceRootId, SourceRootKind, Ty,
+    PrimitiveTy, SourceRootId, SourceRootKind, TableMutationKind, Ty,
 };
 
 struct Fixture {
@@ -1114,6 +1114,58 @@ fn parity(flag: bool, count: i64) -> i64 {
         };
         assert_eq!(native_type.to_string(), expected, "binding `{name}`");
     }
+}
+
+#[test]
+fn table_mutations_inside_for_are_reported_as_warnings() {
+    const SOURCE: &str =
+        "fn main() { let mut values = [1]; for value in values { values.push(value); } }";
+    let fixture = fixture(SOURCE, "main");
+    assert!(fixture.inference.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            InferenceDiagnostic::UnsafeTableMutation {
+                kind: TableMutationKind::ArrayLength,
+                ..
+            }
+        )
+    }));
+
+    let (compiler_diagnostics, _) = ruac::check_diags(SOURCE);
+    assert!(compiler_diagnostics.iter().any(|diagnostic| {
+        diagnostic.diagnostic.code == rua_analysis::DiagnosticCode::LintUnsafeTableMutation
+    }));
+
+    let (host, file_id) = single_file_host(SOURCE);
+    let diagnostics = host.analysis().diagnostics(file_id);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == Some(rua_analysis::DiagnosticCode::LintUnsafeTableMutation)
+            && diagnostic.severity() == rua_analysis::DiagnosticSeverity::Warning
+    }));
+}
+
+#[test]
+fn hash_insert_inside_pairs_is_reported_as_a_warning() {
+    const SOURCE: &str = "fn main() { let mut values = HashMap::new(); for key in pairs(values) { values.insert(key, 1); } }";
+    let fixture = fixture(SOURCE, "main");
+    assert!(fixture.inference.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            InferenceDiagnostic::UnsafeTableMutation {
+                kind: TableMutationKind::HashInsert,
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
+fn reverse_vec_pop_inside_for_is_not_reported_as_unsafe() {
+    const SOURCE: &str = "fn main() { let mut values = [1, 2, 3]; for _value in values.iter().rev() { values.pop(); } }";
+    let fixture = fixture(SOURCE, "main");
+    assert!(fixture.inference.diagnostics().iter().all(|diagnostic| {
+        !matches!(diagnostic, InferenceDiagnostic::UnsafeTableMutation { .. })
+    }));
 }
 
 #[test]

@@ -26,7 +26,7 @@ pub use def_map::{
 };
 pub(crate) use def_map::{IdentityContext, IdentityInterner, IdentityLease};
 pub use infer::{
-    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource,
+    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource, TableMutationKind,
     TypeMismatchContext,
 };
 pub use item_tree::{

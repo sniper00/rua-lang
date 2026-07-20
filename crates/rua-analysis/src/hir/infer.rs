@@ -34,6 +34,20 @@ pub enum TypeMismatchContext {
 
 type LoopBreakValues = Vec<(Option<ExprId>, Ty)>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableLoopKind {
+    Array,
+    Hash,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveTableLoop {
+    table: BindingId,
+    kind: TableLoopKind,
+    cursor: Option<BindingId>,
+    reverse: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InferenceDiagnostic {
     TypeMismatch {
@@ -91,6 +105,18 @@ pub enum InferenceDiagnostic {
         binding: BindingId,
         name: String,
     },
+    UnsafeTableMutation {
+        expr: ExprId,
+        kind: TableMutationKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableMutationKind {
+    ArrayDelete,
+    ArrayCurrentDelete,
+    ArrayLength,
+    HashInsert,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -216,6 +242,7 @@ struct InferenceContext<'a> {
     closure_returns: Vec<Ty>,
     /// `Some` collects values for `loop`; `None` marks `while`/`for`.
     loop_breaks: Vec<Option<LoopBreakValues>>,
+    table_loops: Vec<ActiveTableLoop>,
 }
 
 /// Check whether `lhs op rhs` is clearly incompatible for arithmetic —
@@ -293,6 +320,7 @@ impl<'a> InferenceContext<'a> {
             diagnostics: Vec::new(),
             closure_returns: Vec::new(),
             loop_breaks: Vec::new(),
+            table_loops: Vec::new(),
         }
     }
 
@@ -451,6 +479,177 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
+    fn root_local_binding(&self, expression: ExprId) -> Option<BindingId> {
+        match self.body.expr(expression)? {
+            Expr::Path(path) if path.len() == 1 => match self.resolution.resolve(path[0])? {
+                LocalResolveResult::Resolved(local) => Some(local.binding()),
+                _ => None,
+            },
+            Expr::Field { base, .. } | Expr::Index { base, .. } => self.root_local_binding(*base),
+            _ => None,
+        }
+    }
+
+    fn table_source_binding(&self, expression: ExprId) -> Option<BindingId> {
+        match self.body.expr(expression)? {
+            Expr::MethodCall {
+                receiver, method, ..
+            } if self
+                .body
+                .name_ref(*method)
+                .and_then(|name| name.name())
+                .is_some_and(|name| {
+                    matches!(
+                        name,
+                        "iter"
+                            | "into_iter"
+                            | "map"
+                            | "filter"
+                            | "filter_map"
+                            | "enumerate"
+                            | "take"
+                            | "skip"
+                    )
+                }) =>
+            {
+                self.table_source_binding(*receiver)
+            }
+            _ => self.root_local_binding(expression),
+        }
+    }
+
+    fn is_reverse_iter(&self, expression: ExprId) -> bool {
+        match self.body.expr(expression) {
+            Some(Expr::MethodCall { method, .. })
+                if self.body.name_ref(*method).and_then(|name| name.name()) == Some("rev") =>
+            {
+                true
+            }
+            Some(Expr::MethodCall {
+                receiver, method, ..
+            }) if self
+                .body
+                .name_ref(*method)
+                .and_then(|name| name.name())
+                .is_some_and(|name| {
+                    matches!(
+                        name,
+                        "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip"
+                    )
+                }) =>
+            {
+                self.is_reverse_iter(*receiver)
+            }
+            _ => false,
+        }
+    }
+
+    fn table_loop_for_iter(&self, iterable: ExprId, iterable_ty: &Ty) -> Option<ActiveTableLoop> {
+        if let Some(Expr::Call { callee, args }) = self.body.expr(iterable)
+            && let Some(Expr::Path(path)) = self.body.expr(*callee)
+            && path.len() == 1
+            && let Some(name) = self.body.name_ref(path[0]).and_then(|name| name.name())
+            && let Some(table) = args.first().and_then(|arg| self.root_local_binding(*arg))
+        {
+            let kind = match name {
+                "ipairs" => TableLoopKind::Array,
+                "pairs" => TableLoopKind::Hash,
+                _ => return None,
+            };
+            return Some(ActiveTableLoop {
+                table,
+                kind,
+                cursor: None,
+                reverse: false,
+            });
+        }
+
+        let kind = match iterable_ty {
+            Ty::Vec(_) => TableLoopKind::Array,
+            Ty::Iterator(_) => TableLoopKind::Array,
+            _ => return None,
+        };
+        self.table_source_binding(iterable)
+            .map(|table| ActiveTableLoop {
+                table,
+                kind,
+                cursor: None,
+                reverse: self.is_reverse_iter(iterable),
+            })
+    }
+
+    fn active_table_loop(&self, base: ExprId) -> Option<ActiveTableLoop> {
+        let table = self.root_local_binding(base)?;
+        self.table_loops
+            .iter()
+            .rev()
+            .find(|context| context.table == table)
+            .copied()
+    }
+
+    fn is_none_expr(&self, expression: ExprId) -> bool {
+        let Some(Expr::Path(path)) = self.body.expr(expression) else {
+            return false;
+        };
+        path.len() == 1
+            && self
+                .body
+                .name_ref(path[0])
+                .and_then(|name| name.name())
+                .is_some_and(|name| name == "None")
+            && self.is_unshadowed_path(path)
+            && builtin_constructor_id(self.body, path) == Some(BuiltinId::VariantOptionNone)
+    }
+
+    fn check_table_index_assignment(&mut self, target: ExprId, value: ExprId) {
+        let Some(Expr::Index { base, index }) = self.body.expr(target) else {
+            return;
+        };
+        let Some(context) = self.active_table_loop(*base) else {
+            return;
+        };
+        if context.kind == TableLoopKind::Hash {
+            if !self.is_none_expr(value) {
+                self.diagnostics
+                    .push(InferenceDiagnostic::UnsafeTableMutation {
+                        expr: target,
+                        kind: TableMutationKind::HashInsert,
+                    });
+            }
+            return;
+        }
+        if context.reverse || !self.is_none_expr(value) {
+            return;
+        }
+        let kind = if context
+            .cursor
+            .is_some_and(|cursor| self.root_local_binding(*index) == Some(cursor))
+        {
+            TableMutationKind::ArrayCurrentDelete
+        } else {
+            TableMutationKind::ArrayDelete
+        };
+        self.diagnostics
+            .push(InferenceDiagnostic::UnsafeTableMutation { expr: target, kind });
+    }
+
+    fn check_table_method_mutation(&mut self, receiver: ExprId, method: NameRefId, call: ExprId) {
+        let Some(context) = self.active_table_loop(receiver) else {
+            return;
+        };
+        let Some(method_name) = self.body.name_ref(method).and_then(|name| name.name()) else {
+            return;
+        };
+        let kind = match (context.kind, method_name) {
+            (TableLoopKind::Array, "pop") if context.reverse => return,
+            (TableLoopKind::Array, "push" | "pop") => TableMutationKind::ArrayLength,
+            (TableLoopKind::Hash, "insert") => TableMutationKind::HashInsert,
+            _ => return,
+        };
+        self.diagnostics
+            .push(InferenceDiagnostic::UnsafeTableMutation { expr: call, kind });
+    }
+
     fn infer_statement(&mut self, statement: &Statement) -> bool {
         match statement {
             Statement::Missing => false,
@@ -532,6 +731,7 @@ impl<'a> InferenceContext<'a> {
                 body,
             } => {
                 let iterable_ty = self.infer_expr(*iterable, None);
+                let mut table_loop = self.table_loop_for_iter(*iterable, &iterable_ty);
                 let (item_ty, diverges) = match iterable_ty.clone() {
                     Ty::Iterator(item) | Ty::Vec(item) => (item.as_ref().clone(), false),
                     Ty::Never => (Ty::Unknown, true),
@@ -545,9 +745,16 @@ impl<'a> InferenceContext<'a> {
                     _ => (Ty::Unknown, false),
                 };
                 self.set_binding(*binding, item_ty);
+                if let Some(context) = &mut table_loop {
+                    context.cursor = Some(*binding);
+                    self.table_loops.push(*context);
+                }
                 self.loop_breaks.push(None);
                 self.infer_expr(*body, Some(&Ty::UNIT));
                 self.loop_breaks.pop();
+                if table_loop.is_some() {
+                    self.table_loops.pop();
+                }
                 diverges
             }
         }
@@ -1015,6 +1222,7 @@ impl<'a> InferenceContext<'a> {
         } else {
             self.infer_expr(value, Some(&target_ty))
         };
+        self.check_table_index_assignment(target, value);
         self.report_mismatch(
             InferenceSource::Expr(value),
             &target_ty,
@@ -1525,6 +1733,7 @@ impl<'a> InferenceContext<'a> {
             else {
                 return self.infer_unresolved_member_call(call, args);
             };
+            self.check_table_method_mutation(receiver, method, call);
             if let Ty::Option(item) = &receiver_ty
                 && name == "map"
                 && let [closure] = args
@@ -1779,6 +1988,7 @@ impl<'a> InferenceContext<'a> {
                 }
                 Ty::Iterator(Arc::new(item.clone()))
             }
+            "rev" if args.is_empty() => Ty::Iterator(Arc::new(item.clone())),
             // map: iterator item becomes the closure's return type.
             "map" => {
                 if let [closure] = args {

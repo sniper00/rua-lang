@@ -271,6 +271,9 @@ let mut pending = [1, 2, 3].iter().map(|value| value * 2).skip(1);
 print("{}", pending.next().unwrap());
 print("{}", pending.next().unwrap());
 
+let mut reversed = [1, 2, 3].iter().rev();
+print("{}", reversed.next().unwrap());
+
 let mut characters = "你a".chars();
 print("{}", characters.next().unwrap());
 
@@ -280,7 +283,7 @@ for value in range {
 }
 "#;
     let (lua, output) = compile_and_run("first-class-iterator", source);
-    assert_success(&output, "4\n6\n你\n2\n3\n4\n", &lua);
+    assert_success(&output, "4\n6\n3\n你\n2\n3\n4\n", &lua);
     assert!(
         lua.contains(":map("),
         "stored adapter was unexpectedly fused: {lua}"
@@ -288,6 +291,27 @@ for value in range {
     assert!(
         lua.contains(":next()"),
         "runtime iterator protocol was not used: {lua}"
+    );
+    assert!(
+        lua.contains(":rev()"),
+        "stored reverse iterator did not use runtime adapter: {lua}"
+    );
+}
+
+#[test]
+fn reverse_vec_iteration_allows_safe_pop_deletion() {
+    let source = r#"
+let mut values = [1, 2, 3, 4];
+for _value in values.iter().rev() {
+    values.pop();
+}
+print("{}", values.len());
+"#;
+    let (lua, output) = compile_and_run("reverse-vec-pop", source);
+    assert_success(&output, "0\n", &lua);
+    assert!(
+        lua.contains(", 1, -1 do"),
+        "reverse loop was not lowered directly: {lua}"
     );
 }
 

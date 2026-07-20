@@ -569,6 +569,36 @@ fn main() {
 }
 
 #[test]
+fn iterator_typeck_supports_reverse_vec_adapter() {
+    use crate::typeck::{IterAdapterKind as A, IterConsumerKind as C};
+
+    let info = iterator_type_info(
+        "fn main() { let values = [1, 2, 3]; let reversed = values.iter().rev().collect::<Vec<_>>(); }",
+    );
+    let plan = info
+        .iter_plans()
+        .find(|plan| plan.consumer == C::CollectVec)
+        .expect("reverse collect plan");
+    assert_eq!(
+        plan.adapters
+            .iter()
+            .map(|adapter| adapter.kind)
+            .collect::<Vec<_>>(),
+        [A::Rev]
+    );
+}
+
+#[test]
+fn iterator_codegen_reverses_vec_loop_without_runtime_adapter() {
+    let lua = crate::compile_str(
+        "fn main() { let values = [1, 2, 3]; for value in values.iter().rev() { print(\"{}\", value); } }",
+    )
+    .expect("compile reverse Vec loop");
+    assert!(lua.contains(", 1, -1 do"), "missing descending loop: {lua}");
+    assert!(!lua.contains(":rev()"), "reverse loop was not fused: {lua}");
+}
+
+#[test]
 fn iterator_codegen_does_not_fall_through_to_legacy_method_calls() {
     let lua = crate::compile_str("fn main() -> i64 { (0..4).count() }")
         .expect("compile fused range count");
@@ -3632,4 +3662,93 @@ fn compile_str_artifact_produces_source_map() {
         "at least one mapping should belong to the user source"
     );
     assert_eq!(artifact.source_files, vec![String::new()]);
+}
+
+#[test]
+fn array_length_mutation_inside_for_is_warned_but_still_compiles() {
+    let src = "fn main() { let mut values = [1]; for value in values { values.push(value); } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(diags.iter().any(|diagnostic| {
+        diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            && diagnostic.msg.contains("array's length")
+    }));
+    compile_str(src).expect("table mutation warning must not reject compilation");
+}
+
+#[test]
+fn array_value_replacement_inside_for_is_safe() {
+    let src = "fn main() { let mut values = [1]; for value in values { values[1] = value; } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        !diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+        }),
+        "value replacement must be safe, got {diags:?}"
+    );
+}
+
+#[test]
+fn reverse_array_pop_inside_for_is_safe() {
+    let src = "fn main() { let mut values = [1, 2, 3]; for _value in values.iter().rev() { values.pop(); } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        !diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+        }),
+        "reverse pop must be safe, got {diags:?}"
+    );
+}
+
+#[test]
+fn array_current_deletion_inside_ipairs_is_warned() {
+    let src =
+        "fn main() { let mut values = [1]; for index in ipairs(values) { values[index] = None; } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+                && diagnostic
+                    .msg
+                    .contains("deleting the current array element")
+        }),
+        "expected current-element warning, got {diags:?}"
+    );
+}
+
+#[test]
+fn hash_insertion_inside_pairs_is_warned() {
+    let src = "fn main() { let mut values = HashMap::new(); values.insert(1, 1); for key in pairs(values) { values.insert(key, 1); } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+                && diagnostic.msg.contains("rehashing")
+        }),
+        "expected hash insertion warning, got {diags:?}"
+    );
+}
+
+#[test]
+fn hash_index_insertion_inside_pairs_is_warned() {
+    let src = "fn main() { let mut values = HashMap::new(); for key in pairs(values) { values[key] = 1; } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+                && diagnostic.msg.contains("may add a new key")
+        }),
+        "expected hash index insertion warning, got {diags:?}"
+    );
+}
+
+#[test]
+fn hash_deletion_inside_pairs_is_safe() {
+    let src = "fn main() { let mut values = HashMap::new(); values.insert(1, 1); for key in pairs(values) { values.remove(key); } }";
+    let (diags, _) = crate::check_diags(src);
+    assert!(
+        !diags.iter().any(|diagnostic| {
+            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+        }),
+        "hash deletion must be safe, got {diags:?}"
+    );
 }
