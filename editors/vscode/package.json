@@ -132,7 +132,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit",
-    "test-extension": "npm run check-types && tsc && npm run compile && cargo build --manifest-path ../../Cargo.toml -p ruac -p rua-lsp --features rua-lsp/lsp && node dist/test/runTest.js",
+    "test-extension": "npm run check-types && tsc && npm run compile && cargo build --manifest-path ../../Cargo.toml -p ruac -p rua-ide --features lsp && node dist/test/runTest.js",
     "package": "vsce package"
   },
   "devDependencies": {
