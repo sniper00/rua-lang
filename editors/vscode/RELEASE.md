@@ -13,13 +13,14 @@
 Edit `editors/vscode/package.json` and increment `version` (semver):
 
 ```json
-"version": "0.1.3",
+"version": "<new-version>",
 ```
 
 ### 2. Commit, tag, push
 
 ```bash
-VERSION="0.1.3"
+# Replace with the actual version you're releasing
+VERSION="<new-version>"   # e.g. "0.1.3"
 git add editors/vscode/package.json
 git commit -m "chore: bump extension version to $VERSION"
 git tag "v$VERSION"
