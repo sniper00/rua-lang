@@ -1924,7 +1924,7 @@ fn struct_literal_type(
     let source_map = &ctx.source_map;
     let inference = ctx.inference.as_ref()?;
     for (expr_id, expr) in body.exprs() {
-        let Expr::StructLiteral { path: _, .. } = expr else {
+        let Expr::StructLiteral { .. } = expr else {
             continue;
         };
         let range = source_map.expr_range(expr_id)?;
