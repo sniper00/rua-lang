@@ -26,7 +26,7 @@ pub use def_map::{
 };
 pub(crate) use def_map::{IdentityContext, IdentityInterner, IdentityLease};
 pub use infer::{
-    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource, TableMutationKind,
+    CallInfo, CallTarget, InferenceDiagnostic, InferenceResult, InferenceSource,
     TypeMismatchContext,
 };
 pub use item_tree::{
@@ -39,6 +39,7 @@ pub use member::{
     BuiltinType, ImplementationData, MemberCandidate, MemberIndex, MemberKind, MemberOrigin,
     MemberResolution, MemberTarget, TraitBound,
 };
+pub use rua_core::TableMutationKind;
 pub use scope::{
     BodyResolution, BodyScopes, CaptureKind, LocalBindingId, LocalCapture, LocalResolveResult,
     LocalUse, LocalUseKind, ScopeData, ScopeId, ScopeKind,

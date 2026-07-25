@@ -422,9 +422,19 @@ pub(crate) fn fast_diagnostics(
         }
     }
 
-    let reference_index =
-        ReferenceIndex::build_cancellable(Arc::clone(db), Arc::clone(&def_map), &mut || false)
-            .unwrap_or_default();
+    let reference_index = def_map
+        .project_id()
+        .and_then(|project_id| db.project_reference_index(project_id))
+        .unwrap_or_else(|| {
+            Arc::new(
+                ReferenceIndex::build_cancellable(
+                    Arc::clone(db),
+                    Arc::clone(&def_map),
+                    &mut || false,
+                )
+                .unwrap_or_default(),
+            )
+        });
 
     // Cross-file lint: unused private functions. A recursive call is owned by
     // the function itself and therefore does not make that function reachable.
@@ -818,23 +828,9 @@ fn convert_inference_diagnostic(
         }
         InferenceDiagnostic::UnsafeTableMutation { expr, kind } => {
             let range = expr_range(*expr, source_map)?;
-            let message = match kind {
-                crate::hir::TableMutationKind::ArrayDelete => {
-                    "deleting an array element while iterating may shift elements and skip values"
-                }
-                crate::hir::TableMutationKind::ArrayCurrentDelete => {
-                    "deleting the current array element while iterating may corrupt the iterator and skip elements"
-                }
-                crate::hir::TableMutationKind::ArrayLength => {
-                    "changing an array's length while iterating may skip elements or visit newly added values"
-                }
-                crate::hir::TableMutationKind::HashInsert => {
-                    "inserting a key while iterating a hash table may trigger rehashing and invalidate the iterator"
-                }
-            };
             (
                 DiagnosticCode::LintUnsafeTableMutation,
-                message.to_string(),
+                kind.message().to_string(),
                 range,
             )
         }

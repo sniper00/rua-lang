@@ -1072,7 +1072,7 @@ impl Server {
         for diag in &params.context.diagnostics {
             if let Some(lsp_types::NumberOrString::String(code_str)) = diag.code.as_ref() {
                 match code_str.as_str() {
-                    "W0300" => {
+                    code if code == rua_analysis::DiagnosticCode::LintUnusedVariable.as_str() => {
                         // Unused variable → prefix with _
                         let diag_range = &diag.range;
                         let d_start = line_index.offset(
@@ -1109,7 +1109,9 @@ impl Server {
                             });
                         }
                     }
-                    "E0212" => {
+                    code if code
+                        == rua_analysis::DiagnosticCode::TypeImmutableAssignment.as_str() =>
+                    {
                         let diag_range = &diag.range;
                         let Some(project_id) = project_id else {
                             continue;

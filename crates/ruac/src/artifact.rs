@@ -250,8 +250,7 @@ fn module_name_from_output(output_path: &str) -> String {
     output_path
         .strip_suffix(".lua")
         .unwrap_or(output_path)
-        .replace('/', ".")
-        .replace('\\', ".")
+        .replace(['/', '\\'], ".")
 }
 
 #[cfg(test)]

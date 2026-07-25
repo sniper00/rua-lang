@@ -795,6 +795,53 @@ pub fn builtin_value(name: &str) -> Option<BuiltinId> {
     }
 }
 
+/// Returns whether an iterator adapter preserves the underlying iteration
+/// source and direction.
+pub fn is_transparent_iterator_adapter(name: &str) -> bool {
+    matches!(
+        name,
+        "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip"
+    )
+}
+
+/// Describes a table mutation that is unsafe during forward iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableMutationKind {
+    /// Deleting a non-current array element may shift and skip later values.
+    ArrayDelete,
+    /// Deleting the current array element may invalidate the iterator cursor.
+    ArrayCurrentDelete,
+    /// Changing an array's length may skip or unexpectedly visit values.
+    ArrayLength,
+    /// Assigning through an index may add a hash key and trigger rehashing.
+    HashAssign,
+    /// Inserting a hash key may rehash the table and invalidate its iterator.
+    HashInsert,
+}
+
+impl TableMutationKind {
+    /// Human-readable explanation shared by compiler and IDE diagnostics.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ArrayDelete => {
+                "deleting an array element while iterating may shift elements and skip values"
+            }
+            Self::ArrayCurrentDelete => {
+                "deleting the current array element while iterating may corrupt the iterator and skip elements"
+            }
+            Self::ArrayLength => {
+                "changing an array's length while iterating may skip elements or visit newly added values"
+            }
+            Self::HashAssign => {
+                "assigning a value while iterating a hash table may add a new key and trigger rehashing"
+            }
+            Self::HashInsert => {
+                "inserting a key while iterating a hash table may trigger rehashing and invalidate the iterator"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +875,16 @@ mod tests {
     fn builtin_manifest_is_complete_and_stable() {
         assert_eq!(BUILTIN_MANIFEST_VERSION, 1);
         assert_eq!(BUILTIN_TYPES.len(), 6);
+    }
+
+    #[test]
+    fn shared_iterator_and_table_mutation_metadata_is_stable() {
+        assert!(is_transparent_iterator_adapter("map"));
+        assert!(!is_transparent_iterator_adapter("rev"));
+        assert_eq!(
+            TableMutationKind::ArrayLength.message(),
+            "changing an array's length while iterating may skip elements or visit newly added values"
+        );
     }
 
     #[test]

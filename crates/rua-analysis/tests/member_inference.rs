@@ -956,7 +956,7 @@ fn metadata() {
 "#;
     let fixture = fixture(SOURCE, "metadata");
     let resolution = resolution_at(&fixture, "/*find*/", NameRefKind::Path);
-    assert_standard_target(&resolution, "Annotations", "find");
+    assert_standard_target(resolution, "Annotations", "find");
     assert_eq!(resolution.kind(), MemberKind::AssociatedFunction);
     assert!(fixture.inference.diagnostics().is_empty());
 }

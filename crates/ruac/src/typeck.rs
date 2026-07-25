@@ -13,6 +13,7 @@
 use crate::ast::*;
 use crate::diag::Diag;
 use crate::token::SourceRange;
+use rua_core::{TableMutationKind, is_transparent_iterator_adapter};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -599,6 +600,24 @@ fn subst_ty(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Ty {
     subst_ty_changed(ty, subst).unwrap_or_else(|| ty.clone())
 }
 
+/// Substitute two type parameters; produce `None` when neither changed.
+fn subst_pair(
+    a: &Arc<Ty>,
+    b: &Arc<Ty>,
+    subst: &HashMap<GenericParamId, Ty>,
+    mk: impl FnOnce(Arc<Ty>, Arc<Ty>) -> Ty,
+) -> Option<Ty> {
+    let new_a = subst_ty_changed(a, subst);
+    let new_b = subst_ty_changed(b, subst);
+    match (new_a, new_b) {
+        (None, None) => None,
+        (new_a, new_b) => Some(mk(
+            Arc::new(new_a.unwrap_or_else(|| a.as_ref().clone())),
+            Arc::new(new_b.unwrap_or_else(|| b.as_ref().clone())),
+        )),
+    }
+}
+
 /// Return a substituted type only when this subtree contains a generic slot.
 /// Keeping the unchanged branch as-is is important for nested collection and
 /// closure types: generic call checking is common, while allocating every
@@ -608,28 +627,8 @@ fn subst_ty_changed(ty: &Ty, subst: &HashMap<GenericParamId, Ty>) -> Option<Ty> 
         Ty::Generic { id, .. } => Some(subst.get(id).cloned().unwrap_or(Ty::Unknown)),
         Ty::Vec(t) => subst_ty_changed(t, subst).map(|inner| Ty::Vec(Arc::new(inner))),
         Ty::Option(t) => subst_ty_changed(t, subst).map(|inner| Ty::Option(Arc::new(inner))),
-        Ty::Result(ok, err) => {
-            let new_ok = subst_ty_changed(ok, subst);
-            let new_err = subst_ty_changed(err, subst);
-            match (new_ok, new_err) {
-                (None, None) => None,
-                (new_ok, new_err) => Some(Ty::Result(
-                    Arc::new(new_ok.unwrap_or_else(|| ok.as_ref().clone())),
-                    Arc::new(new_err.unwrap_or_else(|| err.as_ref().clone())),
-                )),
-            }
-        }
-        Ty::Map(key, value) => {
-            let new_key = subst_ty_changed(key, subst);
-            let new_value = subst_ty_changed(value, subst);
-            match (new_key, new_value) {
-                (None, None) => None,
-                (new_key, new_value) => Some(Ty::Map(
-                    Arc::new(new_key.unwrap_or_else(|| key.as_ref().clone())),
-                    Arc::new(new_value.unwrap_or_else(|| value.as_ref().clone())),
-                )),
-            }
-        }
+        Ty::Result(ok, err) => subst_pair(ok, err, subst, Ty::Result),
+        Ty::Map(key, value) => subst_pair(key, value, subst, Ty::Map),
         Ty::Iter(item, draft) => subst_ty_changed(item, subst)
             .map(|new_item| Ty::Iter(Arc::new(new_item), draft.clone())),
         Ty::Tuple(items) => {
@@ -721,6 +720,11 @@ pub struct TypeInfo {
     first_closure: Option<SourceRange>,
     iter_plans: HashMap<ExprId, IterPlan>,
     contains: HashMap<ExprId, ContainsKind>,
+    /// Non-fatal diagnostics (warnings) produced during type-checking, such as
+    /// unused-variable lints and table-mutation safety checks. These are retained
+    /// here so that production compilation paths (which return `Ok` when only
+    /// warnings exist) can still surface them to the caller.
+    pub warnings: Vec<Diag>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -875,11 +879,11 @@ pub fn check_resolved_diagnostics(
 ) -> Result<TypeInfo, Vec<Diag>> {
     let mut tc = Tc::new(prog, hir);
     tc.run(prog);
-    let has_errors = tc
+    let (warnings, errors): (Vec<_>, Vec<_>) = tc
         .errs
-        .iter()
-        .any(|diagnostic| diagnostic.severity() != rua_core::DiagnosticSeverity::Warning);
-    if !has_errors {
+        .into_iter()
+        .partition(|d| d.severity() == rua_core::DiagnosticSeverity::Warning);
+    if errors.is_empty() {
         Ok(TypeInfo {
             int_divs: tc.int_divs,
             int_rems: tc.int_rems,
@@ -894,13 +898,10 @@ pub fn check_resolved_diagnostics(
             first_closure: tc.first_closure,
             iter_plans: tc.iter_plans,
             contains: tc.contains,
+            warnings,
         })
     } else {
-        Err(tc
-            .errs
-            .into_iter()
-            .filter(|diagnostic| diagnostic.severity() != rua_core::DiagnosticSeverity::Warning)
-            .collect())
+        Err(errors)
     }
 }
 
@@ -1035,17 +1036,9 @@ impl<'hir> Tc<'hir> {
     fn table_source_root(&self, expression: &Expr) -> Option<crate::hir::LocalId> {
         match &expression.kind {
             ExprKind::MethodCall { recv, method, .. }
-                if matches!(
-                    method.as_str(),
-                    "iter"
-                        | "into_iter"
-                        | "map"
-                        | "filter"
-                        | "filter_map"
-                        | "enumerate"
-                        | "take"
-                        | "skip"
-                ) =>
+                if method == "iter"
+                    || method == "into_iter"
+                    || is_transparent_iterator_adapter(method) =>
             {
                 self.table_source_root(recv)
             }
@@ -1057,10 +1050,7 @@ impl<'hir> Tc<'hir> {
         match &expression.kind {
             ExprKind::MethodCall { method, .. } if method == "rev" => true,
             ExprKind::MethodCall { recv, method, .. }
-                if matches!(
-                    method.as_str(),
-                    "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip"
-                ) =>
+                if is_transparent_iterator_adapter(method) =>
             {
                 self.is_reverse_iter(recv)
             }
@@ -1143,10 +1133,7 @@ impl<'hir> Tc<'hir> {
         };
         if context.kind == TableLoopKind::Hash {
             if !self.is_none_expr(value) {
-                self.table_mutation_warning(
-                    target.span,
-                    "assigning a value while iterating a hash table may add a new key and trigger rehashing",
-                );
+                self.table_mutation_warning(target.span, TableMutationKind::HashAssign.message());
             }
             return;
         }
@@ -1156,29 +1143,25 @@ impl<'hir> Tc<'hir> {
         let current = context
             .cursor
             .is_some_and(|cursor| self.root_local_target(index) == Some(cursor));
-        let message = if current {
-            "deleting the current array element while iterating may corrupt the iterator and skip elements"
+        let kind = if current {
+            TableMutationKind::ArrayCurrentDelete
         } else {
-            "deleting an array element while iterating may shift elements and skip values"
+            TableMutationKind::ArrayDelete
         };
-        self.table_mutation_warning(target.span, message);
+        self.table_mutation_warning(target.span, kind.message());
     }
 
     fn check_table_method_mutation(&mut self, recv: &Expr, method: &str, span: SourceRange) {
         let Some(context) = self.active_table_loop(recv) else {
             return;
         };
-        let message = match (context.kind, method) {
-            (TableLoopKind::Array, "pop") if context.reverse => return,
-            (TableLoopKind::Array, "push" | "pop") => {
-                "changing an array's length while iterating may skip elements or visit newly added values"
-            }
-            (TableLoopKind::Hash, "insert") => {
-                "inserting a key while iterating a hash table may trigger rehashing and invalidate the iterator"
-            }
+        let kind = match (context.kind, method) {
+            (TableLoopKind::Array, "pop" | "push") if context.reverse => return,
+            (TableLoopKind::Array, "push" | "pop") => TableMutationKind::ArrayLength,
+            (TableLoopKind::Hash, "insert") => TableMutationKind::HashInsert,
             _ => return,
         };
-        self.table_mutation_warning(span, message);
+        self.table_mutation_warning(span, kind.message());
     }
 
     fn definition_for_target(
@@ -1820,7 +1803,7 @@ impl<'hir> Tc<'hir> {
                 if let Some(returns) = self.closure_returns.last_mut() {
                     returns.push(ty);
                 } else if let Some(expected) = self.function_return_ty.clone() {
-                    self.check_return_type(expected, &ty, e.span);
+                    self.check_return_type(&expected, &ty, e.span);
                 }
             }
             Stmt::Return(None) => {
@@ -1938,8 +1921,8 @@ impl<'hir> Tc<'hir> {
         }
     }
 
-    fn check_return_type(&mut self, expected: Ty, actual: &Ty, span: SourceRange) {
-        if expected.is_concrete() && actual.is_concrete() && !compatible(&expected, actual) {
+    fn check_return_type(&mut self, expected: &Ty, actual: &Ty, span: SourceRange) {
+        if expected.is_concrete() && actual.is_concrete() && !compatible(expected, actual) {
             self.err(
                 span,
                 format!(
@@ -2731,11 +2714,11 @@ impl<'hir> Tc<'hir> {
                     {
                         self.user_methods
                             .insert(e.id, UserMethodDispatch::Static(definition));
+                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         let params = signature.params.clone();
                         let ret = signature.ret.clone();
                         let generics = signature.generics.clone();
                         let generic_bounds = signature.generic_bounds.clone();
-                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         self.check_method_call(type_name, method, &params, &arg_tys, args, sp);
                         if !generics.is_empty() {
                             let mut substitution = HashMap::new();
@@ -2763,9 +2746,9 @@ impl<'hir> Tc<'hir> {
                         && let Some(signature) = self.method_sigs.get(&definition).cloned()
                     {
                         self.user_methods.insert(e.id, UserMethodDispatch::Dynamic);
+                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         let params = signature.params.clone();
                         let ret = signature.ret.clone();
-                        self.check_mutable_method_receiver(recv, method, &signature, sp);
                         self.check_method_call(trait_name, method, &params, &arg_tys, args, sp);
                         return ret;
                     }

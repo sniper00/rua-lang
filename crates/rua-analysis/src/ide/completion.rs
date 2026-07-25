@@ -30,7 +30,6 @@ use super::{
 /// Bundled context for a single completion request.  Built once at the entry
 /// point and passed through to scope / member / path completions, replacing
 /// the previous 4–5 ad-hoc parameters.
-#[allow(dead_code)]
 pub(crate) struct CompletionContext<'a> {
     pub db: &'a Arc<BaseDb>,
     pub def_map: Arc<DefMap>,
@@ -42,11 +41,7 @@ pub(crate) struct CompletionContext<'a> {
 
     // ── AST-derived context (replaces token-based heuristics) ──────────
     pub in_type_position: bool,
-    pub in_expression_position: bool,
-    pub in_pattern_position: bool,
     pub in_method_body: bool,
-    pub in_impl_block: bool,
-    pub in_loop: bool,
 }
 
 impl<'a> CompletionContext<'a> {
@@ -62,30 +57,18 @@ impl<'a> CompletionContext<'a> {
         let partial_range = partial_ident_range(text.as_ref(), offset);
         let token = token_at_offset(root, offset);
 
-        // Walk up from the cursor token to determine syntactic context.
-        let mut in_type_position = false;
-        let mut in_expression_position = false;
-        let mut in_pattern_position = false;
-        let mut in_impl_block = false;
-        let mut in_loop = false;
-
-        let mut node: Option<rua_syntax::SyntaxNode> = token.as_ref().and_then(|t| t.parent());
-        while let Some(current) = &node {
-            match current.kind() {
-                SyntaxKind::Colon | SyntaxKind::ParamList | SyntaxKind::FieldDecl => {
-                    in_type_position = true
-                }
-                SyntaxKind::Block => in_expression_position = true,
-                SyntaxKind::LetStmt => in_pattern_position = true,
-                SyntaxKind::MatchArm => in_pattern_position = true,
-                SyntaxKind::ImplDecl => in_impl_block = true,
-                SyntaxKind::WhileExpr | SyntaxKind::LoopExpr | SyntaxKind::ForExpr => {
-                    in_loop = true;
-                }
-                _ => {}
-            }
-            node = current.parent();
-        }
+        // Walk up from the cursor token to determine whether this is a type site.
+        let in_type_position = token
+            .as_ref()
+            .and_then(|token| token.parent())
+            .into_iter()
+            .flat_map(|node| node.ancestors())
+            .any(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::Colon | SyntaxKind::ParamList | SyntaxKind::FieldDecl
+                )
+            });
 
         // Determine whether cursor is inside a method body.
         let in_method_body = innermost_body_owner(&def_map, position, offset)
@@ -100,11 +83,7 @@ impl<'a> CompletionContext<'a> {
             partial_range,
             token,
             in_type_position,
-            in_expression_position,
-            in_pattern_position,
             in_method_body,
-            in_impl_block,
-            in_loop,
         })
     }
 }
@@ -1092,11 +1071,11 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
             .with_relevance(CompletionRelevance::member());
 
         if candidate.kind() == crate::hir::MemberKind::Method {
-            // Look up the method resolution; HIR params already exclude
-            // `self` (it's stored as the receiver), so snippet params are
-            // correct as-is. We prepend the receiver to the detail display.
-            let method_res = member_index.resolve_method(&receiver_ty, &name);
-            let callable = method_res.as_ref().and_then(|r| r.callable().cloned());
+            // Reuse the candidate's method resolution. HIR params already
+            // exclude `self` (it's stored as the receiver), so snippet params
+            // are correct as-is. We prepend the receiver to the detail display.
+            let method_res = candidate.resolution();
+            let callable = method_res.callable().cloned();
 
             let params: Vec<String> = {
                 let types: Vec<String> = callable
@@ -1105,28 +1084,24 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
                     .unwrap_or_default();
                 // Try to get original parameter names from the definition's
                 // CallableSignature so snippets show names, not just types.
-                let names: Vec<Option<String>> = method_res
-                    .as_ref()
-                    .and_then(|res| match res.target() {
-                        crate::hir::MemberTarget::Definition(def_id) => {
-                            let def = def_map.definition(def_id)?;
-                            if let crate::hir::ItemSignature::Callable(sig) = def.signature() {
+                let names: Vec<Option<String>> = match method_res.target() {
+                    crate::hir::MemberTarget::Definition(def_id) => def_map
+                        .definition(def_id)
+                        .and_then(|def| match def.signature() {
+                            crate::hir::ItemSignature::Callable(sig) => Some(
                                 // sig.params() already excludes self (it's in
                                 // sig.receiver()), so params align 1:1 with
                                 // callable.params().
-                                Some(
-                                    sig.params()
-                                        .iter()
-                                        .map(|p| p.name().map(|n| n.to_string()))
-                                        .collect(),
-                                )
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| vec![None; types.len()]);
+                                sig.params()
+                                    .iter()
+                                    .map(|p| p.name().map(|n| n.to_string()))
+                                    .collect(),
+                            ),
+                            _ => None,
+                        }),
+                    _ => None,
+                }
+                .unwrap_or_else(|| vec![None; types.len()]);
                 types
                     .iter()
                     .enumerate()
@@ -1137,7 +1112,7 @@ fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
                     .collect()
             };
 
-            let sig_detail = match method_res.as_ref().and_then(|r| r.receiver()) {
+            let sig_detail = match method_res.receiver() {
                 Some(receiver) => {
                     let self_str = match receiver {
                         crate::hir::ReceiverKind::Value => "self".to_string(),

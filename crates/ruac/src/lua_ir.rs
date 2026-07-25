@@ -269,10 +269,13 @@ pub(crate) struct Block {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
     Blank,
-    Statement {
-        anchor: Option<SourceRange>,
-        statement: Statement,
-    },
+    Statement(Box<AnchoredStatement>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnchoredStatement {
+    anchor: Option<SourceRange>,
+    statement: Statement,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -649,7 +652,10 @@ impl Builder {
         let anchor = self.anchors.last().copied();
         self.current_block_mut()
             .entries
-            .push(Entry::Statement { anchor, statement });
+            .push(Entry::Statement(Box::new(AnchoredStatement {
+                anchor,
+                statement,
+            })));
     }
 }
 
@@ -678,10 +684,10 @@ impl Printer {
         for entry in &block.entries {
             match entry {
                 Entry::Blank => self.output.push('\n'),
-                Entry::Statement { anchor, statement } => {
+                Entry::Statement(entry) => {
                     let generated_start = self.output.len();
-                    self.statement(statement, indent);
-                    if let Some(source) = anchor {
+                    self.statement(&entry.statement, indent);
+                    if let Some(source) = &entry.anchor {
                         self.mappings.push(SourceMapping {
                             generated_start,
                             generated_end: self.output.len(),

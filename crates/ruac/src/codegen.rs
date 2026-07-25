@@ -5100,7 +5100,8 @@ impl<'a> FunctionComponents<'a> {
         self.stack.push(function);
         self.on_stack[function] = true;
 
-        for dependency in self.graph[function].clone() {
+        for dependency_index in 0..self.graph[function].len() {
+            let dependency = self.graph[function][dependency_index];
             if self.indices[dependency].is_none() {
                 self.visit(dependency);
                 self.lowlinks[function] = self.lowlinks[function].min(self.lowlinks[dependency]);

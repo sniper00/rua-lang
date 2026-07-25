@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use rua_core::{BuiltinId, builtin_type, builtin_value};
+use rua_core::{
+    BuiltinId, TableMutationKind, builtin_type, builtin_value, is_transparent_iterator_adapter,
+};
 
 use super::body::MapLiteralEntry;
 use super::{
@@ -114,14 +116,6 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         kind: TableMutationKind,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TableMutationKind {
-    ArrayDelete,
-    ArrayCurrentDelete,
-    ArrayLength,
-    HashInsert,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -484,15 +478,21 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
-    fn root_local_binding(&self, expression: ExprId) -> Option<BindingId> {
-        match self.body.expr(expression)? {
-            Expr::Path(path) if path.len() == 1 => match self.resolution.resolve(path[0])? {
-                LocalResolveResult::Resolved(local) => Some(local.binding()),
-                _ => None,
-            },
-            Expr::Field { base, .. } | Expr::Index { base, .. } => self.root_local_binding(*base),
-            _ => None,
-        }
+    fn resolve_standard_member(
+        &self,
+        owner_name: &str,
+        member_name: &str,
+        expected: Option<&Ty>,
+    ) -> Option<MemberResolution> {
+        standard_owner_type(owner_name, expected)
+            .and_then(|owner_ty| {
+                self.member_index
+                    .resolve_associated_ty(&owner_ty, member_name)
+            })
+            .or_else(|| {
+                self.member_index
+                    .resolve_standard_associated(owner_name, member_name)
+            })
     }
 
     fn table_source_binding(&self, expression: ExprId) -> Option<BindingId> {
@@ -504,22 +504,12 @@ impl<'a> InferenceContext<'a> {
                 .name_ref(*method)
                 .and_then(|name| name.name())
                 .is_some_and(|name| {
-                    matches!(
-                        name,
-                        "iter"
-                            | "into_iter"
-                            | "map"
-                            | "filter"
-                            | "filter_map"
-                            | "enumerate"
-                            | "take"
-                            | "skip"
-                    )
+                    name == "iter" || name == "into_iter" || is_transparent_iterator_adapter(name)
                 }) =>
             {
                 self.table_source_binding(*receiver)
             }
-            _ => self.root_local_binding(expression),
+            _ => self.assigned_local_binding(expression),
         }
     }
 
@@ -536,12 +526,7 @@ impl<'a> InferenceContext<'a> {
                 .body
                 .name_ref(*method)
                 .and_then(|name| name.name())
-                .is_some_and(|name| {
-                    matches!(
-                        name,
-                        "map" | "filter" | "filter_map" | "enumerate" | "take" | "skip"
-                    )
-                }) =>
+                .is_some_and(is_transparent_iterator_adapter) =>
             {
                 self.is_reverse_iter(*receiver)
             }
@@ -554,7 +539,9 @@ impl<'a> InferenceContext<'a> {
             && let Some(Expr::Path(path)) = self.body.expr(*callee)
             && path.len() == 1
             && let Some(name) = self.body.name_ref(path[0]).and_then(|name| name.name())
-            && let Some(table) = args.first().and_then(|arg| self.root_local_binding(*arg))
+            && let Some(table) = args
+                .first()
+                .and_then(|arg| self.assigned_local_binding(*arg))
         {
             let kind = match name {
                 "ipairs" => TableLoopKind::Array,
@@ -584,7 +571,7 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn active_table_loop(&self, base: ExprId) -> Option<ActiveTableLoop> {
-        let table = self.root_local_binding(base)?;
+        let table = self.assigned_local_binding(base)?;
         self.table_loops
             .iter()
             .rev()
@@ -628,7 +615,7 @@ impl<'a> InferenceContext<'a> {
         }
         let kind = if context
             .cursor
-            .is_some_and(|cursor| self.root_local_binding(*index) == Some(cursor))
+            .is_some_and(|cursor| self.assigned_local_binding(*index) == Some(cursor))
         {
             TableMutationKind::ArrayCurrentDelete
         } else {
@@ -646,7 +633,7 @@ impl<'a> InferenceContext<'a> {
             return;
         };
         let kind = match (context.kind, method_name) {
-            (TableLoopKind::Array, "pop") if context.reverse => return,
+            (TableLoopKind::Array, "pop" | "push") if context.reverse => return,
             (TableLoopKind::Array, "push" | "pop") => TableMutationKind::ArrayLength,
             (TableLoopKind::Hash, "insert") => TableMutationKind::HashInsert,
             _ => return,
@@ -1409,13 +1396,7 @@ impl<'a> InferenceContext<'a> {
             else {
                 return Ty::Unknown;
             };
-            let resolution = standard_owner_type(owner_name, expected)
-                .and_then(|owner_ty| self.member_index.resolve_associated_ty(&owner_ty, name))
-                .or_else(|| {
-                    self.member_index
-                        .resolve_standard_associated(owner_name, name)
-                });
-            let Some(resolution) = resolution else {
+            let Some(resolution) = self.resolve_standard_member(owner_name, name, expected) else {
                 return Ty::Unknown;
             };
             let mut ty = resolution.ty().clone();
@@ -2396,15 +2377,7 @@ impl<'a> InferenceContext<'a> {
         }
         let owner_name = self.body.name_ref(*owner_ref)?.name()?;
         let member_name = self.body.name_ref(*member_ref)?.name()?;
-        let resolution = standard_owner_type(owner_name, expected)
-            .and_then(|owner_ty| {
-                self.member_index
-                    .resolve_associated_ty(&owner_ty, member_name)
-            })
-            .or_else(|| {
-                self.member_index
-                    .resolve_standard_associated(owner_name, member_name)
-            })?;
+        let resolution = self.resolve_standard_member(owner_name, member_name, expected)?;
         if resolution.kind() != MemberKind::AssociatedFunction {
             return None;
         }
@@ -2820,9 +2793,9 @@ fn standard_owner_type(name: &str, expected: Option<&Ty>) -> Option<Ty> {
 }
 
 fn known_method_receiver(ty: &Ty, method: &str) -> bool {
-    !matches!(ty, Ty::Unknown | Ty::GenericParam(_) | Ty::Never)
-        && !matches!(ty, Ty::Primitive(primitive) if primitive.name() == "String")
-        && !(matches!(ty, Ty::Primitive(_)) && method == "to_string")
+    !(matches!(ty, Ty::Unknown | Ty::GenericParam(_) | Ty::Never)
+        || matches!(ty, Ty::Primitive(primitive) if primitive.name() == "String")
+        || (matches!(ty, Ty::Primitive(_)) && method == "to_string"))
 }
 
 fn literal_ty(kind: LiteralKind) -> Ty {
