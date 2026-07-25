@@ -30,11 +30,11 @@ pub enum CodegenRule {
 /// Resolved builtin identity to codegen rule.
 #[derive(Clone, Debug)]
 pub struct CodegenRules {
-    rules: HashMap<rua_core::BuiltinId, CodegenRule>,
+    rules: HashMap<rua_common::BuiltinId, CodegenRule>,
 }
 
 impl CodegenRules {
-    pub fn get(&self, builtin: rua_core::BuiltinId) -> Option<&CodegenRule> {
+    pub fn get(&self, builtin: rua_common::BuiltinId) -> Option<&CodegenRule> {
         self.rules.get(&builtin)
     }
 }
@@ -45,19 +45,19 @@ impl Default for CodegenRules {
 
         // --- Option<T> ---
         // Lua-idiomatic: Some(v) is the bare value, None is nil.
-        m.insert(rua_core::BuiltinId::VariantOptionNone, CodegenRule::Nil);
+        m.insert(rua_common::BuiltinId::VariantOptionNone, CodegenRule::Nil);
         m.insert(
-            rua_core::BuiltinId::VariantOptionSome,
+            rua_common::BuiltinId::VariantOptionSome,
             CodegenRule::InlineArg,
         );
 
         // --- Result<T, E> ---
         m.insert(
-            rua_core::BuiltinId::VariantResultOk,
+            rua_common::BuiltinId::VariantResultOk,
             CodegenRule::TaggedResult { ok: true },
         );
         m.insert(
-            rua_core::BuiltinId::VariantResultErr,
+            rua_common::BuiltinId::VariantResultErr,
             CodegenRule::TaggedResult { ok: false },
         );
 
@@ -75,7 +75,7 @@ pub(crate) struct RuntimeModule {
     pub export: Option<String>,
     pub alias: String,
     pub abi: Option<u32>,
-    pub dispatch: rua_resources::StdDispatch,
+    pub dispatch: rua_common::StdDispatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -158,7 +158,7 @@ pub(crate) struct LoadedStandardLibrary {
 }
 
 fn parse_standard_library(
-    library: &rua_resources::StdLibrary,
+    library: &rua_common::StdLibrary,
 ) -> Result<LoadedStandardLibrary, String> {
     let mut items = Vec::new();
     let mut metadata = StandardMetadata::default();
@@ -208,7 +208,7 @@ fn parse_standard_library(
                 export: helper.export.clone(),
                 alias: helper.alias.clone().unwrap_or_else(|| name.clone()),
                 abi: helper.abi,
-                dispatch: rua_resources::StdDispatch::Module,
+                dispatch: rua_common::StdDispatch::Module,
             },
         );
     }
@@ -231,14 +231,14 @@ fn parse_standard_library(
 
 /// Parse the compiler's versioned, embedded builtin declarations.
 pub(crate) fn load_embedded_builtins() -> Result<LoadedStandardLibrary, String> {
-    let library = rua_resources::embedded_std().map_err(ToString::to_string)?;
+    let library = rua_common::embedded_std().map_err(ToString::to_string)?;
     parse_standard_library(library)
 }
 
 /// Load and validate an external standard-library root. The directory must
 /// contain `std.toml`; unlisted `.ruai` files are intentionally ignored.
 pub(crate) fn load_builtins_dir(dir: &Path) -> Result<LoadedStandardLibrary, String> {
-    let library = rua_resources::load_std_dir(dir).map_err(|error| error.to_string())?;
+    let library = rua_common::load_std_dir(dir).map_err(|error| error.to_string())?;
     parse_standard_library(&library)
 }
 

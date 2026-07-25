@@ -9,10 +9,10 @@ use crate::lexer::RuaLexer;
 use crate::token::{RuaTokenKind as T, SourceRange};
 use crate::tokenize::StrictTokenStream;
 use crate::tokenize::TokenizeError;
-use rua_core::{
+use rua_common::{
     Attribute, DiagnosticCode, FileId, MetaItem, MetaValue, StructuredDiagnostic, TextRange,
 };
-use rua_lex::LexErrorKind;
+use rua_common::LexErrorKind;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2066,7 +2066,7 @@ impl<'a> Parser<'a> {
 }
 
 fn leading_trivia_has_blank_line(trivia: &str) -> bool {
-    rua_lex::lex(trivia).into_iter().any(|token| {
+    rua_common::lex(trivia).into_iter().any(|token| {
         if token.kind != T::Whitespace {
             return false;
         }
@@ -2081,7 +2081,7 @@ fn leading_trivia_has_blank_line(trivia: &str) -> bool {
 
 fn render_leading_documentation(trivia: &str, inner: bool) -> Option<String> {
     let mut docs = Vec::new();
-    for token in rua_lex::lex(trivia) {
+    for token in rua_common::lex(trivia) {
         let raw = &trivia[token.range.start() as usize..token.range.end() as usize];
         match token.kind {
             T::Whitespace => {

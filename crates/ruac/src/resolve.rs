@@ -3,8 +3,8 @@
 use crate::ast::*;
 use crate::diag::Diag;
 use crate::token::SourceRange;
-use rua_core::DiagnosticCode;
-use rua_project::{
+use rua_common::DiagnosticCode;
+use rua_common::{
     FileId, LogicalSourcePath, ProjectSpec, SourceProvider, module_path_from_relative_file,
 };
 use std::collections::{BTreeMap, HashSet};
@@ -40,7 +40,7 @@ pub fn discover_modules_from_filesystem(
     root_file: &Path,
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let source_root = root_file
@@ -374,7 +374,7 @@ fn materialize_filesystem_modules(
     items: &mut Vec<Item>,
     source_order: &mut Vec<ChunkEntry>,
     modules: BTreeMap<String, DiscoveredModule<PathBuf>>,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let mut entries = Vec::new();
@@ -393,7 +393,7 @@ fn materialize_filesystem_modules(
 fn materialize_filesystem_module(
     name: String,
     module: DiscoveredModule<PathBuf>,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<ModDecl, Diag> {
     let (mut items, chunk, mut source_order, source_is_declaration, source_file) =
@@ -452,7 +452,7 @@ fn materialize_provider_modules<P: SourceProvider>(
     source_order: &mut Vec<ChunkEntry>,
     modules: BTreeMap<String, DiscoveredModule<(FileId, LogicalSourcePath)>>,
     provider: &P,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
     let mut entries = Vec::new();
@@ -472,7 +472,7 @@ fn materialize_provider_module<P: SourceProvider>(
     name: String,
     module: DiscoveredModule<(FileId, LogicalSourcePath)>,
     provider: &P,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<ModDecl, Diag> {
     let (mut items, chunk, mut source_order, source_is_declaration, source_file) =

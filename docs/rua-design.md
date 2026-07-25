@@ -241,7 +241,7 @@ Rua 使用 path-as-module：源码不包含 `mod` 声明，文件相对 source r
 不得逃离 source root。源码级 `mod name;` 和 inline `mod name { ... }` 均为语法错误。
 
 filesystem compiler、IO-free `ProjectSpec` 与 native analysis 都调用
-`rua-project::module_path_from_relative_file`，因此 build、diagnostics、completion、
+`rua_common::module_path_from_relative_file`，因此 build、diagnostics、completion、
 hover 和 goto definition 看到同一模块图。workspace source 优先于共置 declaration
 和配置库；低优先级库不会覆盖 workspace 模块。
 

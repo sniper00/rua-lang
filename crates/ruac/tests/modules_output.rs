@@ -74,7 +74,7 @@ fn cli_modules_mode_uses_plain_require_and_configured_lua_path() {
     let project = TestDir::new("runtime");
     write_module_project(project.path());
     let output_dir = project.path().join("dist");
-    let standard_library = workspace_root().join("crates/rua-resources/resources/std");
+    let standard_library = workspace_root().join("crates/rua-common/resources/std");
     let compile = Command::new(env!("CARGO_BIN_EXE_ruac"))
         .args(["build", "main.rua", "--emit", "modules", "--out-dir"])
         .arg(&output_dir)
@@ -236,7 +236,7 @@ fn modules_mode_does_not_emit_directory_namespace_files() {
     assert!(console.source.ends_with("return Console\n"));
 
     let output_dir = project.path().join("dist");
-    let standard_library = workspace_root().join("crates/rua-resources/resources/std");
+    let standard_library = workspace_root().join("crates/rua-common/resources/std");
     let compile = Command::new(env!("CARGO_BIN_EXE_ruac"))
         .args(["build", "main.rua", "--emit", "modules", "--out-dir"])
         .arg(&output_dir)

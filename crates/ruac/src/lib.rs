@@ -4,7 +4,7 @@
 //! `docs/rua-design.md`). This crate owns the strict parser, resolved HIR,
 //! identity-driven type checking, backend layout, and structured Lua IR.
 //!
-//! IDE semantics live in `rua-analysis`; this crate exposes only compiler
+//! IDE semantics live in `rua-ide`; this crate exposes only compiler
 //! parsing, checking, and code-generation APIs.
 
 pub mod annotations;
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::{error::Error, fmt};
 
 use crate::diag::Diag;
-use rua_project::{ProjectSpec, SourceProvider};
+use rua_common::{ProjectSpec, SourceProvider};
 
 /// Filesystem compilation inputs that are independent from Rua source text.
 #[derive(Clone, Debug, Default)]
@@ -46,7 +46,7 @@ pub struct CompileOptions {
     /// Directories prepended to Lua `package.path` by generated entry chunks.
     pub lua_path: Vec<PathBuf>,
     /// Active compile-time flags and keyed values used by `cfg`/`cfg_attr`.
-    pub cfg: rua_core::CfgOptions,
+    pub cfg: rua_common::CfgOptions,
 }
 
 /// Load builtin `.ruai` declarations into a declaration-only semantic module.
@@ -59,7 +59,7 @@ pub fn load_builtins(program: &mut ast::Program, dir: Option<&Path>) -> Result<(
     } else {
         builtins::load_embedded_builtins()
     }
-    .map_err(|error| Diag::bare(rua_core::DiagnosticCode::HostBuiltinInvalid, error))?;
+    .map_err(|error| Diag::bare(rua_common::DiagnosticCode::HostBuiltinInvalid, error))?;
     program.standard_library = Some(loaded.metadata);
     for entry in &mut program.source_order {
         if let ast::ChunkEntry::Item(index) = entry {
@@ -141,7 +141,7 @@ impl CompileFailure {
 
     pub fn structured_diagnostics(
         &self,
-    ) -> impl ExactSizeIterator<Item = &rua_core::StructuredDiagnostic> {
+    ) -> impl ExactSizeIterator<Item = &rua_common::StructuredDiagnostic> {
         self.diagnostics
             .iter()
             .map(|diagnostic| &diagnostic.diagnostic)
@@ -192,7 +192,7 @@ pub fn compile_project_modules_artifact<P: SourceProvider>(
         .ok_or_else(|| {
             CompileFailure::single(
                 Diag::bare(
-                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    rua_common::DiagnosticCode::HostProjectInvalid,
                     format!("root logical path `{root_path}` has no `.rua` file stem"),
                 ),
                 files.clone(),
@@ -206,7 +206,7 @@ pub fn compile_project_modules_artifact<P: SourceProvider>(
     )
     .map_err(|error| {
         CompileFailure::single(
-            Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+            Diag::bare(rua_common::DiagnosticCode::HostProjectInvalid, error),
             files.clone(),
         )
     })?;
@@ -226,7 +226,7 @@ fn check_project_with_diagnostics<P: SourceProvider>(
         .ok_or_else(|| {
             fail(
                 Diag::bare(
-                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    rua_common::DiagnosticCode::HostProjectInvalid,
                     "project root_file is not present in ProjectSpec.files".to_string(),
                 ),
                 Vec::new(),
@@ -237,7 +237,7 @@ fn check_project_with_diagnostics<P: SourceProvider>(
     let source = provider.load(project.root_file).map_err(|error| {
         fail(
             Diag::bare(
-                rua_core::DiagnosticCode::HostSourceRead,
+                rua_common::DiagnosticCode::HostSourceRead,
                 format!("reading `{root_path}`: {error}"),
             ),
             files.clone(),
@@ -256,7 +256,7 @@ fn check_project_with_diagnostics<P: SourceProvider>(
         })?;
     attributes::apply_cfg(&mut program, &project.cfg).map_err(|error| {
         fail(
-            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            Diag::bare(rua_common::DiagnosticCode::ParseUnexpectedToken, error),
             files.clone(),
         )
     })?;
@@ -311,9 +311,9 @@ fn _compile_str(src: &str, builtins_dir: Option<&Path>) -> Result<String, Compil
             files.clone(),
         )
     })?;
-    attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()).map_err(|error| {
+    attributes::apply_cfg(&mut program, &rua_common::CfgOptions::default()).map_err(|error| {
         CompileFailure::single(
-            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            Diag::bare(rua_common::DiagnosticCode::ParseUnexpectedToken, error),
             files.clone(),
         )
     })?;
@@ -357,9 +357,9 @@ fn _compile_str_artifact(
             files.clone(),
         )
     })?;
-    attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()).map_err(|error| {
+    attributes::apply_cfg(&mut program, &rua_common::CfgOptions::default()).map_err(|error| {
         CompileFailure::single(
-            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            Diag::bare(rua_common::DiagnosticCode::ParseUnexpectedToken, error),
             files.clone(),
         )
     })?;
@@ -418,7 +418,7 @@ pub fn compile_path_metadata_with_options(
     let (typed, files) = check_path_with_options(path, options)?;
     annotations::render_toml(typed.annotations(), typed.hir(), annotation).map_err(|error| {
         CompileFailure::single(
-            Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+            Diag::bare(rua_common::DiagnosticCode::HostProjectInvalid, error),
             files,
         )
     })
@@ -462,7 +462,7 @@ pub fn compile_path_artifact_with_std(
             library: Vec::new(),
             library_mounts: BTreeMap::new(),
             lua_path: Vec::new(),
-            cfg: rua_core::CfgOptions::default(),
+            cfg: rua_common::CfgOptions::default(),
         },
     )
 }
@@ -478,7 +478,7 @@ pub fn compile_path_artifact_with_options(
         codegen::generate_with_source_map_and_lua_path(&typed, &rules, &options.lua_path).map_err(
             |error| {
                 CompileFailure::single(
-                    Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                    Diag::bare(rua_common::DiagnosticCode::HostProjectInvalid, error),
                     files.clone(),
                 )
             },
@@ -508,7 +508,7 @@ pub fn compile_path_modules_artifact_with_options(
         .ok_or_else(|| {
             CompileFailure::single(
                 Diag::bare(
-                    rua_core::DiagnosticCode::HostProjectInvalid,
+                    rua_common::DiagnosticCode::HostProjectInvalid,
                     format!(
                         "root source path `{}` has no UTF-8 file stem",
                         path.display()
@@ -523,7 +523,7 @@ pub fn compile_path_modules_artifact_with_options(
         codegen::generate_modules_with_source_maps(&typed, &rules, &root_output, &options.lua_path)
             .map_err(|error| {
                 CompileFailure::single(
-                    Diag::bare(rua_core::DiagnosticCode::HostProjectInvalid, error),
+                    Diag::bare(rua_common::DiagnosticCode::HostProjectInvalid, error),
                     files.clone(),
                 )
             })?;
@@ -571,7 +571,7 @@ pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>)
         path,
         &[],
         &BTreeMap::new(),
-        &rua_core::CfgOptions::default(),
+        &rua_common::CfgOptions::default(),
     )
 }
 
@@ -579,13 +579,13 @@ fn parse_and_load_modules_with_libraries(
     path: &Path,
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
-    cfg: &rua_core::CfgOptions,
+    cfg: &rua_common::CfgOptions,
 ) -> Result<(ast::Program, Vec<String>), CompileFailure> {
     let files = vec![path.display().to_string()];
     let src = std::fs::read_to_string(path).map_err(|error| {
         CompileFailure::single(
             Diag::bare(
-                rua_core::DiagnosticCode::HostSourceRead,
+                rua_common::DiagnosticCode::HostSourceRead,
                 format!("reading {}: {error}", path.display()),
             ),
             files.clone(),
@@ -603,7 +603,7 @@ fn parse_and_load_modules_with_libraries(
     })?;
     attributes::apply_cfg(&mut program, cfg).map_err(|error| {
         CompileFailure::single(
-            Diag::bare(rua_core::DiagnosticCode::ParseUnexpectedToken, error),
+            Diag::bare(rua_common::DiagnosticCode::ParseUnexpectedToken, error),
             files.clone(),
         )
     })?;
@@ -635,7 +635,7 @@ fn parse_and_load_modules_with_libraries(
 ///
 /// Compiler-native structured diagnostics for an in-memory source.
 ///
-/// Production LSP diagnostics come from `rua-analysis`; hosts that explicitly
+/// Production LSP diagnostics come from `rua-ide`; hosts that explicitly
 /// request compiler checks can consume this API without parsing CLI text.
 pub fn check_diagnostics(src: &str) -> (Vec<Diag>, Vec<String>) {
     let mut diags: Vec<Diag> = Vec::new();
@@ -652,9 +652,9 @@ pub fn check_diagnostics(src: &str) -> (Vec<Diag>, Vec<String>) {
             return (diags, vec![String::new()]);
         }
     };
-    if let Err(error) = attributes::apply_cfg(&mut program, &rua_core::CfgOptions::default()) {
+    if let Err(error) = attributes::apply_cfg(&mut program, &rua_common::CfgOptions::default()) {
         diags.push(Diag::bare(
-            rua_core::DiagnosticCode::ParseUnexpectedToken,
+            rua_common::DiagnosticCode::ParseUnexpectedToken,
             error,
         ));
         return (diags, vec![String::new()]);

@@ -1,8 +1,7 @@
 # Rua LSP 功能
 
-`rua-lsp` 是 protocol adapter；语法、名称解析、类型推断和引用索引由
-`rua-analysis::AnalysisHost` 提供。本文列出的能力与 server capability 和端到端测试
-保持一致。
+`rua-ide::lsp` 是 protocol adapter；语法、名称解析、类型推断和引用索引由
+`rua_ide::analysis::AnalysisHost` 提供。本文列出的能力与 server capability 和端到端测试保持一致。
 
 ## 1. 语言理解
 
@@ -90,4 +89,4 @@ server initialize 当前声明：
 - formatting, range formatting, on-type formatting
 - code actions, folding range, selection range
 
-协议生命周期、取消、multi-root 和真实编辑器启动由 `crates/rua-lsp/tests/` 与 `editors/vscode/src/test/` 覆盖。
+协议生命周期、取消、multi-root 和真实编辑器启动由 `crates/rua-ide/tests/` 与 `editors/vscode/src/test/` 覆盖。

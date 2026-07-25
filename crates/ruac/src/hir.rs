@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rua_core::{
+use rua_common::{
     BuiltinId, BuiltinTraitId, DiagnosticCode, FileId, ModulePath, StructuredDiagnostic, TextRange,
     builtin_trait, builtin_type,
 };

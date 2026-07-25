@@ -13,7 +13,7 @@
 use crate::ast::*;
 use crate::diag::Diag;
 use crate::token::SourceRange;
-use rua_core::{TableMutationKind, is_transparent_iterator_adapter};
+use rua_common::{TableMutationKind, is_transparent_iterator_adapter};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -830,13 +830,13 @@ enum VariantPayload {
 /// `Err(e)`) matched against scrutinee type `ty`. Returns one type per pattern
 /// element, or `None` when the path isn't a recognized built-in (the caller
 /// then binds the elements as `Unknown`).
-fn builtin_payload(builtin: rua_core::BuiltinId, ty: &Ty) -> Option<Vec<Ty>> {
+fn builtin_payload(builtin: rua_common::BuiltinId, ty: &Ty) -> Option<Vec<Ty>> {
     match (builtin, ty) {
-        (rua_core::BuiltinId::VariantOptionSome, Ty::Option(inner)) => {
+        (rua_common::BuiltinId::VariantOptionSome, Ty::Option(inner)) => {
             Some(vec![(**inner).clone()])
         }
-        (rua_core::BuiltinId::VariantResultOk, Ty::Result(ok, _)) => Some(vec![(**ok).clone()]),
-        (rua_core::BuiltinId::VariantResultErr, Ty::Result(_, err)) => Some(vec![(**err).clone()]),
+        (rua_common::BuiltinId::VariantResultOk, Ty::Result(ok, _)) => Some(vec![(**ok).clone()]),
+        (rua_common::BuiltinId::VariantResultErr, Ty::Result(_, err)) => Some(vec![(**err).clone()]),
         _ => None,
     }
 }
@@ -882,7 +882,7 @@ pub fn check_resolved_diagnostics(
     let (warnings, errors): (Vec<_>, Vec<_>) = tc
         .errs
         .into_iter()
-        .partition(|d| d.severity() == rua_core::DiagnosticSeverity::Warning);
+        .partition(|d| d.severity() == rua_common::DiagnosticSeverity::Warning);
     if errors.is_empty() {
         Ok(TypeInfo {
             int_divs: tc.int_divs,
@@ -1111,14 +1111,14 @@ impl<'hir> Tc<'hir> {
             && matches!(
                 self.resolved_target(expression),
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_core::BuiltinId::VariantOptionNone
+                    rua_common::BuiltinId::VariantOptionNone
                 ))
             )
     }
 
     fn table_mutation_warning(&mut self, span: SourceRange, message: impl Into<String>) {
         self.err_with_code(
-            rua_core::DiagnosticCode::LintUnsafeTableMutation,
+            rua_common::DiagnosticCode::LintUnsafeTableMutation,
             span,
             message.into(),
         );
@@ -1411,19 +1411,19 @@ impl<'hir> Tc<'hir> {
                     Some(crate::hir::TypeTarget::Primitive(crate::hir::PrimitiveType::Box)) => {
                         arg(0)
                     }
-                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeString)) => {
+                    Some(crate::hir::TypeTarget::Builtin(rua_common::BuiltinId::TypeString)) => {
                         Ty::Str
                     }
-                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeVec)) => {
+                    Some(crate::hir::TypeTarget::Builtin(rua_common::BuiltinId::TypeVec)) => {
                         Ty::Vec(Arc::new(arg(0)))
                     }
-                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeOption)) => {
+                    Some(crate::hir::TypeTarget::Builtin(rua_common::BuiltinId::TypeOption)) => {
                         Ty::Option(Arc::new(arg(0)))
                     }
-                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeResult)) => {
+                    Some(crate::hir::TypeTarget::Builtin(rua_common::BuiltinId::TypeResult)) => {
                         Ty::Result(Arc::new(arg(0)), Arc::new(arg(1)))
                     }
-                    Some(crate::hir::TypeTarget::Builtin(rua_core::BuiltinId::TypeHashMap)) => {
+                    Some(crate::hir::TypeTarget::Builtin(rua_common::BuiltinId::TypeHashMap)) => {
                         Ty::Map(Arc::new(arg(0)), Arc::new(arg(1)))
                     }
                     Some(crate::hir::TypeTarget::Item(definition))
@@ -1587,16 +1587,16 @@ impl<'hir> Tc<'hir> {
     }
 
     fn err(&mut self, sp: SourceRange, msg: String) {
-        self.err_with_code(rua_core::DiagnosticCode::TypeMismatch, sp, msg);
+        self.err_with_code(rua_common::DiagnosticCode::TypeMismatch, sp, msg);
     }
 
-    fn err_with_code(&mut self, code: rua_core::DiagnosticCode, sp: SourceRange, msg: String) {
+    fn err_with_code(&mut self, code: rua_common::DiagnosticCode, sp: SourceRange, msg: String) {
         self.errs
             .push(Diag::new(code, sp.file, sp.start, sp.len, sp.line, msg));
     }
 
     fn invalid_binary(&mut self, sp: SourceRange, msg: String) {
-        self.err_with_code(rua_core::DiagnosticCode::TypeInvalidBinary, sp, msg);
+        self.err_with_code(rua_common::DiagnosticCode::TypeInvalidBinary, sp, msg);
     }
 
     // --- driver ------------------------------------------------------------
@@ -2560,11 +2560,11 @@ impl<'hir> Tc<'hir> {
                     }
                     match target {
                         crate::hir::ResolvedTarget::Builtin(
-                            rua_core::BuiltinId::VariantOptionNone,
+                            rua_common::BuiltinId::VariantOptionNone,
                         ) => return Ty::Option(Arc::new(Ty::Unknown)),
                         crate::hir::ResolvedTarget::Builtin(
-                            rua_core::BuiltinId::VariantResultOk
-                            | rua_core::BuiltinId::VariantResultErr,
+                            rua_common::BuiltinId::VariantResultOk
+                            | rua_common::BuiltinId::VariantResultErr,
                         ) => {
                             return Ty::Result(Arc::new(Ty::Unknown), Arc::new(Ty::Unknown));
                         }
@@ -3149,7 +3149,7 @@ impl<'hir> Tc<'hir> {
                 }
                 if scrut_ty.is_concrete() && !self.match_is_exhaustive(&scrut_ty, arms) {
                     self.err_with_code(
-                        rua_core::DiagnosticCode::TypeMissingMatchArm,
+                        rua_common::DiagnosticCode::TypeMissingMatchArm,
                         scrut.span,
                         "non-exhaustive match".to_string(),
                     );
@@ -3416,16 +3416,16 @@ impl<'hir> Tc<'hir> {
         if let Some(crate::hir::ResolvedTarget::Builtin(builtin)) = target {
             let a0 = || arg_tys.first().cloned().unwrap_or(Ty::Unknown);
             match builtin {
-                rua_core::BuiltinId::VariantOptionSome => {
+                rua_common::BuiltinId::VariantOptionSome => {
                     return Ty::Option(Arc::new(a0()));
                 }
-                rua_core::BuiltinId::VariantOptionNone => {
+                rua_common::BuiltinId::VariantOptionNone => {
                     return Ty::Option(Arc::new(Ty::Unknown));
                 }
-                rua_core::BuiltinId::VariantResultOk => {
+                rua_common::BuiltinId::VariantResultOk => {
                     return Ty::Result(Arc::new(a0()), Arc::new(Ty::Unknown));
                 }
-                rua_core::BuiltinId::VariantResultErr => {
+                rua_common::BuiltinId::VariantResultErr => {
                     return Ty::Result(Arc::new(Ty::Unknown), Arc::new(a0()));
                 }
                 _ => {}
@@ -3913,10 +3913,10 @@ impl<'hir> Tc<'hir> {
         let display = path.join("::");
         let valid = match target {
             crate::hir::ResolvedTarget::Builtin(builtin) => match builtin {
-                rua_core::BuiltinId::VariantOptionSome | rua_core::BuiltinId::VariantOptionNone => {
+                rua_common::BuiltinId::VariantOptionSome | rua_common::BuiltinId::VariantOptionNone => {
                     matches!(scrutinee, Ty::Option(_))
                 }
-                rua_core::BuiltinId::VariantResultOk | rua_core::BuiltinId::VariantResultErr => {
+                rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr => {
                     matches!(scrutinee, Ty::Result(_, _))
                 }
                 _ => true,
@@ -3962,8 +3962,8 @@ impl<'hir> Tc<'hir> {
                 let mut none = false;
                 for pattern in unguarded_patterns {
                     match self.pattern_builtin(pattern) {
-                        Some(rua_core::BuiltinId::VariantOptionSome) => some = true,
-                        Some(rua_core::BuiltinId::VariantOptionNone) => none = true,
+                        Some(rua_common::BuiltinId::VariantOptionSome) => some = true,
+                        Some(rua_common::BuiltinId::VariantOptionNone) => none = true,
                         _ => {}
                     }
                 }
@@ -3974,8 +3974,8 @@ impl<'hir> Tc<'hir> {
                 let mut err = false;
                 for pattern in unguarded_patterns {
                     match self.pattern_builtin(pattern) {
-                        Some(rua_core::BuiltinId::VariantResultOk) => ok = true,
-                        Some(rua_core::BuiltinId::VariantResultErr) => err = true,
+                        Some(rua_common::BuiltinId::VariantResultOk) => ok = true,
+                        Some(rua_common::BuiltinId::VariantResultErr) => err = true,
                         _ => {}
                     }
                 }
@@ -4008,7 +4008,7 @@ impl<'hir> Tc<'hir> {
         }
     }
 
-    fn pattern_builtin(&self, pattern: &Pattern) -> Option<rua_core::BuiltinId> {
+    fn pattern_builtin(&self, pattern: &Pattern) -> Option<rua_common::BuiltinId> {
         let id = self.pattern_id(pattern)?;
         match self.resolved_pattern_variant(id)? {
             crate::hir::ResolvedTarget::Builtin(builtin) => Some(builtin),
@@ -4102,8 +4102,8 @@ impl<'hir> Tc<'hir> {
     }
 }
 
-fn arithmetic_trait(op: BinOp) -> (rua_core::BuiltinTraitId, &'static str) {
-    use rua_core::BuiltinTraitId;
+fn arithmetic_trait(op: BinOp) -> (rua_common::BuiltinTraitId, &'static str) {
+    use rua_common::BuiltinTraitId;
     match op {
         BinOp::Add => (BuiltinTraitId::Add, "add"),
         BinOp::Sub => (BuiltinTraitId::Sub, "sub"),

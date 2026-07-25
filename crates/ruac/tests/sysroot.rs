@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::BTreeMap, fmt};
 
-use rua_project::{
+use rua_common::{
     FileId, LibraryMount, LogicalSourcePath, ProjectId, ProjectSpec, SourceProvider, SourceRootId,
     SourceRootKind, SourceRootSpec, SourceText,
 };
@@ -71,7 +71,7 @@ fn cli_loads_explicit_sysroot_outside_repository_cwd() {
     fs::write(&input, "pub fn answer() -> i64 { 42 }").unwrap();
 
     let standard_library =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rua-resources/resources/std");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rua-common/resources/std");
     let result = Command::new(env!("CARGO_BIN_EXE_ruac"))
         .arg("build")
         .arg(&input)
@@ -138,7 +138,7 @@ let status: String = moon::http::get("/health");
     )
     .unwrap();
     fs::write(
-        workspace.join(rua_project::PROJECT_CONFIG_FILE),
+        workspace.join(rua_common::PROJECT_CONFIG_FILE),
         "[[workspace.lua_library]]\ndeclaration_root = \"../declarations\"\nruntime_root = \"../runtime\"\n",
     )
     .unwrap();
@@ -267,7 +267,7 @@ fn compiler_project_api_loads_modules_without_filesystem_or_dense_ids() {
     provider.paths.insert(root_path.clone(), root);
     provider.paths.insert(api_path, api);
     let project = ProjectSpec {
-        cfg: rua_core::CfgOptions::default(),
+        cfg: rua_common::CfgOptions::default(),
         id: ProjectId::new(7),
         root_file: root,
         roots: vec![SourceRootSpec {
@@ -341,7 +341,7 @@ fn compiler_project_api_mounts_directory_root_declaration() {
     provider.paths.insert(root_path.clone(), root);
     provider.paths.insert(declaration_path, declaration);
     let project = ProjectSpec {
-        cfg: rua_core::CfgOptions::default(),
+        cfg: rua_common::CfgOptions::default(),
         id: ProjectId::new(8),
         root_file: root,
         roots: vec![
@@ -400,7 +400,7 @@ fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     provider.paths.insert(flat_path.clone(), flat);
     provider.paths.insert(nested_path.clone(), nested);
     let mut project = ProjectSpec {
-        cfg: rua_core::CfgOptions::default(),
+        cfg: rua_common::CfgOptions::default(),
         id: ProjectId::new(9),
         root_file: root,
         roots: vec![SourceRootSpec {
@@ -415,7 +415,7 @@ fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     let failure = ruac::compile_project_with_diagnostics(&project, &provider).unwrap_err();
     assert_eq!(
         failure.diagnostics[0].code,
-        rua_core::DiagnosticCode::NameAmbiguousImport
+        rua_common::DiagnosticCode::NameAmbiguousImport
     );
     assert_eq!(failure.files[root.index() as usize], root_path.as_str());
 
@@ -430,7 +430,7 @@ fn compiler_project_api_returns_structured_module_and_type_diagnostics() {
     let failure = ruac::compile_project_with_diagnostics(&project, &provider).unwrap_err();
     assert_eq!(
         failure.diagnostics[0].code,
-        rua_core::DiagnosticCode::TypeMismatch
+        rua_common::DiagnosticCode::TypeMismatch
     );
     assert_eq!(failure.diagnostics[0].file_index(), Some(root.index()));
     assert!(!failure.diagnostics[0].is_empty());

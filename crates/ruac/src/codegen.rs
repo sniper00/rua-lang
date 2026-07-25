@@ -2257,7 +2257,7 @@ impl Codegen<'_> {
         for (parameter, parameter_name) in function.params.iter().zip(params) {
             if self
                 .hir
-                .type_is_builtin(&parameter.ty, rua_core::BuiltinId::TypeResult)
+                .type_is_builtin(&parameter.ty, rua_common::BuiltinId::TypeResult)
             {
                 let ok = self.fresh_tmp();
                 let error = self.fresh_tmp();
@@ -3649,7 +3649,7 @@ impl Codegen<'_> {
             matches!(
                 self.root_pattern_target(pattern),
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_core::BuiltinId::VariantResultOk | rua_core::BuiltinId::VariantResultErr
+                    rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr
                 ))
             ) || self
                 .root_pattern_target(pattern)
@@ -3662,7 +3662,7 @@ impl Codegen<'_> {
             matches!(
                 self.root_pattern_target(pattern),
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_core::BuiltinId::VariantResultOk | rua_core::BuiltinId::VariantResultErr
+                    rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr
                 ))
             )
         })
@@ -3700,10 +3700,10 @@ impl Codegen<'_> {
             }
         }
 
-        let option = builtins.contains(&rua_core::BuiltinId::VariantOptionSome)
-            && builtins.contains(&rua_core::BuiltinId::VariantOptionNone);
-        let result = builtins.contains(&rua_core::BuiltinId::VariantResultOk)
-            && builtins.contains(&rua_core::BuiltinId::VariantResultErr);
+        let option = builtins.contains(&rua_common::BuiltinId::VariantOptionSome)
+            && builtins.contains(&rua_common::BuiltinId::VariantOptionNone);
+        let result = builtins.contains(&rua_common::BuiltinId::VariantResultOk)
+            && builtins.contains(&rua_common::BuiltinId::VariantResultErr);
         if option || result || booleans.len() == 2 {
             return true;
         }
@@ -3852,16 +3852,16 @@ impl Codegen<'_> {
             Pattern::Path { id, .. } => {
                 let target = self.pattern_target(*id);
                 match target {
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionNone) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionNone) => {
                         tests.push(subject.binary(LuaBinaryOp::Eq, LuaExpr::Nil));
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionSome) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionSome) => {
                         tests.push(subject.binary(LuaBinaryOp::Ne, LuaExpr::Nil))
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultOk) => {
                         tests.push(cached_tag.cloned().unwrap_or_else(|| result_is_ok(subject)))
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultErr) => {
                         let tag = cached_tag.cloned().unwrap_or_else(|| result_is_ok(subject));
                         tests.push(LuaExpr::unary(LuaUnaryOp::Not, tag))
                     }
@@ -3884,14 +3884,14 @@ impl Codegen<'_> {
             Pattern::TupleVariant { id, elems, .. } => {
                 let target = self.pattern_target(*id);
                 match target {
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionSome) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionSome) => {
                         // Some(x) is the bare value; None is nil.
                         tests.push(subject.clone().binary(LuaBinaryOp::Ne, LuaExpr::Nil));
                         if let Some(inner) = elems.first() {
                             self.pat_test(inner, subject, None, tests, binds);
                         }
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultOk) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultOk) => {
                         tests.push(
                             cached_tag
                                 .cloned()
@@ -3901,7 +3901,7 @@ impl Codegen<'_> {
                             self.pat_test(inner, result_payload(subject), None, tests, binds);
                         }
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantResultErr) => {
+                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultErr) => {
                         let tag = cached_tag
                             .cloned()
                             .unwrap_or_else(|| result_is_ok(subject.clone()));
@@ -4188,7 +4188,7 @@ impl Codegen<'_> {
                         }
 
                         if let Some(runtime) = self.hir.standard_runtime(definition).cloned() {
-                            if runtime.dispatch == rua_resources::StdDispatch::Module {
+                            if runtime.dispatch == rua_common::StdDispatch::Module {
                                 if method == "len" {
                                     return LuaExpr::unary(LuaUnaryOp::Len, r);
                                 }
@@ -5131,7 +5131,7 @@ impl<'a> FunctionComponents<'a> {
 /// If `impl <trait> for T` defines the operator method `method`, return the Lua
 /// metamethod name to alias it to (enabling `a + b`, `a == b`, etc.).
 fn op_alias(target: crate::hir::TraitTarget, method: &str) -> Option<&'static str> {
-    use rua_core::BuiltinTraitId;
+    use rua_common::BuiltinTraitId;
     let crate::hir::TraitTarget::Builtin(trait_id) = target else {
         return None;
     };

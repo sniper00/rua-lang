@@ -201,7 +201,7 @@ fn strict_parser_enforces_token_and_nesting_budgets() {
     .expect_err("small token budget must reject input");
     assert_eq!(
         token_error.diagnostic().code,
-        rua_core::DiagnosticCode::ParseResourceLimit
+        rua_common::DiagnosticCode::ParseResourceLimit
     );
 
     let nested = format!("{}1{};", "(".repeat(64), ")".repeat(64));
@@ -215,7 +215,7 @@ fn strict_parser_enforces_token_and_nesting_budgets() {
     .expect_err("small nesting budget must reject input");
     assert_eq!(
         nesting_error.diagnostic().code,
-        rua_core::DiagnosticCode::ParseResourceLimit
+        rua_common::DiagnosticCode::ParseResourceLimit
     );
 }
 
@@ -232,7 +232,7 @@ fn lua_result_extern_requires_non_variadic_builtin_result_return() {
         let (diagnostics, _) = crate::check_diagnostics(source);
         assert!(
             diagnostics.iter().any(
-                |diagnostic| diagnostic.code == rua_core::DiagnosticCode::TypeInvalidFfiAdapter
+                |diagnostic| diagnostic.code == rua_common::DiagnosticCode::TypeInvalidFfiAdapter
             ),
             "missing invalid FFI adapter diagnostic for:\n{source}\n{diagnostics:#?}"
         );
@@ -960,7 +960,7 @@ fn parser_error_exposes_structured_diagnostic() {
     let error = crate::parser::parse("fn broken( {}").unwrap_err();
     assert_eq!(
         error.diagnostic().code,
-        rua_core::DiagnosticCode::ParseUnexpectedToken
+        rua_common::DiagnosticCode::ParseUnexpectedToken
     );
     assert!(error.diagnostic().range.is_some());
 }
@@ -1989,7 +1989,7 @@ fn typeck_operator_overload_checks_right_operand_type() {
             .structured_diagnostics()
             .next()
             .map(|diagnostic| diagnostic.code),
-        Some(rua_core::DiagnosticCode::TypeInvalidBinary)
+        Some(rua_common::DiagnosticCode::TypeInvalidBinary)
     );
 }
 
@@ -3416,7 +3416,7 @@ fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
     let failure = crate::compile_path_artifact(&root).unwrap_err();
     assert_eq!(
         failure.diagnostics[0].code,
-        rua_core::DiagnosticCode::NameInvalidDeclaration
+        rua_common::DiagnosticCode::NameInvalidDeclaration
     );
 
     std::fs::write(&root, "").unwrap();
@@ -3424,7 +3424,7 @@ fn ruai_root_is_declaration_only_and_validates_loaded_descendants() {
     let failure = crate::compile_path_artifact(&root).unwrap_err();
     assert_eq!(
         failure.diagnostics[0].code,
-        rua_core::DiagnosticCode::NameInvalidDeclaration
+        rua_common::DiagnosticCode::NameInvalidDeclaration
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -3576,7 +3576,7 @@ fn check_diags_bare_for_duplicate_definition() {
         .expect("expected a duplicate-definition diagnostic");
     assert_eq!(d.start(), 0, "bare diag has no start: {d:?}");
     assert_eq!(d.len(), 0, "bare diag has no length: {d:?}");
-    assert_eq!(d.code, rua_core::DiagnosticCode::NameDuplicateDefinition);
+    assert_eq!(d.code, rua_common::DiagnosticCode::NameDuplicateDefinition);
 }
 
 #[test]
@@ -3585,19 +3585,19 @@ fn compiler_diagnostic_api_preserves_parse_name_and_type_codes() {
     assert!(
         parse
             .iter()
-            .any(|diagnostic| diagnostic.code.category() == rua_core::DiagnosticCategory::Parse)
+            .any(|diagnostic| diagnostic.code.category() == rua_common::DiagnosticCategory::Parse)
     );
 
     let (name, _) = crate::check_diagnostics("fn run() { missing(); }");
     assert!(
         name.iter()
-            .any(|diagnostic| diagnostic.code == rua_core::DiagnosticCode::NameUnresolved)
+            .any(|diagnostic| diagnostic.code == rua_common::DiagnosticCode::NameUnresolved)
     );
 
     let (ty, _) = crate::check_diagnostics("fn run() -> i64 { true }");
     assert!(
         ty.iter()
-            .any(|diagnostic| diagnostic.code == rua_core::DiagnosticCode::TypeMismatch)
+            .any(|diagnostic| diagnostic.code == rua_common::DiagnosticCode::TypeMismatch)
     );
 }
 
@@ -3714,7 +3714,7 @@ fn array_length_mutation_inside_for_is_warned_but_still_compiles() {
     let src = "fn main() { let mut values = [1]; for value in values { values.push(value); } }";
     let (diags, _) = crate::check_diags(src);
     assert!(diags.iter().any(|diagnostic| {
-        diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+        diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
             && diagnostic.msg.contains("array's length")
     }));
     compile_str(src).expect("table mutation warning must not reject compilation");
@@ -3726,7 +3726,7 @@ fn array_value_replacement_inside_for_is_safe() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         !diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
         }),
         "value replacement must be safe, got {diags:?}"
     );
@@ -3738,7 +3738,7 @@ fn reverse_array_pop_inside_for_is_safe() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         !diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
         }),
         "reverse pop must be safe, got {diags:?}"
     );
@@ -3751,7 +3751,7 @@ fn array_current_deletion_inside_ipairs_is_warned() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
                 && diagnostic
                     .msg
                     .contains("deleting the current array element")
@@ -3766,7 +3766,7 @@ fn hash_insertion_inside_pairs_is_warned() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
                 && diagnostic.msg.contains("rehashing")
         }),
         "expected hash insertion warning, got {diags:?}"
@@ -3779,7 +3779,7 @@ fn hash_index_insertion_inside_pairs_is_warned() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
                 && diagnostic.msg.contains("may add a new key")
         }),
         "expected hash index insertion warning, got {diags:?}"
@@ -3792,7 +3792,7 @@ fn hash_deletion_inside_pairs_is_safe() {
     let (diags, _) = crate::check_diags(src);
     assert!(
         !diags.iter().any(|diagnostic| {
-            diagnostic.diagnostic.code == rua_core::DiagnosticCode::LintUnsafeTableMutation
+            diagnostic.diagnostic.code == rua_common::DiagnosticCode::LintUnsafeTableMutation
         }),
         "hash deletion must be safe, got {diags:?}"
     );

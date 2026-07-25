@@ -1,0 +1,344 @@
+//! Enhanced completions tests — trait methods, module paths, closures, snippets.
+
+mod support;
+
+use support::{TestServer, extract_marker, uri};
+
+#[test]
+fn completions_offer_standard_functions_without_macro_syntax() {
+    let uri = uri("/test/main.rua");
+    let (source, offset) = extract_marker("fn main() { pri$0 }");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    let print = items
+        .iter()
+        .find(|item| item.label() == "print")
+        .expect("standard print completion");
+    assert_eq!(print.kind(), rua_ide::analysis::CompletionKind::Function);
+    assert!(print.detail().is_some_and(|detail| detail.contains("...")));
+    assert!(!items.iter().any(|item| item.label().contains('!')));
+}
+
+#[test]
+fn completions_offer_locals_in_unattached_workspace_file() {
+    let root_uri = uri("/test/main.rua");
+    let demo_uri = uri("/test/demo.rua");
+    let (source, offset) = extract_marker("fn run() { let local_value = 1; let other = loc$0; }");
+    let mut srv = TestServer::new();
+    srv.open(&root_uri, "fn root() {}");
+    srv.open(&demo_uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&demo_uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "local_value"),
+        "local binding missing from unattached-file completions: {items:?}"
+    );
+}
+
+#[test]
+fn completions_offer_top_level_chunk_variables() {
+    let uri = uri("/test/main.rua");
+    let (source, offset) = extract_marker(
+        "let requests = [\"keyboard-001\"];\n\
+         let mut processed = 0;\n\
+         let featured = requests[0];\n\
+         print(\"{}\", $0);\n",
+    );
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+
+    assert!(
+        items.iter().any(|item| item.label() == "featured"),
+        "top-level chunk variable missing from completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "processed"),
+        "earlier top-level chunk variable missing from completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "requests"),
+        "first top-level chunk variable missing from completions: {items:?}"
+    );
+}
+
+#[test]
+fn completions_offer_option_map_member() {
+    let (source, offset) = extract_marker("fn run(value: Option<i64>) { let mapped = value.$0; }");
+    let uri = uri("/test/option_member.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "map"),
+        "Option<T>.map missing from member completions: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item.label() == "expect"),
+        "Option<T>.expect missing from member completions: {items:?}"
+    );
+}
+
+#[test]
+fn completions_offer_result_expect_member() {
+    let (source, offset) =
+        extract_marker("fn run(value: Result<i64, String>) { let required = value.ex$0; }");
+    let uri = uri("/test/result_expect_member.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    assert!(
+        items.iter().any(|item| item.label() == "expect"),
+        "Result<T, E>.expect missing from member completions: {items:?}"
+    );
+}
+
+#[test]
+fn optional_chain_completion_uses_the_unwrapped_receiver_type() {
+    let (source, offset) = extract_marker(
+        "struct Profile { city: String }\nimpl Profile { fn label(&self) -> String { self.city } }\nfn run(value: Option<Profile>) { let shown = value?.$0; }",
+    );
+    let uri = uri("/test/optional_chain_completion.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, &source);
+
+    let items = srv
+        .snapshot()
+        .completions(srv.pp_at_offset(&uri, offset).unwrap());
+    let labels = items.iter().map(|item| item.label()).collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"city"),
+        "field missing after `?.`: {items:?}"
+    );
+    assert!(
+        labels.contains(&"label"),
+        "method missing after `?.`: {items:?}"
+    );
+}
+
+#[test]
+fn completions_trait_method_struct_parsed_correctly() {
+    // Verify the trait + struct + impl setup parses and indexes cleanly.
+    // Trait method completions after `p.` depend on member resolution.
+    let uri = uri("/test/comp_trait.rua");
+    let mut srv = TestServer::new();
+    // Use `p.name` — a valid member access that parses correctly.
+    srv.open(
+        &uri,
+        "trait Greeter { fn greet(self) -> i64 { 0 } }\nstruct Person { name: i64 }\nimpl Greeter for Person {\n    fn greet(self) -> i64 { 1 }\n}\nfn main() { let p = Person { name: 42 }; p.name; }",
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+
+    // Parse and def_map must be clean
+    let parse = analysis.parse(file_id);
+    assert!(
+        parse.errors().is_empty(),
+        "parse errors: {:?}",
+        parse.errors()
+    );
+
+    let def_map = analysis.def_map(file_id);
+    let names: Vec<&str> = def_map.definitions().map(|d| d.name()).collect();
+    assert!(names.contains(&"Greeter"), "trait missing");
+    assert!(names.contains(&"Person"), "struct missing");
+
+    // Dot completions after `p.` (on `name`) should at minimum return some items
+    let source = srv.source(&uri).unwrap();
+    let dot_pos = source.rfind("p.").unwrap() + 2; // cursor right after `p.`
+    let pp = srv.pp_at_offset(&uri, dot_pos).unwrap();
+    let items = analysis.completions(pp);
+    assert!(!items.is_empty(), "dot completions should not be empty");
+}
+
+#[test]
+fn completions_module_path_nested() {
+    let main_uri = uri("/test/main.rua");
+    let module_uri = uri("/test/math/ops.rua");
+    let (source, offset) = extract_marker("fn main() { math::ops::$0 }");
+    let mut srv = TestServer::new();
+    srv.open(&main_uri, &source);
+    srv.open(&module_uri, "pub fn add(a: i64, b: i64) -> i64 { a + b }");
+
+    let pp = srv.pp_at_offset(&main_uri, offset).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    assert!(
+        labels.contains(&"add".to_string()),
+        "nested module items should appear, got: {labels:?}"
+    );
+}
+
+#[test]
+fn completions_in_closure_body() {
+    let uri = uri("/test/comp_closure.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "fn main() { let outer = 1; let f = |x| { let inner = x + outer;  } }",
+    );
+
+    // cursor inside the closure body (between `;` and `}` after `inner = x + outer;`)
+    let pp = srv.pp(&uri, 0, 55).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // `inner` should be visible (declared in the closure body)
+    assert!(
+        labels.contains(&"inner".to_string()),
+        "closure body should offer local 'inner', got: {labels:?}"
+    );
+}
+
+#[test]
+fn completions_enum_variant_match_body_parsed() {
+    // Verify the enum + match setup parses correctly. Variant completions
+    // inside match arms depend on cursor being inside the match body.
+    let uri = uri("/test/comp_enum_pat.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "enum Color { Red, Rgb(i64, i64, i64) }\nfn main() { let c = Color::Rgb(255, 0, 0); match c {  } }",
+    );
+
+    let file_id = srv.file_id_for_uri(&uri).unwrap();
+    let analysis = srv.snapshot();
+
+    // Verify the enum has its variants in the def_map
+    let def_map = analysis.def_map(file_id);
+    let color_def = def_map
+        .definitions()
+        .find(|d| d.name() == "Color" && d.kind() == rua_ide::analysis::DefKind::Enum);
+    assert!(color_def.is_some(), "Color enum missing from def_map");
+
+    // The match expression should be findable in the body
+    let has_match = def_map.definitions().any(|d| {
+        if matches!(
+            d.kind(),
+            rua_ide::analysis::DefKind::Function | rua_ide::analysis::DefKind::Method
+        ) && let Some(body) = analysis.body(d.id())
+        {
+            return body
+                .exprs()
+                .any(|(_, e)| matches!(e, rua_ide::analysis::Expr::Match { .. }));
+        }
+        false
+    });
+    assert!(has_match, "match expression should be in the body");
+
+    // Completions inside the match body should at minimum return keywords
+    let pp = srv.pp(&uri, 1, 55).unwrap();
+    let items = analysis.completions(pp);
+    assert!(
+        !items.is_empty(),
+        "completions in match body should not be empty"
+    );
+}
+
+#[test]
+fn completions_for_loop_variable() {
+    let uri = uri("/test/comp_for.rua");
+    let mut srv = TestServer::new();
+    srv.open(&uri, "fn main() { for i in 0..10 {  } }");
+
+    // cursor inside for loop body (between `{` and `}`)
+    let pp = srv.pp(&uri, 0, 26).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // `i` should be visible (the loop variable)
+    assert!(
+        labels.contains(&"i".to_string()),
+        "loop variable 'i' should appear in completions, got: {labels:?}"
+    );
+}
+
+#[test]
+fn completions_while_let_var_in_scope() {
+    // The while-let bound variable should be visible in the loop body.
+    let uri = uri("/test/comp_whilelet.rua");
+    let mut srv = TestServer::new();
+    let source = "enum Maybe { Some(i64), None }\nfn main() { let opt = Maybe::Some(42); while let Maybe::Some(val) = opt { val; } }";
+    srv.open(&uri, source);
+
+    // cursor inside while-let body: `val; ` between `{` and `}`
+    // Find the position right after `{ val`
+    let body_offset = source.find("{ val;").unwrap() + 2; // on 'v' of val
+    let pp = srv.pp_at_offset(&uri, body_offset).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // `val` (from pattern) should be visible
+    assert!(
+        labels.contains(&"val".to_string()),
+        "while-let bound 'val' should appear, got: {labels:?}"
+    );
+}
+
+#[test]
+fn completions_self_in_method_body() {
+    let uri = uri("/test/comp_self.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "struct Point { x: i64, y: i64 }\nimpl Point {\n    fn distance(&self) -> i64 {  }\n}",
+    );
+
+    // cursor inside method body (between `{` and `}`)
+    let pp = srv.pp(&uri, 2, 35).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // `self` must be visible in a method body
+    assert!(
+        labels.contains(&"self".to_string()),
+        "self should appear in method body completions, got: {labels:?}"
+    );
+    // Struct name Point should also be visible
+    assert!(
+        labels.contains(&"Point".to_string()),
+        "struct name Point should be visible, got: {labels:?}"
+    );
+}
+
+#[test]
+fn completions_if_let_bound_variable() {
+    let uri = uri("/test/comp_iflet.rua");
+    let mut srv = TestServer::new();
+    srv.open(
+        &uri,
+        "enum Maybe { Some(i64), None }\nfn main() {\n    let opt = Maybe::Some(42);\n    if let Maybe::Some(val) = opt { let y = val; }\n}",
+    );
+
+    // cursor inside if-let body (after `let y = val;` before `}`)
+    let pp = srv.pp(&uri, 3, 50).unwrap();
+    let items = srv.snapshot().completions(pp);
+    let labels: Vec<String> = items.iter().map(|i| i.label().to_string()).collect();
+
+    // `val` (from if-let pattern) and `y` (local) should be visible
+    assert!(
+        labels.contains(&"y".to_string()),
+        "local 'y' should appear in if-let body, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"val".to_string()),
+        "if-let bound 'val' should appear, got: {labels:?}"
+    );
+}

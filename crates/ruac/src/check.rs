@@ -70,7 +70,7 @@ fn collect_shapes(
                 for field in &structure.fields {
                     if fields.contains(&field.name) {
                         info.errors.push(Diag::bare(
-                            rua_core::DiagnosticCode::NameDuplicateDefinition,
+                            rua_common::DiagnosticCode::NameDuplicateDefinition,
                             format!(
                                 "duplicate field `{}` in struct `{}`",
                                 field.name, structure.name
@@ -159,7 +159,7 @@ pub fn collect_diags_resolved(prog: &Program, hir: &crate::hir::ResolvedHir) -> 
     let info = Info::collect(prog, hir);
     let mut errs = info.errors.clone();
     errs.extend(hir.diagnostics.iter().filter_map(|diagnostic| {
-        let file = diagnostic.file.map(rua_core::FileId::index).unwrap_or(0);
+        let file = diagnostic.file.map(rua_common::FileId::index).unwrap_or(0);
         let (start, len) = diagnostic
             .range
             .map(|range| (range.start() as usize, range.len() as usize))
@@ -174,10 +174,10 @@ pub fn collect_diags_resolved(prog: &Program, hir: &crate::hir::ResolvedHir) -> 
         };
         let line = argument("line").parse().unwrap_or(0);
         let message = match diagnostic.code {
-            rua_core::DiagnosticCode::NameUnresolved => {
+            rua_common::DiagnosticCode::NameUnresolved => {
                 format!("cannot resolve name `{}`", argument("name"))
             }
-            rua_core::DiagnosticCode::NameUnknownMember => {
+            rua_common::DiagnosticCode::NameUnknownMember => {
                 let owner = argument("owner");
                 let member = argument("member");
                 if argument("kind") == "enum" {
@@ -186,10 +186,10 @@ pub fn collect_diags_resolved(prog: &Program, hir: &crate::hir::ResolvedHir) -> 
                     format!("`{owner}` has no member `{member}`")
                 }
             }
-            rua_core::DiagnosticCode::NamePrivateAccess => {
+            rua_common::DiagnosticCode::NamePrivateAccess => {
                 format!("`{}` is private to {}", argument("name"), argument("owner"))
             }
-            rua_core::DiagnosticCode::NameDuplicateDefinition => {
+            rua_common::DiagnosticCode::NameDuplicateDefinition => {
                 let name = argument("name");
                 let owner = argument("owner");
                 if argument("kind") == "variant" {
@@ -200,7 +200,7 @@ pub fn collect_diags_resolved(prog: &Program, hir: &crate::hir::ResolvedHir) -> 
                     format!("duplicate definition `{name}` in module `{owner}`")
                 }
             }
-            rua_core::DiagnosticCode::TypeImmutableAssignment => {
+            rua_common::DiagnosticCode::TypeImmutableAssignment => {
                 format!("cannot assign to immutable binding `{}`", argument("name"))
             }
             _ => return None,
@@ -248,7 +248,7 @@ fn check_extern_adapters(
                 for function in &block.fns {
                     if function.variadic {
                         errors.push(at_code(
-                            rua_core::DiagnosticCode::TypeInvalidFfiAdapter,
+                            rua_common::DiagnosticCode::TypeInvalidFfiAdapter,
                             function.name_span,
                             "`lua-result` adapters cannot be variadic".to_string(),
                         ));
@@ -256,10 +256,10 @@ fn check_extern_adapters(
                     if function
                         .ret
                         .as_ref()
-                        .is_none_or(|ty| !hir.type_is_builtin(ty, rua_core::BuiltinId::TypeResult))
+                        .is_none_or(|ty| !hir.type_is_builtin(ty, rua_common::BuiltinId::TypeResult))
                     {
                         errors.push(at_code(
-                            rua_core::DiagnosticCode::TypeInvalidFfiAdapter,
+                            rua_common::DiagnosticCode::TypeInvalidFfiAdapter,
                             function.name_span,
                             "`lua-result` adapter must return builtin `Result<T, E>`".to_string(),
                         ));
@@ -447,7 +447,7 @@ fn check_bounds(
             for b in &g.bounds {
                 if !hir.trait_ref_targets.contains_key(&b.id) {
                     errs.push(Diag::bare(
-                        rua_core::DiagnosticCode::TypeUnsatisfiedTraitBound,
+                        rua_common::DiagnosticCode::TypeUnsatisfiedTraitBound,
                         format!(
                             "unknown trait `{}` in bound `{}: {}`",
                             b.path, g.name, b.path
@@ -491,10 +491,10 @@ fn check_bounds(
 
 /// Build a located diagnostic from a span (carrying file id + byte range + line).
 fn at(sp: SourceRange, msg: String) -> Diag {
-    at_code(rua_core::DiagnosticCode::TypeMismatch, sp, msg)
+    at_code(rua_common::DiagnosticCode::TypeMismatch, sp, msg)
 }
 
-fn at_code(code: rua_core::DiagnosticCode, sp: SourceRange, msg: String) -> Diag {
+fn at_code(code: rua_common::DiagnosticCode, sp: SourceRange, msg: String) -> Diag {
     Diag::new(code, sp.file, sp.start, sp.len, sp.line, msg)
 }
 
@@ -522,25 +522,25 @@ fn check_call(
     let sp = callee.span;
     match target {
         crate::hir::ResolvedTarget::Builtin(
-            builtin @ (rua_core::BuiltinId::VariantOptionSome
-            | rua_core::BuiltinId::VariantResultOk
-            | rua_core::BuiltinId::VariantResultErr),
+            builtin @ (rua_common::BuiltinId::VariantOptionSome
+            | rua_common::BuiltinId::VariantResultOk
+            | rua_common::BuiltinId::VariantResultErr),
         ) => {
             if args.len() != 1 {
                 let name = match builtin {
-                    rua_core::BuiltinId::VariantOptionSome => "Some",
-                    rua_core::BuiltinId::VariantResultOk => "Ok",
-                    rua_core::BuiltinId::VariantResultErr => "Err",
+                    rua_common::BuiltinId::VariantOptionSome => "Some",
+                    rua_common::BuiltinId::VariantResultOk => "Ok",
+                    rua_common::BuiltinId::VariantResultErr => "Err",
                     _ => unreachable!(),
                 };
                 errs.push(at_code(
-                    rua_core::DiagnosticCode::TypeArgumentCount,
+                    rua_common::DiagnosticCode::TypeArgumentCount,
                     sp,
                     format!("`{name}` takes exactly 1 argument"),
                 ));
             }
         }
-        crate::hir::ResolvedTarget::Builtin(rua_core::BuiltinId::VariantOptionNone) => {
+        crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionNone) => {
             errs.push(at(
                 sp,
                 "unit variant `Option::None` is not called with `()`".to_string(),
@@ -555,7 +555,7 @@ fn check_call(
             };
             match kind {
                 VKind::Tuple(expected) if args.len() != *expected => errs.push(at_code(
-                    rua_core::DiagnosticCode::TypeArgumentCount,
+                    rua_common::DiagnosticCode::TypeArgumentCount,
                     sp,
                     format!(
                         "variant `{}::{}` expects {} argument(s), got {}",
@@ -632,7 +632,7 @@ fn validate_fields(
     for (fname, _) in provided {
         if !decl.contains(fname) {
             errs.push(at_code(
-                rua_core::DiagnosticCode::TypeUnknownField,
+                rua_common::DiagnosticCode::TypeUnknownField,
                 sp,
                 format!("{} has no field `{}`", what, fname),
             ));
@@ -641,7 +641,7 @@ fn validate_fields(
     for want in decl {
         if !provided.iter().any(|(n, _)| n == want) {
             errs.push(at_code(
-                rua_core::DiagnosticCode::TypeUnknownField,
+                rua_common::DiagnosticCode::TypeUnknownField,
                 sp,
                 format!("{} is missing field `{}`", what, want),
             ));
@@ -670,26 +670,26 @@ fn check_pattern(
         Pattern::TupleVariant { id, elems, .. } => {
             match hir.pattern_targets.get(id).copied() {
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    builtin @ (rua_core::BuiltinId::VariantOptionSome
-                    | rua_core::BuiltinId::VariantResultOk
-                    | rua_core::BuiltinId::VariantResultErr),
+                    builtin @ (rua_common::BuiltinId::VariantOptionSome
+                    | rua_common::BuiltinId::VariantResultOk
+                    | rua_common::BuiltinId::VariantResultErr),
                 )) => {
                     if elems.len() != 1 {
                         let name = match builtin {
-                            rua_core::BuiltinId::VariantOptionSome => "Some",
-                            rua_core::BuiltinId::VariantResultOk => "Ok",
-                            rua_core::BuiltinId::VariantResultErr => "Err",
+                            rua_common::BuiltinId::VariantOptionSome => "Some",
+                            rua_common::BuiltinId::VariantResultOk => "Ok",
+                            rua_common::BuiltinId::VariantResultErr => "Err",
                             _ => unreachable!(),
                         };
                         errs.push(at_code(
-                            rua_core::DiagnosticCode::TypeArgumentCount,
+                            rua_common::DiagnosticCode::TypeArgumentCount,
                             sp,
                             format!("`{name}` pattern takes exactly 1 element"),
                         ));
                     }
                 }
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_core::BuiltinId::VariantOptionNone,
+                    rua_common::BuiltinId::VariantOptionNone,
                 )) => errs.push(at(
                     sp,
                     "unit variant `Option::None` has no tuple payload".to_string(),
@@ -701,7 +701,7 @@ fn check_pattern(
                         match kind {
                             VKind::Tuple(expected) if elems.len() != *expected => {
                                 errs.push(at_code(
-                                    rua_core::DiagnosticCode::TypeArgumentCount,
+                                    rua_common::DiagnosticCode::TypeArgumentCount,
                                     sp,
                                     format!(
                                         "variant `{}::{}` expects {} element(s) in pattern, got {}",
@@ -748,7 +748,7 @@ fn check_pattern(
                             for (name, _) in fields {
                                 if !declared.contains(name) {
                                     errs.push(at_code(
-                                        rua_core::DiagnosticCode::TypeUnknownField,
+                                        rua_common::DiagnosticCode::TypeUnknownField,
                                         sp,
                                         format!(
                                             "variant `{}::{}` has no field `{}`",
@@ -769,7 +769,7 @@ fn check_pattern(
                     for (field, _) in fields {
                         if !declared.contains(field) {
                             errs.push(at_code(
-                                rua_core::DiagnosticCode::TypeUnknownField,
+                                rua_common::DiagnosticCode::TypeUnknownField,
                                 sp,
                                 format!("struct `{name}` has no field `{field}`"),
                             ));

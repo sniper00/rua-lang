@@ -1,6 +1,6 @@
 //! Strict compiler token cursor over the shared lossless lexer.
 
-use rua_lex::{LexErrorKind, LexToken, TokenLimitError, lex, lex_with_limit};
+use rua_common::{LexErrorKind, LexToken, TokenLimitError, lex, lex_with_limit};
 use std::fmt;
 
 use crate::token::{RuaTokenKind, SourceRange, TokenData};

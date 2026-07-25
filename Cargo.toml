@@ -1,24 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rua-core",
-    "crates/rua-lex",
-    "crates/rua-project",
-    "crates/rua-resources",
+    "crates/rua-common",
+    "crates/rua-ide",
     "crates/ruac",
-    "crates/rua-syntax",
-    "crates/rua-analysis",
-    "crates/rua-lsp",
 ]
 
 [workspace.dependencies]
-rua-core = { path = "crates/rua-core" }
-rua-lex = { path = "crates/rua-lex" }
-rua-project = { path = "crates/rua-project" }
-rua-resources = { path = "crates/rua-resources" }
+rua-common = { path = "crates/rua-common" }
+rua-ide = { path = "crates/rua-ide" }
 ruac = { path = "crates/ruac" }
-rua-syntax = { path = "crates/rua-syntax" }
-rua-analysis = { path = "crates/rua-analysis" }
 rowan = "0.15"
 crossbeam-channel = "0.5"
 url = "2"

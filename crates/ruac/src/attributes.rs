@@ -1,6 +1,6 @@
 //! Attribute expansion and the active compiler view.
 
-use rua_core::{Attribute, CfgOptions, expand_cfg_attributes};
+use rua_common::{Attribute, CfgOptions, expand_cfg_attributes};
 
 use crate::ast::{Block, ChunkEntry, Field, Item, Program, VariantKind};
 

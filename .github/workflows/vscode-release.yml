@@ -56,7 +56,7 @@ jobs:
           fi
           cargo build --locked --release \
             --target "${{ matrix.rust_target }}" \
-            -p rua-lsp --bin rua-lsp --features lsp
+            -p rua-ide --bin rua-lsp --features lsp
           cargo build --locked --release \
             --target "${{ matrix.rust_target }}" \
             -p ruac

@@ -587,83 +587,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "rua-analysis"
+name = "rua-common"
 version = "0.1.1"
 dependencies = [
- "rowan",
- "rua-core",
- "rua-project",
- "rua-resources",
- "rua-syntax",
- "ruac",
-]
-
-[[package]]
-name = "rua-core"
-version = "0.1.1"
-
-[[package]]
-name = "rua-lex"
-version = "0.1.1"
-dependencies = [
+ "include_dir",
  "proptest",
- "rua-core",
+ "serde",
+ "toml",
 ]
 
 [[package]]
-name = "rua-lsp"
+name = "rua-ide"
 version = "0.1.1"
 dependencies = [
  "crossbeam-channel",
  "ignore",
  "lsp-server",
  "lsp-types",
- "rowan",
- "rua-analysis",
- "rua-project",
- "rua-resources",
- "rua-syntax",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "rua-project"
-version = "0.1.1"
-dependencies = [
- "rua-core",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "rua-resources"
-version = "0.1.1"
-dependencies = [
- "include_dir",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "rua-syntax"
-version = "0.1.1"
-dependencies = [
  "proptest",
  "rowan",
- "rua-core",
- "rua-lex",
+ "rua-common",
  "ruac",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
 name = "ruac"
 version = "0.1.1"
 dependencies = [
- "rua-core",
- "rua-lex",
- "rua-project",
- "rua-resources",
+ "rua-common",
  "serde",
  "serde_json",
  "toml",

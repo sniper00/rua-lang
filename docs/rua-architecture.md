@@ -5,30 +5,21 @@ Rua 将 batch compiler 与交互式 IDE 分成两条独立流水线。两者共�
 ## 1. Workspace 边界
 
 ```text
-rua-core      stable IDs, ranges, diagnostics, language contracts
-rua-lex       shared lossless token stream
-rua-project   IO-free project, logical path and source-provider model
-rua-resources versioned std.toml, declarations and embedded resources
-   |                              |
-   v                              v
-ruac                           rua-syntax
-strict compiler               tolerant Rowan CST + formatter
-                                  |
-                                  v
-                              rua-analysis
-                              incremental HIR and IDE queries
-                                  |
-                                  v
-                                rua-lsp
-                              protocol and workspace adapter
+rua-common   shared types, lexer, project model, std resources
+   |                    |
+   v                    v
+ruac                 rua-ide
+strict compiler      ├── syntax (tolerant Rowan CST + formatter)
+(no rowan/LSP)       ├── analysis (incremental HIR + IDE queries)
+                     └── lsp (protocol adapter, --features lsp)
 ```
 
 依赖约束：
 
-- `ruac` 不依赖 Rowan、analysis 或 LSP，可以嵌入不提供磁盘和 CWD 的 host。
-- `rua-syntax` / `rua-analysis` production 不调用 compiler semantic API 作为 fallback。
-- `rua-analysis` 不持有 URI、LSP 类型或磁盘扫描策略。
-- `rua-lsp` 不重做 name resolution、type inference 或 semantic fallback。
+- `ruac` 只依赖 `rua-common`，不依赖 Rowan、IDE 或 LSP，可以嵌入不提供磁盘和 CWD 的 host。
+- `rua-ide::syntax` / `rua-ide::analysis` production 不调用 compiler semantic API 作为 fallback。
+- `rua-ide::analysis` 不持有 URI、LSP 类型或磁盘扫描策略。
+- `rua-ide::lsp` 不重做 name resolution、type inference 或 semantic fallback。
 - language item、diagnostic code、source range、stable identity 和 runtime ABI 只在中立 crate 定义一次。
 
 这些边界由 `scripts/check-boundaries.sh` 持续验证。
@@ -37,7 +28,7 @@ strict compiler               tolerant Rowan CST + formatter
 
 Rua 使用两套 parser：
 
-| | `ruac` strict parser | `rua-syntax` IDE parser |
+| | `ruac` strict parser | `rua-ide::syntax` IDE parser |
 |---|---|---|
 | 目标 | batch compile、host embedding | 编辑中的不完整源码 |
 | 输出 | owned AST | lossless Rowan CST |
@@ -45,14 +36,14 @@ Rua 使用两套 parser：
 | trivia | 只保留 API documentation | 完整保留 whitespace/comment |
 | 资源控制 | token / nesting budget | lossless、range-safe property |
 
-两者共享 `rua-lex` token/range、`rua-core` contract、`rua-project` model，以及 accept/reject、range 和 semantic corpus；不共享 AST、recovery 或 type system。这样 `ruac` 保持小而可嵌入，IDE 同时获得稳定的增量语法树。
+两者共享 `rua_common` 的 token/range、contract、project model，以及 accept/reject、range 和 semantic corpus；不共享 AST、recovery 或 type system。这样 `ruac` 保持小而可嵌入，IDE 同时获得稳定的增量语法树。
 
 grammar 扩展必须先进入 shared lexer，再分别进入 strict AST 与 Rowan CST。复合赋值、
 `loop` value、`??`、`?.`、`in` 和 `#{...}` 由同一 accept/format corpus 校验两条
 parser 流水线；compiler execution golden 与 native inference/LSP cursor test 再校验
 两套独立 semantic 实现没有漂移。
 
-模块图不由任一 parser 解析。`rua-project::module_path_from_relative_file` 把
+模块图不由任一 parser 解析。`rua_common::module_path_from_relative_file` 把
 `domain/order.rua` 和 `domain/order/mod.rua` 规范化为同一 logical path；`ruac`
 扫描 filesystem 或 `ProjectSpec` 后构造 compiler-internal module node，analysis 则
 从 VFS/project root 构造相同 DefMap。源码级 `mod` 在两个 parser 中都被拒绝。
@@ -85,7 +76,7 @@ root free function 按 resolved dependency 排序并直接输出带 EmmyLua 注�
 
 标准库也是输入，而不是散落在 compiler/LSP 中的成员表。`rua-resources` 用同一 schema 加载内嵌资源或显式目录：`std.toml` 列出 `.ruai` declaration、Option/Result language item、Lua runtime 包、导出子表、局部别名和可选 ABI。声明与单文件 `rua_std.lua` 位于同一目录。analysis 从 declaration 构建类型、成员、文档与 definition identity；compiler resolve 后才把标准定义 identity 连接到 runtime export。bundle codegen 在 chunk 顶部最多输出一次 runtime import；modules codegen 为实际使用 runtime 的输出单元分别声明 import，Lua cache 保证同一包只加载一次。普通 `.ruai` library module 使用同一 import registry，但仍可映射到独立 Lua 包。只有 manifest 指定的 `Option` 与 `Result` 具有语言级表示，用户声明的同名类型仍走普通类型、trait 和 method 规则。
 
-普通 Lua library 不复制标准库的逐模块 manifest。`rua-project` 将每个
+普通 Lua library 不复制标准库的逐模块 manifest。`rua_common` 将每个
 `workspace.lua_library` 规范化为 declaration/runtime root pair，并分别合并到
 只读语义输入与 Lua 搜索路径。LSP 递归扫描 declaration root；compiler 按同一
 logical path 解析。codegen 把每个 file-backed declaration `ModuleId` 视为独立

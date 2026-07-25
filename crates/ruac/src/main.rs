@@ -411,7 +411,7 @@ fn discover_project_config(input: &Path) -> Result<Option<PathBuf>, String> {
     let input = absolute_from_cwd(input.to_path_buf())?;
     let mut directory = input.parent();
     while let Some(current) = directory {
-        let candidate = current.join(rua_project::PROJECT_CONFIG_FILE);
+        let candidate = current.join(rua_common::PROJECT_CONFIG_FILE);
         if candidate.is_file() {
             return Ok(Some(candidate));
         }
@@ -423,7 +423,7 @@ fn discover_project_config(input: &Path) -> Result<Option<PathBuf>, String> {
 fn parse_project_config(path: &Path) -> Result<ruac::CompileOptions, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let config = rua_project::parse_project_config(&source)
+    let config = rua_common::parse_project_config(&source)
         .map_err(|error| format!("parsing {}: {error}", path.display()))?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let resolved = config

@@ -241,7 +241,7 @@ fn execute_lua(source: &Path, lua: &str) -> Result<(), String> {
         std::env::temp_dir().join(format!("ruac-golden-{}-{unique}.lua", std::process::id()));
     fs::write(&script, lua)
         .map_err(|error| format!("cannot write {}: {error}", script.display()))?;
-    let runtime = workspace_root().join("crates/rua-resources/resources/std/?.lua");
+    let runtime = workspace_root().join("crates/rua-common/resources/std/?.lua");
     let output = Command::new(std::env::var("RUA_LUA").unwrap_or_else(|_| "lua".to_string()))
         .arg("-e")
         .arg("function host_format(...) return '' end")

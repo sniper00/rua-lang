@@ -2,7 +2,7 @@
 //! normalized API documentation without retaining Rowan trivia.
 
 use crate::token::SourceRange;
-use rua_core::Attribute;
+use rua_common::Attribute;
 
 #[derive(Debug, Clone)]
 pub struct Program {

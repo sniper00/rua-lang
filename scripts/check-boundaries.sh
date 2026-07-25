@@ -2,10 +2,10 @@
 # Boundary enforcement for the Rua workspace dependency graph.
 #
 # Ensures:
-#   - rua-analysis production deps are free of ruac and LSP types
-#   - rua-syntax default production deps are free of ruac
-#   - rua-lsp production deps are free of ruac
-#   - No legacy semantic facade or transition module remains
+#   - ruac stays lightweight (no rowan, rua-ide, or LSP crates)
+#   - rua-common stays lightweight (no ruac, rua-ide, or IDE crates)
+#   - rua-ide default features stay free of LSP types
+#   - No old crate directories remain
 #
 # Usage: bash scripts/check-boundaries.sh
 # Exit 0 = clean, exit 1 = violation found.
@@ -32,68 +32,41 @@ dependency_tree() {
 
 echo "=== Checking dependency boundaries ==="
 
-# 1. rua-analysis must not depend on ruac in production
-echo -n "  rua-analysis production deps include ruac ... "
-analysis_tree=$(dependency_tree "rua-analysis" -p rua-analysis -e normal --depth 1)
-if rg -q '(^|[[:space:]])ruac v' <<<"$analysis_tree"; then
-    fail "rua-analysis has ruac in production deps"
-else
-    pass
-fi
-
-# 2. rua-syntax default features must not depend on ruac
-echo -n "  rua-syntax default production deps include ruac ... "
-syntax_tree=$(dependency_tree "rua-syntax" -p rua-syntax -e normal --depth 1)
-if rg -q '(^|[[:space:]])ruac v' <<<"$syntax_tree"; then
-    fail "rua-syntax has ruac in production deps"
-else
-    pass
-fi
-
-# 3. rua-lsp must not depend on ruac in production
-echo -n "  rua-lsp (lsp feature) production deps include ruac ... "
-lsp_tree=$(dependency_tree "rua-lsp" -p rua-lsp --features lsp -e normal --depth 2)
-if rg -q '(^|[[:space:]])ruac v' <<<"$lsp_tree"; then
-    fail "rua-lsp has ruac in production deps"
-else
-    pass
-fi
-
-# 4. rua-analysis must not depend on LSP types in production
-echo -n "  rua-analysis production deps include lsp-types or lsp-server ... "
-if rg -q '(^|[[:space:]])lsp-(types|server) v' <<<"$analysis_tree"; then
-    fail "rua-analysis has LSP types in production deps"
-else
-    pass
-fi
-
-# 5. No transition or legacy facade remains in rua-syntax
-echo -n "  rua-syntax legacy facade has been deleted ... "
-if test -e crates/rua-syntax/src/transition.rs || \
-   rg -q 'mod (transition|analysis|workspace|nameres|completion);|feature = "legacy"' \
-      crates/rua-syntax/src/lib.rs crates/rua-syntax/Cargo.toml; then
-    fail "rua-syntax still exposes a legacy facade"
-else
-    pass
-fi
-
-# 6. No legacy semantic facade imported in rua-lsp or rua-analysis production
-echo -n "  legacy facade imports in production code ... "
-if rg -n '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+rua_syntax::(analysis|workspace|nameres)' \
-    crates/rua-lsp/src/ crates/rua-analysis/src/; then
-    fail "legacy semantic facade imported in production code"
-else
-    pass
-fi
-
-# 7. ruac must not depend on rowan, analysis, or LSP crates
-echo -n "  ruac production deps are isolated ... "
+# 1. ruac must not depend on rowan, rua-ide, or LSP crates
+echo -n "  ruac production deps include rowan/IDE/LSP ... "
 ruac_tree=$(dependency_tree "ruac" -p ruac -e normal --depth 1)
-if rg -q '(^|[[:space:]])(rowan|rua-syntax|rua-analysis|lsp-types|lsp-server) v' <<<"$ruac_tree"; then
+if echo "$ruac_tree" | rg -q '(^|[[:space:]])(rowan|rua-ide|lsp-types|lsp-server) v'; then
     fail "ruac depends on IDE/LSP crates"
 else
     pass
 fi
+
+# 2. rua-common must not depend on ruac, rua-ide, rowan, or IDE crates
+echo -n "  rua-common production deps are clean ... "
+common_tree=$(dependency_tree "rua-common" -p rua-common -e normal --depth 1)
+if echo "$common_tree" | rg -q '(^|[[:space:]])(ruac|rua-ide|rowan) v'; then
+    fail "rua-common depends on compiler/IDE crates"
+else
+    pass
+fi
+
+# 3. rua-ide default features must not pull in LSP types
+echo -n "  rua-ide default features exclude LSP types ... "
+ide_tree=$(dependency_tree "rua-ide" -p rua-ide -e normal --depth 1)
+if echo "$ide_tree" | rg -q '(^|[[:space:]])(lsp-types|lsp-server) v'; then
+    fail "rua-ide default features include LSP types"
+else
+    pass
+fi
+
+# 4. No old crate directories remain
+echo -n "  old crate directories are removed ... "
+for old_crate in rua-core rua-lex rua-project rua-resources rua-syntax rua-analysis rua-lsp; do
+    if test -d "crates/$old_crate"; then
+        fail "old crate directory crates/$old_crate still exists"
+    fi
+done
+pass
 
 echo ""
 echo -e "${GREEN}All boundary checks passed.${NC}"

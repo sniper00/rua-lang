@@ -1,0 +1,39 @@
+[package]
+name = "rua-ide"
+version = "0.1.1"
+edition = "2024"
+description = "Rua IDE support: lossless CST, incremental semantic analysis, and LSP server."
+
+[features]
+default = []
+lsp = ["dep:crossbeam-channel", "dep:ignore", "dep:lsp-server", "dep:lsp-types", "dep:serde_json", "dep:url"]
+
+[lib]
+name = "rua_ide"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rua-common.workspace = true
+rowan.workspace = true
+crossbeam-channel = { workspace = true, optional = true }
+ignore = { workspace = true, optional = true }
+lsp-server = { version = "0.7", optional = true }
+lsp-types = { version = "0.97", optional = true }
+serde_json = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
+[dev-dependencies]
+ruac.workspace = true
+lsp-types = { version = "0.97" }
+serde_json = { workspace = true }
+proptest = "1"
+
+[[bin]]
+name = "rua-fmt"
+path = "src/bin/rua-fmt.rs"
+
+[[bin]]
+name = "rua-lsp"
+path = "src/bin/rua-lsp.rs"
+required-features = ["lsp"]

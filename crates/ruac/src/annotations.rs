@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rua_core::{Attribute, DiagnosticCode, MetaItem, MetaValue};
+use rua_common::{Attribute, DiagnosticCode, MetaItem, MetaValue};
 use serde::Serialize;
 
 use crate::ast::{Field, Item, Program, Type, VariantKind};

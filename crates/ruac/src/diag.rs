@@ -9,7 +9,7 @@
 
 use std::ops::Deref;
 
-use rua_core::{DiagnosticCode, DiagnosticSeverity, FileId, StructuredDiagnostic, TextRange};
+use rua_common::{DiagnosticCode, DiagnosticSeverity, FileId, StructuredDiagnostic, TextRange};
 
 /// A single diagnostic: which file/span it refers to, plus the message.
 ///

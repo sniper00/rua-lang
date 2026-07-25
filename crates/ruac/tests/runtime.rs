@@ -43,7 +43,7 @@ fn lua_program() -> String {
 }
 
 fn run_lua(script: &Path) -> Output {
-    let runtime_pattern = workspace_root().join("crates/rua-resources/resources/std/?.lua");
+    let runtime_pattern = workspace_root().join("crates/rua-common/resources/std/?.lua");
     Command::new(lua_program())
         .arg(script)
         .env("LUA_PATH", format!("{};;", runtime_pattern.display()))
@@ -129,7 +129,7 @@ print("{} {}", empty.first().is_none(), empty.last().is_none());
 
 fn compile_and_run_with_prelude(label: &str, prelude: &str, source: &str) -> (String, Output) {
     let root = workspace_root();
-    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-resources/resources/std"))
+    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-common/resources/std"))
         .unwrap_or_else(|error| panic!("compile {label}: {error}"));
     let temp = TempDir::new(label);
     let script = temp.path().join("main.lua");
@@ -155,7 +155,7 @@ fn compile_project_and_run(
         fs::write(path, source).expect("write project module");
     }
     let root = workspace_root();
-    let lua = ruac::compile_path_with_std(&main, &root.join("crates/rua-resources/resources/std"))
+    let lua = ruac::compile_path_with_std(&main, &root.join("crates/rua-common/resources/std"))
         .unwrap_or_else(|error| panic!("compile {label}: {error}"));
     let script = temp.path().join("main.lua");
     fs::write(&script, format!("{prelude}\n{lua}")).expect("write generated Lua");
@@ -975,7 +975,7 @@ fn require_returns_public_exports_after_initialization() {
     let source = r#"
         pub fn answer() -> i64 { 42 }
     "#;
-    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-resources/resources/std"))
+    let lua = ruac::compile_str_with_std(source, &root.join("crates/rua-common/resources/std"))
         .expect("compile export module");
     let temp = TempDir::new("exports");
     let module = temp.path().join("module.lua");

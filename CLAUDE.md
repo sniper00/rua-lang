@@ -4,14 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Rua is a **Rust-syntax-subset language** that transpiles to readable Lua 5.5. The repo holds the compiler (`ruac`), a lossless CST (`rua-syntax`), incremental semantic analysis (`rua-analysis`), and an LSP server (`rua-lsp`).
+Rua is a **Rust-syntax-subset language** that transpiles to readable Lua 5.5. The repo holds three crates: `rua-common` (shared types + lexer + project model + std resources), `ruac` (lightweight compiler), and `rua-ide` (lossless CST + incremental semantic analysis + LSP server).
+
+Key design constraint: no borrow checker, no lifetimes, no ownership — static types are erased at codegen. Rua targets Lua 5.5 as the execution backend.
 
 Key design constraint: no borrow checker, no lifetimes, no ownership — static types are erased at codegen. Rua targets Lua 5.5 as the execution backend.
 
 ## Working rules
 
 **Every change must include:**
-1. **Tests** — LSP-level features go in `crates/rua-lsp/tests/incremental_stress.rs`; analysis internals go in `crates/rua-analysis/tests/`. No change lands without a test that fails before the fix and passes after.
+1. **Tests** — LSP-level features go in `crates/rua-ide/tests/incremental_stress.rs`; analysis internals go in `crates/rua-ide/tests/`. No change lands without a test that fails before the fix and passes after.
 2. **Documentation** — update relevant docs in `docs/` or doc comments on public APIs when behaviour changes.
 3. **Commit** — after tests pass and clippy is clean, commit immediately. Do NOT include `Co-Authored-By` or any other trailer.
    - Use `feat:` prefix for new features and user-facing additions.
@@ -23,48 +25,47 @@ Key design constraint: no borrow checker, no lifetimes, no ownership — static 
 
 | Crate | Purpose |
 |---|---|
-| `ruac` | Compiler / transpiler: AST → HIR → Lua codegen. Heavy, pre-existing; **not** the focus of current IDE work. |
-| `rua-syntax` | Lossless rowan CST: lexer, parser, `AstNode` views, formatter, `LineIndex`. The **IDE-facing** syntax tree. Must have `default-features = false` (disables legacy `ruac` bridge) when consumed by analysis/LSP. |
-| `rua-analysis` | Incremental semantic analysis: HIR lowering, name resolution, type inference, and IDE query engine. Protocol-neutral — returns `NavigationTarget`, `HoverResult`, `CompletionItem`, etc. |
-| `rua-lsp` | LSP server (stdio JSON-RPC, `lsp-server` + `lsp-types`). Two binaries: `rua-lsp` (requires `--features lsp`) and `rua-fmt` (formatter CLI, no feature gate). |
+| `rua-common` | Shared foundation: type identities (`FileId`, `TextRange`), `DiagnosticCode`, lossless lexer (`TokenKind`, `lex()`), IO-free project model (`ProjectSpec`, `CfgOptions`), embedded standard-library resources. Depends only on `serde`, `toml`, `include_dir`. |
+| `ruac` | Compiler / transpiler: AST → HIR → Lua codegen. Lightweight — depends only on `rua-common`. Third-party hosts embed `ruac` for compilation without pulling in rowan or IDE deps. |
+| `rua-ide` | IDE support: lossless rowan CST (`syntax` module), incremental semantic analysis (`analysis` module), and LSP server (`lsp` module — requires `--features lsp`). Two binaries: `rua-lsp` (requires `-features lsp`) and `rua-fmt` (formatter CLI, no feature gate). |
 
 ## Build & test commands
 
 ```bash
 # Build the LSP server (release)
-cargo build --release -p rua-lsp --features lsp
+cargo build --release -p rua-ide --features lsp --bin rua-lsp
 
 # Run all tests across all crates
 cargo test --all
 
-# Run only analysis + LSP tests (excludes ruac)
-cargo test -p rua-analysis -p rua-lsp
+# Run only IDE tests (excludes ruac)
+cargo test -p rua-ide
 
 # Run a single integration test by name
-cargo test -p rua-lsp --test incremental_stress -- lint_redundant_mut
+cargo test -p rua-ide --test incremental_stress -- lint_redundant_mut
 
 # Run analysis unit tests by module
-cargo test -p rua-analysis -- hir
+cargo test -p rua-ide -- hir
 
 # Clippy (only on active crates — ruac has pre-existing warnings)
-cargo clippy -p rua-analysis -p rua-lsp --all-targets -- -D warnings
+cargo clippy -p rua-common -p rua-ide --all-targets -- -D warnings
 
 # Format the workspace
 cargo fmt --all
 
 # Regenerate golden format snapshots
-RUA_UPDATE_GOLDENS=1 cargo test -p rua-syntax --test formatter_goldens update_formatter_goldens -- --ignored --exact
+RUA_UPDATE_GOLDENS=1 cargo test -p rua-ide --test formatter_goldens update_formatter_goldens -- --ignored --exact
 ```
 
-**Note**: `cargo clippy --all-targets` will also check `ruac`. To keep cycle times short when only touching IDE crates, scope clippy to `-p rua-analysis -p rua-lsp --features lsp`.
+**Note**: `cargo clippy --all-targets` will also check `ruac`. To keep cycle times short when only touching IDE crates, scope clippy to `-p rua-common -p rua-ide --features lsp`.
 
 ## Analysis pipeline (the "two-tree" design)
 
-The compiler (`ruac`) has its own AST. The IDE/LSP side has a **separate**, lossless rowan CST. These are independent trees that must agree on semantics (verified by conformance tests).
+The compiler (`ruac`) has its own AST. The IDE/LSP side has a **separate**, lossless rowan CST in `rua-ide::syntax`. These are independent trees that must agree on semantics (verified by conformance tests).
 
 The analysis pipeline flows:
 
-1. **Parse** (`rua-syntax::parse_source_file`) → lossless CST with trivia
+1. **Parse** (`rua_ide::syntax::parse_source_file`) → lossless CST with trivia
 2. **ItemTree** (`ItemTree::lower()`) → flat file-level item index (functions, structs, impls, etc.)
 3. **DefMap** (`DefMap::build()`) → cross-file name resolution, module graph
 4. **MemberIndex** (`MemberIndex::build_shared()`) → field/method → definition lookup (traits + impls + builtin types)
@@ -82,14 +83,14 @@ All caches live in `BaseDb` with per-file invalidation. Query pipelines are chai
 
 ### LSP server dispatch
 
-`crates/rua-lsp/src/lsp.rs` — a single `Server` struct. `main_loop()` reads JSON-RPC messages, dispatches to `handle_*` methods. Each handler:
-1. Converts LSP protocol types to `rua_analysis` types (URI → FileId, LSP Position → offset)
+`crates/rua-ide/src/lsp/mod.rs` — a single `Server` struct. `main_loop()` reads JSON-RPC messages, dispatches to `handle_*` methods. Each handler:
+1. Converts LSP protocol types to `rua_ide` types (URI → FileId, LSP Position → offset)
 2. Calls the corresponding `Analysis` method
 3. Converts results back to LSP protocol types
 
 ### Integration test pattern
 
-`crates/rua-lsp/tests/incremental_stress.rs` uses a minimal `TestServer` that mirrors the LSP server without protocol overhead:
+`crates/rua-ide/tests/incremental_stress.rs` uses a minimal `TestServer` that mirrors the LSP server without protocol overhead:
 
 ```rust
 let mut srv = TestServer::new();
@@ -99,7 +100,7 @@ let hover = srv.snapshot().hover(pp);                // Option<HoverResult>
 let diags = srv.snapshot().diagnostics(file_id);      // Vec<Diagnostic>
 ```
 
-**Every change must have a test**. Tests go in `incremental_stress.rs` for LSP-level features (hover, goto-def, diagnostics), or in `crates/rua-analysis/tests/` for analysis internals (inference, body lowering, member resolution).
+**Every change must have a test**. Tests go in `incremental_stress.rs` for LSP-level features (hover, goto-def, diagnostics), or in `crates/rua-ide/tests/` for analysis internals (inference, body lowering, member resolution).
 
 ### AST-walking for cursor-sensitive queries
 
@@ -113,17 +114,17 @@ The `mut` in `&mut self` is about **reference mutability** (mutation through the
 
 ## Module layout (non-obvious)
 
-- `crates/rua-analysis/src/hir/body.rs` — HIR expression/binding/pattern types + CST→HIR lowering
-- `crates/rua-analysis/src/hir/def_map.rs` — cross-file name resolution, module graph
-- `crates/rua-analysis/src/hir/member.rs` — field/method resolution (MemberIndex, trait impls, builtin types)
-- `crates/rua-analysis/src/hir/infer.rs` — type inference engine
-- `crates/rua-analysis/src/hir/scope.rs` — scope tree, local name resolution, `LocalUseKind`
-- `crates/rua-analysis/src/hir/item_tree.rs` — flat file-level item index (ItemTree)
-- `crates/rua-analysis/src/diagnostic/mod.rs` — all diagnostics: parse errors, type errors, lints (unused vars, redundant mut, dead code)
-- `crates/rua-analysis/src/ide/mod.rs` — `Analysis` query methods (hover, goto_def, completion, references, etc.)
-- `crates/rua-analysis/src/ide/completion.rs` — completion engine
-- `crates/rua-analysis/src/ide/contract.rs` — protocol-neutral result types
-- `crates/rua-analysis/src/ide/closure_iterator.rs` — semantic tokens + closure param detection
+- `crates/rua-ide/src/analysis/hir/body.rs` — HIR expression/binding/pattern types + CST→HIR lowering
+- `crates/rua-ide/src/analysis/hir/def_map.rs` — cross-file name resolution, module graph
+- `crates/rua-ide/src/analysis/hir/member.rs` — field/method resolution (MemberIndex, trait impls, builtin types)
+- `crates/rua-ide/src/analysis/hir/infer.rs` — type inference engine
+- `crates/rua-ide/src/analysis/hir/scope.rs` — scope tree, local name resolution, `LocalUseKind`
+- `crates/rua-ide/src/analysis/hir/item_tree.rs` — flat file-level item index (ItemTree)
+- `crates/rua-ide/src/analysis/diagnostic/mod.rs` — all diagnostics: parse errors, type errors, lints (unused vars, redundant mut, dead code)
+- `crates/rua-ide/src/analysis/ide/mod.rs` — `Analysis` query methods (hover, goto_def, completion, references, etc.)
+- `crates/rua-ide/src/analysis/ide/completion.rs` — completion engine
+- `crates/rua-ide/src/analysis/ide/contract.rs` — protocol-neutral result types
+- `crates/rua-ide/src/analysis/ide/closure_iterator.rs` — semantic tokens + closure param detection
 
 ## Design documents
 

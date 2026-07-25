@@ -160,7 +160,7 @@ async function startClient(ctx: ExtensionContext): Promise<void> {
   testState.workspaceFolders =
     workspace.workspaceFolders?.map((folder) => folder.uri.toString()) ?? [];
 
-  // The server speaks stdio JSON-RPC (see crates/rua-lsp). One process
+  // The server speaks stdio JSON-RPC (see crates/rua-ide). One process
   // serves every workspace folder; the server indexes each folder on init.
   const serverOptions: ServerOptions = async () => {
     const child = spawn(command, args, { stdio: "pipe" });

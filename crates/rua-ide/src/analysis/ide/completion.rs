@@ -1,0 +1,2126 @@
+//! Native completion: scope, member, and path completions using the
+//! semantic HIR without any compiler bridge.
+
+use std::sync::Arc;
+
+use crate::syntax::{
+    AstNode, Named, SyntaxKind, SyntaxToken,
+    ast::{AnnotationDecl, Attribute as SyntaxAttribute, HasAttributes},
+};
+
+use crate::{
+    analysis::BaseDb,
+    analysis::base::TextRange,
+    analysis::hir::{
+        Body, BodyScopes, BodySourceMap, DefKind, DefMap, Definition, Expr, ExprId,
+        InferenceResult, MemberIndex, ModuleId, ScopeKind, Ty,
+},
+    analysis::vfs::FileId,
+};
+
+use super::{
+    CompletionInsert, CompletionItem, CompletionKind, CompletionRelevance, FilePosition, FileRange,
+    ProjectPosition,
+};
+
+// ---------------------------------------------------------------------------
+// Completion context — built once per request, passed to all completion fns.
+// ---------------------------------------------------------------------------
+
+/// Bundled context for a single completion request.  Built once at the entry
+/// point and passed through to scope / member / path completions, replacing
+/// the previous 4–5 ad-hoc parameters.
+pub(crate) struct CompletionContext<'a> {
+    pub db: &'a Arc<BaseDb>,
+    pub def_map: Arc<DefMap>,
+    pub member_index: Arc<MemberIndex>,
+    pub position: FilePosition,
+    pub offset: u32,
+    pub partial_range: TextRange,
+    pub token: Option<SyntaxToken>,
+
+    // ── AST-derived context (replaces token-based heuristics) ──────────
+    pub in_type_position: bool,
+    pub in_method_body: bool,
+}
+
+impl<'a> CompletionContext<'a> {
+    fn new(db: &'a Arc<BaseDb>, project_position: ProjectPosition) -> Option<Self> {
+        let position = project_position.position;
+        let query = super::semantic_query_data(db, project_position)?;
+        let def_map = query.def_map;
+        let member_index = query.member_index;
+        let text = db.file_text(position.file_id)?;
+        let parse = db.parse(position.file_id);
+        let root = parse.syntax_node();
+        let offset = position.offset.min(text.len() as u32);
+        let partial_range = partial_ident_range(text.as_ref(), offset);
+        let token = token_at_offset(root, offset);
+
+        // Walk up from the cursor token to determine whether this is a type site.
+        let in_type_position = token
+            .as_ref()
+            .and_then(|token| token.parent())
+            .into_iter()
+            .flat_map(|node| node.ancestors())
+            .any(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::Colon | SyntaxKind::ParamList | SyntaxKind::FieldDecl
+                )
+            });
+
+        // Determine whether cursor is inside a method body.
+        let in_method_body = innermost_body_owner(&def_map, position, offset)
+            .is_some_and(|d| d.kind() == DefKind::Method);
+
+        Some(Self {
+            db,
+            def_map,
+            member_index,
+            position,
+            offset,
+            partial_range,
+            token,
+            in_type_position,
+            in_method_body,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+pub(crate) fn completions(db: &Arc<BaseDb>, position: ProjectPosition) -> Vec<CompletionItem> {
+    let Some(ctx) = CompletionContext::new(db, position) else {
+        return Vec::new();
+    };
+
+    // Member access: cursor right after `.` (token IS the dot) or after `.x`
+    let after_dot = ctx
+        .token
+        .as_ref()
+        .is_some_and(|t| matches!(t.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot))
+        || ctx
+            .token
+            .as_ref()
+            .and_then(previous_significant)
+            .is_some_and(|t| matches!(t.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot));
+    let mut items = if after_dot {
+        member_completions(&ctx)
+    } else if let Some(ref tok) = ctx.token
+        && (tok.kind() == SyntaxKind::ColonColon
+            || previous_significant(tok).is_some_and(|t| t.kind() == SyntaxKind::ColonColon))
+    {
+        path_completions(&ctx)
+    } else {
+        scope_completions(&ctx)
+    };
+
+    // Filter by the typed prefix so the client only sees relevant matches.
+    let text = ctx.db.file_text(ctx.position.file_id).unwrap_or_default();
+    if !ctx.partial_range.is_empty() {
+        let start = ctx.partial_range.start() as usize;
+        let end = ctx.partial_range.end() as usize;
+        if start <= end && end <= text.len() {
+            let prefix = &text[start..end];
+            let is_pure_numeric = !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit());
+            if !is_pure_numeric {
+                let prefix_lower = prefix.to_lowercase();
+                items.retain(|item| {
+                    let label_lower = item.label().to_lowercase();
+                    is_subsequence(&prefix_lower, &label_lower)
+                        || item
+                            .lookup()
+                            .is_some_and(|l| is_subsequence(&prefix_lower, &l.to_lowercase()))
+                });
+            }
+        }
+    }
+
+    items
+}
+
+/// Check if `prefix` chars appear in order within `target` (case-insensitive
+/// ASCII subsequence match). Used for fuzzy completion filtering.
+fn is_subsequence(prefix: &str, target: &str) -> bool {
+    let mut target_bytes = target.as_bytes().iter();
+    for &pb in prefix.as_bytes() {
+        let pb_lower = pb.to_ascii_lowercase();
+        loop {
+            match target_bytes.next() {
+                Some(&tb) if tb.to_ascii_lowercase() == pb_lower => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Walk backwards from `offset` to find the start of a partial identifier.
+/// Returns the byte range `[start, offset)` of the prefix, or a zero-width
+/// range at `offset` if there is no identifier character before the cursor.
+fn partial_ident_range(text: &str, offset: u32) -> TextRange {
+    let bytes = text.as_bytes();
+    let mut start = offset as usize;
+    if start > bytes.len() {
+        start = bytes.len();
+    }
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    TextRange::new(start as u32, offset)
+}
+
+// ---------------------------------------------------------------------------
+// Scope completion: keywords + locals + module items + builtins
+// ---------------------------------------------------------------------------
+
+const RUA_KEYWORDS: &[&str] = &[
+    "fn", "let", "mut", "if", "else", "while", "loop", "for", "in", "return", "break", "continue",
+    "match", "struct", "enum", "trait", "impl", "mod", "pub", "use", "as", "extern", "where",
+    "type", "move", "self", "true", "false",
+];
+
+/// Keyword → snippet template for statement-level keywords that generate
+/// common code patterns.
+fn keyword_snippet(kw: &str) -> Option<&'static str> {
+    match kw {
+        "for" => Some("for ${1:item} in ${2:iter} {\n    $0\n}"),
+        "match" => Some("match ${1:expr} {\n    $0\n}"),
+        "if" => Some("if ${1:cond} {\n    $0\n}"),
+        "while" => Some("while ${1:cond} {\n    $0\n}"),
+        "loop" => Some("loop {\n    $0\n}"),
+        "fn" => Some("fn ${1:name}(${2:params}) -> ${3:Ret} {\n    $0\n}"),
+        "struct" => Some("struct ${1:Name} {\n    ${2:fields}\n}"),
+        "enum" => Some("enum ${1:Name} {\n    ${2:variants}\n}"),
+        "impl" => Some("impl ${1:Type} {\n    $0\n}"),
+        "mod" => Some("mod ${1:name} {\n    $0\n}"),
+        "trait" => Some("trait ${1:Name} {\n    $0\n}"),
+        "let" => Some("let ${1:name} = ${2:expr};"),
+        _ => None,
+    }
+}
+
+/// Additional snippet-only completions for patterns not in RUA_KEYWORDS.
+const SNIPPET_PATTERNS: &[(&str, &str)] = &[
+    ("if let", "if let ${1:pattern} = ${2:expr} {\n    $0\n}"),
+    (
+        "while let",
+        "while let ${1:pattern} = ${2:expr} {\n    $0\n}",
+    ),
+];
+
+/// Keywords that only make sense at the start of a statement/item, not in
+/// expression position (e.g. after `=`, `return`, `(`).
+const DECLARATION_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "impl", "mod", "pub", "extern", "use", "type",
+];
+
+const PRIMITIVE_TYPES: &[(&str, &str, Option<&str>)] = &[
+    ("i64", "i64", None),
+    ("f64", "f64", None),
+    ("bool", "bool", None),
+    ("str", "str", None),
+    ("Box", "Box<T>", Some("Box<${1:T}>$0")),
+];
+
+const BUILTIN_VALUES: &[(&str, &str)] = &[
+    ("Some", "Some(value) -> Option<T>"),
+    ("None", "None: Option<T>"),
+    ("Ok", "Ok(value) -> Result<T, E>"),
+    ("Err", "Err(error) -> Result<T, E>"),
+];
+
+fn scope_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let db = ctx.db;
+    let position = ctx.position;
+    let offset = ctx.offset;
+    let partial_range = ctx.partial_range;
+    let token = ctx.token.as_ref();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+
+    let def_map = &ctx.def_map;
+    let member_index = &ctx.member_index;
+    let in_method = ctx.in_method_body;
+    let in_type_pos = ctx.in_type_position || token.is_some_and(is_type_position);
+    let in_expr_context = token.is_some_and(is_expression_context);
+
+    if let Some(attribute) = annotation_attribute_at(ctx) {
+        if annotation_cursor_is_in_arguments(&attribute, offset) {
+            complete_annotation_arguments(ctx, &attribute, &mut items, &mut seen);
+        } else {
+            complete_annotation_names(ctx, &attribute, &mut items, &mut seen);
+        }
+        apply_replacement_ranges(&mut items, partial_range);
+        CompletionItem::normalize(&mut items);
+        return items;
+    }
+
+    // Context-sensitive completions (only fire inside specific AST nodes).
+    complete_match_variants(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+    complete_struct_fields(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+    complete_iflet_variants(
+        db,
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+
+    // General completions (always available, subject to context filtering).
+    complete_keywords(
+        &mut items,
+        &mut seen,
+        in_method,
+        in_type_pos,
+        in_expr_context,
+    );
+    complete_snippets(&mut items, &mut seen);
+    complete_locals(
+        db,
+        def_map,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+        in_type_pos,
+    );
+    complete_module_defs(
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+        in_type_pos,
+    );
+    complete_cross_module_defs(
+        def_map,
+        member_index,
+        position,
+        offset,
+        &mut items,
+        &mut seen,
+    );
+    complete_builtin_types(member_index, token, &mut items, &mut seen, in_type_pos);
+    complete_builtin_constructors(&mut items, &mut seen, in_type_pos);
+    complete_standard_functions(member_index, &mut items, &mut seen, in_type_pos);
+
+    // Post-processing.
+    apply_type_compat_boost(db, def_map, position, offset, &mut items);
+    apply_replacement_ranges(&mut items, partial_range);
+    CompletionItem::normalize(&mut items);
+    items
+}
+
+fn annotation_attribute_at(ctx: &CompletionContext<'_>) -> Option<SyntaxAttribute> {
+    ctx.token
+        .as_ref()?
+        .parent_ancestors()
+        .find_map(SyntaxAttribute::cast)
+}
+
+fn annotation_cursor_is_in_arguments(attribute: &SyntaxAttribute, offset: u32) -> bool {
+    attribute
+        .meta_item()
+        .and_then(|meta| {
+            meta.syntax()
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .find(|token| token.kind() == SyntaxKind::LParen)
+        })
+        .is_some_and(|left| u32::from(left.text_range().end()) <= offset)
+}
+
+fn complete_annotation_names(
+    ctx: &CompletionContext<'_>,
+    attribute: &SyntaxAttribute,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let target = annotation_target_kind(attribute);
+    for builtin in ["cfg", "cfg_attr"] {
+        if seen.insert(builtin.to_string()) {
+            items.push(
+                CompletionItem::new(builtin, CompletionKind::Keyword)
+                    .with_detail(format!("built-in attribute `{builtin}`")),
+            );
+        }
+    }
+    if target == Some("annotation") {
+        for builtin in ["targets", "retention", "repeatable"] {
+            if seen.insert(builtin.to_string()) {
+                items.push(
+                    CompletionItem::new(builtin, CompletionKind::Keyword)
+                        .with_detail(format!("annotation schema attribute `{builtin}`")),
+                );
+            }
+        }
+    }
+    let Some(current_module) = module_at_position(&ctx.def_map, ctx.position.file_id, ctx.offset)
+    else {
+        return;
+    };
+    for definition in ctx
+        .def_map
+        .definitions()
+        .filter(|definition| definition.kind() == DefKind::Annotation)
+    {
+        if definition.module_id() != current_module
+            && definition.visibility() != crate::analysis::hir::Visibility::Public
+        {
+            continue;
+        }
+        if let Some(target) = target
+            && !annotation_schema_targets(ctx.db, definition).contains(target)
+        {
+            continue;
+        }
+        if !seen.insert(definition.name().to_string()) {
+            continue;
+        }
+        let mut item = CompletionItem::new(definition.name(), CompletionKind::Annotation)
+            .with_detail(annotation_signature(ctx.db, definition))
+            .with_target(FileRange::new(
+                definition.file_id(),
+                definition.name_range(),
+            ));
+        if let Some(documentation) = definition.documentation() {
+            item = item.with_documentation(documentation);
+        }
+        if definition.module_id() != current_module
+            && let Some(module_name) = ctx
+                .def_map
+                .module(definition.module_id())
+                .and_then(|module| module.name())
+        {
+            item = item.with_import_path(format!("use {module_name}::{};", definition.name()));
+        }
+        items.push(item);
+    }
+}
+
+fn complete_annotation_arguments(
+    ctx: &CompletionContext<'_>,
+    attribute: &SyntaxAttribute,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let name = super::attribute_name_tokens(attribute)
+        .iter()
+        .map(|token| token.text())
+        .collect::<String>();
+    let module = match module_at_position(&ctx.def_map, ctx.position.file_id, ctx.offset) {
+        Some(module) => module,
+        None => return,
+    };
+    let segments = name.split("::").collect::<Vec<_>>();
+    let Some(definition) = ctx
+        .def_map
+        .resolve_path(module, &segments, crate::analysis::hir::ResolveStrategy::Lexical)
+        .filter(|definition| definition.kind() == DefKind::Annotation)
+    else {
+        return;
+    };
+    let provided = attribute
+        .to_core()
+        .ok()
+        .into_iter()
+        .flat_map(|attribute| attribute.items)
+        .filter_map(|item| match item {
+            rua_common::MetaItem::NameValue { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let Some(declaration) = annotation_declaration(ctx.db, definition) else {
+        return;
+    };
+    for parameter in declaration.params() {
+        let Some(name) = parameter.name_text() else {
+            continue;
+        };
+        if provided.contains(&name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        let detail = parameter.ty().map_or_else(
+            || format!("{name}: ?"),
+            |ty| format!("{name}: {}", ty.syntax().text()),
+        );
+        items.push(
+            CompletionItem::new(name.clone(), CompletionKind::Field)
+                .with_detail(detail)
+                .with_insert(CompletionInsert::Snippet(format!("{name} = $0"))),
+        );
+    }
+}
+
+pub(crate) fn annotation_target_kind(attribute: &SyntaxAttribute) -> Option<&'static str> {
+    let target = attribute.syntax().parent()?;
+    Some(match target.kind() {
+        SyntaxKind::AnnotationDecl => "annotation",
+        SyntaxKind::FnDecl => {
+            if target
+                .parent()
+                .is_some_and(|parent| parent.kind() == SyntaxKind::ImplDecl)
+            {
+                "method"
+            } else {
+                "function"
+            }
+        }
+        SyntaxKind::StructDecl => "struct",
+        SyntaxKind::EnumDecl => "enum",
+        SyntaxKind::FieldDecl => "field",
+        SyntaxKind::EnumVariant => "variant",
+        SyntaxKind::TraitMethod => "method",
+        SyntaxKind::ExternFn => "extern_function",
+        _ => return None,
+    })
+}
+
+pub(crate) fn annotation_schema_targets(
+    db: &Arc<BaseDb>,
+    definition: &Definition,
+) -> std::collections::BTreeSet<String> {
+    annotation_declaration(db, definition)
+        .into_iter()
+        .flat_map(|declaration| declaration.attributes().collect::<Vec<_>>())
+        .filter_map(|attribute| attribute.to_core().ok())
+        .find(|attribute| attribute.name == "targets")
+        .into_iter()
+        .flat_map(|attribute| attribute.items)
+        .filter_map(|item| match item {
+            rua_common::MetaItem::Word(name) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn annotation_signature(db: &Arc<BaseDb>, definition: &Definition) -> String {
+    let Some(declaration) = annotation_declaration(db, definition) else {
+        return format!("annotation {}", definition.name());
+    };
+    let parameters = declaration
+        .params()
+        .map(|parameter| {
+            let name = parameter.name_text().unwrap_or_else(|| "?".to_string());
+            let ty = parameter
+                .ty()
+                .map_or_else(|| "?".to_string(), |ty| ty.syntax().text().to_string());
+            format!("{name}: {ty}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("annotation {}({parameters})", definition.name())
+}
+
+pub(crate) fn annotation_hover_text(db: &Arc<BaseDb>, definition: &Definition) -> String {
+    let signature = annotation_signature(db, definition);
+    let Some(declaration) = annotation_declaration(db, definition) else {
+        return signature;
+    };
+    let attributes = declaration
+        .attributes()
+        .filter_map(|attribute| attribute.to_core().ok())
+        .collect::<Vec<_>>();
+    let targets = attributes
+        .iter()
+        .find(|attribute| attribute.name == "targets")
+        .into_iter()
+        .flat_map(|attribute| &attribute.items)
+        .filter_map(|item| match item {
+            rua_common::MetaItem::Word(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let retention = attributes
+        .iter()
+        .find(|attribute| attribute.name == "retention")
+        .and_then(|attribute| attribute.items.first())
+        .and_then(|item| match item {
+            rua_common::MetaItem::Word(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .unwrap_or("build");
+    let repeatable = attributes
+        .iter()
+        .any(|attribute| attribute.name == "repeatable");
+    format!(
+        "{signature}\ntargets: {}\nretention: {retention}\nrepeatable: {repeatable}",
+        if targets.is_empty() {
+            "<none>"
+        } else {
+            &targets
+        }
+    )
+}
+
+pub(crate) fn annotation_declaration(
+    db: &Arc<BaseDb>,
+    definition: &Definition,
+) -> Option<AnnotationDecl> {
+    db.parse(definition.file_id())
+        .syntax_node()
+        .descendants()
+        .filter_map(AnnotationDecl::cast)
+        .find(|declaration| {
+            declaration.name().is_some_and(|name| {
+                let range = name.text_range();
+                TextRange::new(range.start().into(), range.end().into()) == definition.name_range()
+            })
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Member completion (after `.`)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Individual completion contributors (extracted from scope_completions)
+// ---------------------------------------------------------------------------
+
+fn complete_match_variants(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some((_enum_ty, enum_template)) =
+        match_scrutinee_enum(db, def_map, member_index, position, offset)
+    {
+        for candidate in member_index.associated_candidates(&enum_template) {
+            if seen.insert(candidate.name().to_string()) {
+                let name = candidate.name().to_string();
+                items.push(
+                    CompletionItem::new(name.clone(), CompletionKind::Variant)
+                        .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
+                        .with_insert(CompletionInsert::Call {
+                            callee: name,
+                            params: vec![],
+                        })
+                        .with_relevance(CompletionRelevance::match_variant()),
+                );
+            }
+        }
+    }
+}
+
+fn complete_struct_fields(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some(struct_ty) = struct_literal_type(db, def_map, position, offset) {
+        for candidate in member_index.field_candidates(&struct_ty) {
+            if seen.insert(candidate.name().to_string()) {
+                items.push(
+                    CompletionItem::new(candidate.name().to_string(), CompletionKind::Field)
+                        .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
+                        .with_relevance(CompletionRelevance::struct_field()),
+                );
+            }
+        }
+    }
+}
+
+fn complete_iflet_variants(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let Some((_ty, template)) =
+        pattern_scrutinee_enum(db, def_map, member_index, position, offset)
+    {
+        for candidate in member_index.associated_candidates(&template) {
+            if seen.insert(candidate.name().to_string()) {
+                items.push(
+                    CompletionItem::new(candidate.name().to_string(), CompletionKind::Variant)
+                        .with_detail(candidate.ty().to_string())
+                        .with_optional_target(member_target_range(def_map, candidate.target()))
+                        .with_relevance(CompletionRelevance::iflet_variant()),
+                );
+            }
+        }
+    }
+}
+
+fn complete_keywords(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_method: bool,
+    in_type_pos: bool,
+    in_expr_context: bool,
+) {
+    for kw in RUA_KEYWORDS {
+        if in_type_pos {
+            continue;
+        }
+        if in_expr_context && DECLARATION_KEYWORDS.contains(kw) {
+            continue;
+        }
+        if seen.insert(kw.to_string()) {
+            let mut item = CompletionItem::new(*kw, CompletionKind::Keyword)
+                .with_relevance(CompletionRelevance::keyword());
+            if let Some(snippet) = keyword_snippet(kw) {
+                item = item
+                    .with_detail(format!("{kw} … (snippet)"))
+                    .with_insert(CompletionInsert::Snippet(snippet.to_string()));
+            } else {
+                item = item.with_detail(format!("keyword {kw}"));
+            }
+            if *kw == "self" && in_method {
+                item = item.with_relevance(CompletionRelevance::self_keyword());
+            }
+            items.push(item);
+        }
+    }
+}
+
+fn complete_snippets(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for (label, snippet) in SNIPPET_PATTERNS {
+        if seen.insert(label.to_string()) {
+            items.push(
+                CompletionItem::new(*label, CompletionKind::Keyword)
+                    .with_detail(format!("{label} … (snippet)"))
+                    .with_insert(CompletionInsert::Snippet(snippet.to_string()))
+                    .with_relevance(CompletionRelevance::snippet()),
+            );
+        }
+    }
+}
+
+fn complete_locals(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    let usage_counts = local_usage_counts(db, def_map, position, offset);
+    for local in visible_locals(db, def_map, position, offset) {
+        if seen.insert(local.name.clone()) {
+            let extra = usage_counts
+                .get(&local.name)
+                .map(|c| (*c).min(5))
+                .unwrap_or(0);
+            let mut item = CompletionItem::new(local.name.clone(), CompletionKind::Variable)
+                .with_detail(local.detail)
+                .with_relevance(CompletionRelevance::local(extra as u8));
+            if let Some(ty) = local.ty {
+                item = item.with_candidate_ty(ty);
+            }
+            items.push(item);
+        }
+    }
+}
+
+fn complete_module_defs(
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    let Some(module_id) = module_at_position(def_map, position.file_id, offset) else {
+        return;
+    };
+    for definition in def_map.definitions() {
+        if definition.module_id() != module_id {
+            continue;
+        }
+        if matches!(
+            definition.kind(),
+            DefKind::Chunk | DefKind::Annotation | DefKind::Field | DefKind::Variant
+        ) {
+            continue;
+        }
+        if in_type_pos
+            && !matches!(
+                definition.kind(),
+                DefKind::Struct | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias
+            )
+        {
+            continue;
+        }
+        if seen.insert(definition.name().to_string()) {
+            let kind = def_kind_to_completion_kind(definition.kind());
+            let mut item = CompletionItem::new(definition.name(), kind)
+                .with_target(FileRange::new(
+                    definition.file_id(),
+                    definition.name_range(),
+                ))
+                .with_relevance(CompletionRelevance::same_module());
+            if let Some(sig) = definition_signature(member_index, definition) {
+                item = item.with_detail(sig);
+            }
+            if let Some(ty) = definition_completion_ty(member_index, definition) {
+                item = item.with_candidate_ty(ty);
+            }
+            if let Some(doc) = definition.documentation() {
+                item = item.with_documentation(doc);
+            }
+            items.push(item);
+        }
+    }
+}
+
+fn complete_cross_module_defs(
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Some(current_module) = module_at_position(def_map, position.file_id, offset) else {
+        return;
+    };
+    for definition in def_map.definitions() {
+        if definition.module_id() == current_module {
+            continue;
+        }
+        if !matches!(definition.visibility(), crate::analysis::hir::Visibility::Public) {
+            continue;
+        }
+        if !matches!(
+            definition.kind(),
+            DefKind::Function
+                | DefKind::Struct
+                | DefKind::Enum
+                | DefKind::Trait
+                | DefKind::TypeAlias
+                | DefKind::Module
+        ) {
+            continue;
+        }
+        if seen.insert(definition.name().to_string()) {
+            let module = def_map.module(definition.module_id());
+            let module_path = module
+                .and_then(|m| m.name())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let mut item = CompletionItem::new(
+                definition.name(),
+                def_kind_to_completion_kind(definition.kind()),
+            )
+            .with_target(FileRange::new(
+                definition.file_id(),
+                definition.name_range(),
+            ))
+            .with_detail(format!("{} (from {module_path})", definition.name()))
+            .with_import_path(format!("use {module_path}::{};", definition.name()))
+            .with_relevance(CompletionRelevance::cross_module());
+            if let Some(sig) = definition_signature(member_index, definition) {
+                item = item.with_detail(sig);
+            }
+            if let Some(ty) = definition_completion_ty(member_index, definition) {
+                item = item.with_candidate_ty(ty);
+            }
+            items.push(item);
+        }
+    }
+}
+
+fn complete_builtin_types(
+    member_index: &MemberIndex,
+    token: Option<&SyntaxToken>,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    let in_arithmetic = token.is_some_and(|t| {
+        previous_significant(t).is_some_and(|prev| {
+            matches!(
+                prev.kind(),
+                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash
+            )
+        })
+    });
+    let numeric_types: &[&str] = &["i64", "f64"];
+    for (name, signature, snippet) in PRIMITIVE_TYPES {
+        if seen.insert((*name).to_string()) {
+            let relevance = if in_arithmetic && numeric_types.contains(name) {
+                CompletionRelevance::arithmetic_num()
+            } else if in_type_pos {
+                CompletionRelevance::builtin_type_pos()
+            } else {
+                CompletionRelevance::builtin_type()
+            };
+            let mut item = CompletionItem::new(*name, CompletionKind::BuiltinType)
+                .with_detail(format!("{signature} (built-in type)"))
+                .with_relevance(relevance);
+            if let Some(snippet) = snippet {
+                item = item.with_insert(CompletionInsert::Snippet((*snippet).to_string()));
+            }
+            items.push(item);
+        }
+    }
+    for standard_type in member_index.standard_types() {
+        let name = standard_type.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let generic_params = standard_type.generic_params();
+        let signature = if generic_params.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}<{}>", generic_params.join(", "))
+        };
+        let relevance = if in_type_pos {
+            CompletionRelevance::builtin_type_pos()
+        } else {
+            CompletionRelevance::builtin_type()
+        };
+        let mut item = CompletionItem::new(name, CompletionKind::BuiltinType)
+            .with_detail(format!("{signature} (standard type)"))
+            .with_relevance(relevance);
+        if !generic_params.is_empty() {
+            let placeholders = generic_params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            item = item.with_insert(CompletionInsert::Snippet(format!(
+                "{name}<{placeholders}>$0"
+            )));
+        }
+        items.push(item);
+    }
+}
+
+fn complete_builtin_constructors(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    for (name, detail) in BUILTIN_VALUES {
+        if seen.insert(name.to_string()) {
+            items.push(
+                CompletionItem::new(*name, CompletionKind::Variant)
+                    .with_detail(*detail)
+                    .with_relevance(CompletionRelevance::builtin_const()),
+            );
+        }
+    }
+}
+
+fn complete_standard_functions(
+    member_index: &MemberIndex,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+    in_type_pos: bool,
+) {
+    if in_type_pos {
+        return;
+    }
+    for function in member_index.standard_functions() {
+        if !seen.insert(function.name().to_string()) {
+            continue;
+        }
+        let params = function
+            .params()
+            .iter()
+            .map(|(name, ty)| match name {
+                Some(name) => format!("{name}: {ty}"),
+                None => ty.clone(),
+            })
+            .collect();
+        let mut item = CompletionItem::new(function.name(), CompletionKind::Function)
+            .with_detail(function.signature())
+            .with_insert(CompletionInsert::Call {
+                callee: function.name().to_string(),
+                params,
+            })
+            .with_relevance(CompletionRelevance::builtin_const());
+        if let Some(documentation) = function.documentation() {
+            item = item.with_documentation(documentation);
+        }
+        items.push(item);
+    }
+}
+
+fn apply_type_compat_boost(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+    items: &mut [CompletionItem],
+) {
+    let Some(expected) = expected_type_at_cursor(db, def_map, position, offset) else {
+        return;
+    };
+    for item in items.iter_mut() {
+        let Some(candidate) = item.candidate_ty() else {
+            continue;
+        };
+        let relevance = item
+            .relevance_raw()
+            .with_exact_type_match(candidate == &expected)
+            .with_type_name_match(
+                candidate != &expected && candidate.is_compatible_with(&expected),
+            );
+        if relevance != item.relevance_raw() {
+            *item = item.clone().with_relevance(relevance);
+        }
+    }
+}
+
+fn apply_replacement_ranges(items: &mut [CompletionItem], partial_range: TextRange) {
+    if partial_range.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if item.replacement_range().is_none() {
+            *item = item.clone().with_replacement_range(partial_range);
+        }
+    }
+}
+
+fn member_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let db = ctx.db;
+    let position = ctx.position;
+    let offset = ctx.offset;
+    let def_map = &ctx.def_map;
+    let receiver_ty = infer_dot_receiver(db, def_map, position, offset);
+
+    let Some(receiver_ty) = receiver_ty else {
+        return Vec::new();
+    };
+
+    // Get the receiver expression text for postfix template generation.
+    let receiver_text =
+        receiver_expr_text(db, def_map, position, offset).unwrap_or_else(|| "_".to_string());
+
+    let member_index = &ctx.member_index;
+    let candidates = member_index.instance_candidates(&receiver_ty);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+
+    for candidate in candidates {
+        if !seen.insert(candidate.name().to_string()) {
+            continue;
+        }
+        let kind = match candidate.kind() {
+            crate::analysis::hir::MemberKind::Field => CompletionKind::Field,
+            crate::analysis::hir::MemberKind::Method => CompletionKind::Method,
+            crate::analysis::hir::MemberKind::AssociatedFunction => CompletionKind::Function,
+            crate::analysis::hir::MemberKind::Variant => CompletionKind::Variant,
+        };
+        let detail = candidate.ty().to_string();
+        let name = candidate.name().to_string();
+        let mut item = CompletionItem::new(name.clone(), kind)
+            .with_detail(detail)
+            .with_optional_target(member_target_range(def_map, candidate.target()))
+            .with_relevance(CompletionRelevance::member());
+
+        if candidate.kind() == crate::analysis::hir::MemberKind::Method {
+            // Reuse the candidate's method resolution. HIR params already
+            // exclude `self` (it's stored as the receiver), so snippet params
+            // are correct as-is. We prepend the receiver to the detail display.
+            let method_res = candidate.resolution();
+            let callable = method_res.callable().cloned();
+
+            let params: Vec<String> = {
+                let types: Vec<String> = callable
+                    .as_ref()
+                    .map(|c| c.params().iter().map(|ty| ty.to_string()).collect())
+                    .unwrap_or_default();
+                // Try to get original parameter names from the definition's
+                // CallableSignature so snippets show names, not just types.
+                let names: Vec<Option<String>> = match method_res.target() {
+                    crate::analysis::hir::MemberTarget::Definition(def_id) => def_map
+                        .definition(def_id)
+                        .and_then(|def| match def.signature() {
+                            crate::analysis::hir::ItemSignature::Callable(sig) => Some(
+                                // sig.params() already excludes self (it's in
+                                // sig.receiver()), so params align 1:1 with
+                                // callable.params().
+                                sig.params()
+                                    .iter()
+                                    .map(|p| p.name().map(|n| n.to_string()))
+                                    .collect(),
+                            ),
+                            _ => None,
+                        }),
+                    _ => None,
+                }
+                .unwrap_or_else(|| vec![None; types.len()]);
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| match names.get(i).and_then(|n| n.clone()) {
+                        Some(name) => format!("{name}: {ty}"),
+                        None => ty.clone(),
+                    })
+                    .collect()
+            };
+
+            let sig_detail = match method_res.receiver() {
+                Some(receiver) => {
+                    let self_str = match receiver {
+                        crate::analysis::hir::ReceiverKind::Value => "self".to_string(),
+                        crate::analysis::hir::ReceiverKind::SharedRef => "&self".to_string(),
+                        crate::analysis::hir::ReceiverKind::MutRef => "&mut self".to_string(),
+                    };
+                    let mut pts = vec![self_str];
+                    pts.extend(params.iter().cloned());
+                    let ret = callable
+                        .as_ref()
+                        .map(|c| c.return_ty().to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    format!("fn {name}({}) -> {ret}", pts.join(", "))
+                }
+                None => {
+                    // Associated function — just use the type string.
+                    candidate.ty().to_string()
+                }
+            };
+
+            item = item
+                .with_detail(sig_detail)
+                .with_insert(CompletionInsert::Call {
+                    callee: name,
+                    params,
+                });
+        }
+        items.push(item);
+    }
+
+    // Postfix completions — template expansions like `.if`, `.match` that
+    // wrap the receiver expression.
+    for (suffix, label, insert_text) in postfix_templates(&receiver_text) {
+        if seen.insert(suffix.to_string()) {
+            items.push(
+                CompletionItem::new(suffix, CompletionKind::Keyword)
+                    .with_detail(label)
+                    .with_insert(CompletionInsert::Snippet(insert_text))
+                    .with_relevance(CompletionRelevance::postfix()), // below fields/methods, above keywords
+            );
+        }
+    }
+
+    CompletionItem::normalize(&mut items);
+    items
+}
+
+/// Return postfix template completions for a receiver expression.
+/// Each tuple: (completion_label, detail_text, snippet_insert_text).
+fn postfix_templates(receiver: &str) -> Vec<(&'static str, &'static str, String)> {
+    vec![
+        (".if", "if expr { … }", format!("if {receiver} {{ $0 }}")),
+        (
+            ".match",
+            "match expr { … }",
+            format!("match {receiver} {{ $0 }}"),
+        ),
+        (".not", "!expr", format!("!{receiver}")),
+        (".ref", "&expr", format!("&{receiver}")),
+        (
+            ".while",
+            "while expr { … }",
+            format!("while {receiver} {{ $0 }}"),
+        ),
+    ]
+}
+
+/// Get the text of the expression immediately left of `.`.
+fn receiver_expr_text(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<String> {
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let dot_pos = offset.saturating_sub(1);
+
+    let mut candidates: Vec<(u32, ExprId)> = body
+        .exprs()
+        .filter_map(|(expr_id, _expr)| {
+            let range = source_map.expr_range(expr_id)?;
+            let text_range = range.range;
+            if text_range.contains(dot_pos) || text_range.end() == dot_pos {
+                Some((text_range.len(), expr_id))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by_key(|(len, _)| *len);
+    let expr_id = candidates.first().map(|(_, id)| *id)?;
+    let range = source_map.expr_range(expr_id)?;
+    let text = db.file_text(position.file_id)?;
+    let start = range.range.start() as usize;
+    let end = range.range.end() as usize;
+    if start <= end && end <= text.len() {
+        Some(text[start..end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Try to infer the type of the expression immediately left of `.`.
+/// Walks UP the syntax tree from the cursor token to find a
+/// MethodCallExpr or FieldExpr, then resolves the receiver via HIR.
+pub(crate) fn infer_dot_receiver(
+    db: &Arc<BaseDb>,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let text = db.file_text(position.file_id)?;
+    let offset = offset.min(text.len() as u32);
+    let parse = db.parse(position.file_id);
+    let root = parse.syntax_node();
+    // Use raw rowan here (not the wrapper). The wrapper prefers `right`
+    // when `left` is Dot, which is correct for hover/goto-def (cursor
+    // on the member name). Here the cursor may be on the dot itself or
+    // on trailing whitespace — preferring the left token keeps the dot
+    // reachable for the parent-chain walk into FieldExpr/MethodCallExpr.
+    let end: u32 = root.text_range().end().into();
+    let token = match root.token_at_offset(offset.min(end).into()) {
+        rowan::TokenAtOffset::Single(t) => Some(t),
+        rowan::TokenAtOffset::Between(l, _) => Some(l),
+        _ => None,
+    }?;
+
+    // Walk up the syntax tree to find an enclosing field access or
+    // method call. This is how rust-analyzer does it.
+    let mut node = token.parent()?;
+    let receiver_range: TextRange;
+    let optional_receiver: bool;
+    loop {
+        let kind = node.kind();
+        if kind == crate::syntax::SyntaxKind::FieldExpr
+            || kind == crate::syntax::SyntaxKind::MethodCallExpr
+        {
+            optional_receiver = node
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::QuestionDot);
+            // Found the member access node. Get the receiver expression.
+            let receiver = node.children().find(|c| {
+                matches!(
+                    c.kind(),
+                    crate::syntax::SyntaxKind::PathExpr
+                        | crate::syntax::SyntaxKind::Ident
+                        | crate::syntax::SyntaxKind::CallExpr
+                        | crate::syntax::SyntaxKind::MethodCallExpr
+                        | crate::syntax::SyntaxKind::FieldExpr
+                        | crate::syntax::SyntaxKind::IndexExpr
+                        | crate::syntax::SyntaxKind::ParenExpr
+                        | crate::syntax::SyntaxKind::Block
+                        | crate::syntax::SyntaxKind::ArrayExpr
+                        | crate::syntax::SyntaxKind::UnaryExpr
+                        | crate::syntax::SyntaxKind::BinExpr
+                        | crate::syntax::SyntaxKind::StructLitExpr
+                        | crate::syntax::SyntaxKind::ClosureExpr
+                        | crate::syntax::SyntaxKind::LiteralExpr
+                )
+            })?;
+            receiver_range = {
+                let start: u32 = receiver.text_range().start().into();
+                let end: u32 = receiver.text_range().end().into();
+                TextRange::new(start, end)
+            };
+            break;
+        }
+        node = node.parent()?;
+    }
+
+    // Find the HIR expression whose range matches the receiver's range.
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let inference = ctx.inference.as_ref()?;
+    for (expr_id, _expr) in ctx.body.exprs() {
+        let fr = ctx.source_map.expr_range(expr_id)?;
+        if fr.range == receiver_range {
+            let receiver = inference.type_of_expr(expr_id).cloned()?;
+            return if optional_receiver {
+                match receiver {
+                    Ty::Option(item) => Some(item.as_ref().clone()),
+                    other => Some(other),
+                }
+            } else {
+                Some(receiver)
+            };
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Path completion (after `::`)
+// ---------------------------------------------------------------------------
+
+fn path_completions(ctx: &CompletionContext<'_>) -> Vec<CompletionItem> {
+    let position = ctx.position;
+    let partial_range = ctx.partial_range;
+    let Some(ref token) = ctx.token else {
+        return Vec::new();
+    };
+    let def_map = &ctx.def_map;
+    let segments = path_segments_before(token);
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+
+    // Resolve path prefix to a module and list its members
+    if let Some(module_id) =
+        resolve_path_prefix_module(def_map, position.file_id, position.offset, &segments)
+    {
+        let member_index = &ctx.member_index;
+        for definition in def_map.definitions() {
+            if definition.module_id() == module_id && seen.insert(definition.name().to_string()) {
+                let kind = def_kind_to_completion_kind(definition.kind());
+                let mut item = CompletionItem::new(definition.name(), kind)
+                    .with_target(FileRange::new(
+                        definition.file_id(),
+                        definition.name_range(),
+                    ))
+                    .with_relevance(CompletionRelevance::path_member());
+                if let Some(sig) = definition_signature(member_index, definition) {
+                    item = item.with_detail(sig);
+                }
+                if let Some(doc) = definition.documentation() {
+                    item = item.with_documentation(doc);
+                }
+                items.push(item);
+            }
+        }
+
+        // Also try enum variants if the resolved module contains enums
+        for definition in def_map.definitions() {
+            if definition.module_id() == module_id
+                && definition.kind() == DefKind::Enum
+                && let Some(template_ty) = member_index.type_template(definition.id())
+            {
+                for candidate in member_index.associated_candidates(template_ty) {
+                    if seen.insert(candidate.name().to_string()) {
+                        items.push(
+                            CompletionItem::new(candidate.name(), CompletionKind::Variant)
+                                .with_detail(candidate.ty().to_string())
+                                .with_optional_target(member_target_range(
+                                    def_map,
+                                    candidate.target(),
+                                ))
+                                .with_relevance(CompletionRelevance::path_variant()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if !partial_range.is_empty() {
+        for item in &mut items {
+            if item.replacement_range().is_none() {
+                *item = item.clone().with_replacement_range(partial_range);
+            }
+        }
+    }
+
+    CompletionItem::normalize(&mut items);
+    items
+}
+
+/// Collect path segments leading up to the `::` before `token`.
+///
+/// The caller has already verified that the cursor follows `::`. Walk left to
+/// collect the qualifying path segments (e.g. `std::collections::|` returns
+/// `["std", "collections"]`).
+fn path_segments_before(token: &SyntaxToken) -> Vec<String> {
+    // At a line end Rowan can select the `::` token itself; with trailing
+    // trivia it selects the token to its right. Support both cursor shapes.
+    let colon = if token.kind() == SyntaxKind::ColonColon {
+        token.clone()
+    } else {
+        let Some(colon) = previous_significant(token) else {
+            return vec![];
+        };
+        colon
+    };
+    debug_assert_eq!(colon.kind(), SyntaxKind::ColonColon);
+
+    // The segment immediately left of `::` is the last path segment.
+    let Some(mut current) = previous_significant(&colon) else {
+        return vec![];
+    };
+    if !is_path_identifier(&current) {
+        return vec![];
+    }
+    let mut segments = vec![current.text().to_string()];
+
+    // Walk further left over `::segment` pairs.
+    loop {
+        let sep = previous_significant(&current);
+        let Some(sep) = sep else { break };
+        if sep.kind() != SyntaxKind::ColonColon {
+            break;
+        }
+        let segment = previous_significant(&sep);
+        let Some(segment) = segment else { break };
+        if !is_path_identifier(&segment) {
+            break;
+        }
+        segments.push(segment.text().to_string());
+        current = segment;
+    }
+
+    segments.reverse();
+    segments
+}
+
+/// Resolve a path prefix to its target module.
+fn resolve_path_prefix_module(
+    map: &DefMap,
+    file_id: FileId,
+    offset: u32,
+    segments: &[String],
+) -> Option<ModuleId> {
+    let current = module_at_position(map, file_id, offset)?;
+    let (last, parents) = segments.split_last()?;
+
+    let mut module_id = current;
+    for segment in parents {
+        let def = resolve_lexical_name(map, module_id, segment)?;
+        module_id = def.target_module()?;
+    }
+    // Resolve the last segment
+    if let Some(def) = resolve_lexical_name(map, module_id, last) {
+        def.target_module()
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local variable enumeration
+// ---------------------------------------------------------------------------
+
+struct LocalInfo {
+    name: String,
+    detail: String,
+    ty: Option<Ty>,
+}
+
+/// Try to infer the expected type at the cursor position from surrounding
+/// code patterns (call arguments, return position).
+fn expected_type_at_cursor(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
+
+    for (expr_id, expr) in body.exprs() {
+        // Cursor inside a function call argument list.
+        let args: &[ExprId] = match expr {
+            Expr::Call { args, .. } => args.as_slice(),
+            Expr::MethodCall { args, .. } => args.as_slice(),
+            _ => continue,
+        };
+        let Some(expr_range) = source_map.expr_range(expr_id) else {
+            continue;
+        };
+        if !expr_range.range.contains(offset) {
+            continue;
+        }
+        // Find which argument the cursor is in.
+        let callable_ty = inference.type_of_expr(expr_id)?.clone();
+        let params = match &callable_ty {
+            Ty::Function(c) | Ty::Closure(c) => c.params().to_vec(),
+            _ => return None,
+        };
+        for (i, arg_id) in args.iter().enumerate() {
+            let Some(arg_range) = source_map.expr_range(*arg_id) else {
+                continue;
+            };
+            if arg_range.range.contains(offset) {
+                return params.get(i).cloned();
+            }
+        }
+        // Cursor between arguments or after `(` but before first arg.
+        if params.len() == 1 {
+            return params.first().cloned();
+        }
+    }
+    None
+}
+
+/// Count how many times each local name is referenced in scope (for ranking).
+fn local_usage_counts(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let Some(ctx) = find_containing_body_data(db, def_map, position, offset) else {
+        return counts;
+    };
+    let body = &ctx.body;
+    let owner_id = match innermost_body_owner(def_map, position, offset) {
+        Some(d) => d.id(),
+        None => return counts,
+    };
+    let Some(resolution) = db.body_resolution(owner_id) else {
+        return counts;
+    };
+    for (name_ref_id, nr) in body.name_refs() {
+        if let Some(name) = nr.name()
+            && let Some(crate::analysis::hir::LocalResolveResult::Resolved(_)) =
+                resolution.resolve(name_ref_id)
+        {
+            *counts.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Collect all local bindings visible at `offset` by walking up the scope chain.
+fn visible_locals(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Vec<LocalInfo> {
+    let Some(ctx) = find_containing_body_data(db, def_map, position, offset) else {
+        return Vec::new();
+    };
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let Some(scopes) = ctx.scopes.as_ref() else {
+        return Vec::new();
+    };
+    let inference = &ctx.inference;
+
+    let Some(scope) = find_innermost_scope(body, source_map, scopes, offset) else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current = Some(scope);
+
+    while let Some(scope_id) = current {
+        let Some(scope_data) = scopes.scope(scope_id) else {
+            break;
+        };
+        for binding_id in scope_data.bindings() {
+            let Some(binding) = body.binding(*binding_id) else {
+                continue;
+            };
+            let Some(name) = binding.name() else {
+                continue;
+            };
+            if seen.insert(name.to_string()) {
+                let ty = inference
+                    .as_ref()
+                    .and_then(|inf| inf.type_of_binding(*binding_id))
+                    .cloned();
+                let ty_str = ty
+                    .as_ref()
+                    .map_or_else(|| "?".to_string(), ToString::to_string);
+                result.push(LocalInfo {
+                    name: name.to_string(),
+                    detail: format!("{name}: {ty_str}"),
+                    ty,
+                });
+            }
+        }
+        current = scope_data.parent();
+    }
+
+    result
+}
+
+/// Find the innermost scope containing `offset`.
+///
+/// For "forward" scopes (AfterLet, ForBody), the scope extends from after the
+/// element forward to the end of the parent scope, so we check whether the
+/// offset is *after* the element range rather than *inside* it.
+fn find_innermost_scope(
+    _body: &Body,
+    source_map: &BodySourceMap,
+    scopes: &BodyScopes,
+    offset: u32,
+) -> Option<crate::analysis::hir::ScopeId> {
+    #[derive(Clone, Copy)]
+    enum ScopeRange {
+        /// offset must be inside the element range.
+        Within(TextRange),
+        /// offset must be at or after the element's end (forward-extending scope).
+        After(u32),
+    }
+
+    // Collect candidate scopes that contain the offset.
+    let mut best: Option<(u32, crate::analysis::hir::ScopeId)> = None;
+
+    for (scope_id, scope_data) in scopes.scopes() {
+        let candidate: Option<ScopeRange> = match scope_data.kind() {
+            ScopeKind::Root => continue,
+            ScopeKind::Block { expr } => source_map
+                .expr_range(expr)
+                .map(|fr| ScopeRange::Within(fr.range)),
+            // AfterLet: scope covers code after the semicolon, i.e. after the
+            // binding identifier (which sits inside the `let` statement).
+            ScopeKind::AfterLet { binding } => source_map
+                .binding_range(binding)
+                .map(|fr| ScopeRange::After(fr.range.end())),
+            ScopeKind::Closure { expr } => source_map
+                .expr_range(expr)
+                .map(|fr| ScopeRange::Within(fr.range)),
+            // ForBody: scope covers the loop body, which starts after the
+            // binding identifier in the `for` header.
+            ScopeKind::ForBody { binding } => source_map
+                .binding_range(binding)
+                .map(|fr| ScopeRange::After(fr.range.end())),
+            ScopeKind::IfLetBody { pattern } => source_map
+                .pat_range(pattern)
+                .map(|fr| ScopeRange::Within(fr.range)),
+            ScopeKind::WhileLetBody { pattern } => source_map
+                .pat_range(pattern)
+                .map(|fr| ScopeRange::Within(fr.range)),
+            ScopeKind::MatchArm => continue,
+        };
+
+        match candidate {
+            Some(ScopeRange::Within(range)) if range.contains(offset) => {
+                let len = range.len();
+                if best.is_none_or(|(best_len, _)| len < best_len) {
+                    best = Some((len, scope_id));
+                }
+            }
+            Some(ScopeRange::After(end)) if offset >= end => {
+                let len = offset - end; // prefer latest (smallest distance).
+                if best.is_none_or(|(best_len, _)| len < best_len) {
+                    best = Some((len, scope_id));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    best.map(|(_, id)| id)
+}
+
+// ---------------------------------------------------------------------------
+// Common helpers
+// ---------------------------------------------------------------------------
+
+/// Bundled body data for a single function / method.
+pub(crate) struct BodyContext {
+    pub body: Arc<Body>,
+    pub source_map: Arc<BodySourceMap>,
+    pub scopes: Option<Arc<BodyScopes>>,
+    pub inference: Option<Arc<InferenceResult>>,
+}
+
+/// Find the innermost function/method body containing `offset`.
+pub(crate) fn find_containing_body_data(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<BodyContext> {
+    let owner = innermost_body_owner(def_map, position, offset)?;
+    Some(BodyContext {
+        body: db.body(owner.id())?,
+        source_map: db.body_source_map(owner.id())?,
+        scopes: db.body_scopes(owner.id()),
+        inference: db.infer(owner.id()),
+    })
+}
+
+pub(super) fn innermost_body_owner(
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Definition> {
+    def_map
+        .definitions()
+        .filter(|definition| {
+            definition.file_id() == position.file_id
+                && definition.range().contains(offset)
+                && definition.kind().is_body_owner()
+        })
+        .min_by_key(|definition| {
+            (
+                definition.range().len(),
+                definition.kind() == DefKind::Chunk,
+            )
+        })
+        .cloned()
+}
+
+fn module_at_position(map: &DefMap, file_id: FileId, offset: u32) -> Option<ModuleId> {
+    let mut module_id = map.module_for_file(file_id)?;
+    loop {
+        let nested = map
+            .definitions()
+            .filter(|definition| definition.module_id() == module_id)
+            .filter_map(|definition| {
+                let target = definition.target_module()?;
+                let target_data = map.module(target)?;
+                (target_data.file_id() == Some(file_id) && definition.range().contains(offset))
+                    .then_some((definition.range().len(), target))
+            })
+            .min_by_key(|(length, _)| *length);
+        let Some((_, nested)) = nested else {
+            return Some(module_id);
+        };
+        module_id = nested;
+    }
+}
+
+fn resolve_lexical_name<'map>(
+    map: &'map DefMap,
+    mut module_id: ModuleId,
+    name: &str,
+) -> Option<&'map Definition> {
+    loop {
+        if let Some(definition) = map.resolve_name(module_id, name) {
+            return Some(definition);
+        }
+        module_id = map.module(module_id)?.parent()?;
+    }
+}
+
+fn def_kind_to_completion_kind(kind: DefKind) -> CompletionKind {
+    match kind {
+        DefKind::Chunk => CompletionKind::Variable,
+        DefKind::Annotation => CompletionKind::Annotation,
+        DefKind::Function | DefKind::ExternFunction | DefKind::Method => CompletionKind::Function,
+        DefKind::Struct => CompletionKind::Struct,
+        DefKind::Enum => CompletionKind::Enum,
+        DefKind::Trait => CompletionKind::Trait,
+        DefKind::Impl => CompletionKind::Impl,
+        DefKind::Module => CompletionKind::Module,
+        DefKind::Field => CompletionKind::Field,
+        DefKind::Variant => CompletionKind::Variant,
+        DefKind::TypeAlias => CompletionKind::TypeAlias,
+    }
+}
+
+/// Format a definition's signature for display in completions and hover.
+/// Returns `None` for impl blocks (which don't have a useful display form).
+pub(crate) fn definition_signature(
+    member_index: &MemberIndex,
+    definition: &Definition,
+) -> Option<String> {
+    match definition.kind() {
+        DefKind::Chunk => None,
+        DefKind::Annotation => Some(format!("annotation {}", definition.name())),
+        DefKind::Function | DefKind::ExternFunction | DefKind::Method => {
+            member_index.callable(definition.id()).map(|callable| {
+                let params: Vec<String> =
+                    callable.params().iter().map(|ty| ty.to_string()).collect();
+                format!(
+                    "fn {}({}) -> {}",
+                    definition.name(),
+                    params.join(", "),
+                    callable.return_ty()
+                )
+            })
+        }
+        DefKind::Struct => Some(format!("struct {}", definition.name())),
+        DefKind::Enum => Some(format!("enum {}", definition.name())),
+        DefKind::Trait => Some(format!("trait {}", definition.name())),
+        DefKind::Module => Some(format!("mod {}", definition.name())),
+        DefKind::Field | DefKind::Variant => {
+            if let Some(parent_id) = definition.owner()
+                && let Some(template_ty) = member_index.type_template(parent_id)
+            {
+                let candidates = match definition.kind() {
+                    DefKind::Field => member_index.field_candidates(template_ty),
+                    DefKind::Variant => member_index.associated_candidates(template_ty),
+                    _ => unreachable!(),
+                };
+                if let Some(c) = candidates.iter().find(|candidate| {
+                    candidate.target() == crate::analysis::hir::MemberTarget::Definition(definition.id())
+                }) {
+                    return Some(format!("{}: {}", definition.name(), c.ty()));
+                }
+            }
+            Some(definition.name().to_string())
+        }
+        DefKind::TypeAlias => Some(definition.name().to_string()),
+        DefKind::Impl => None,
+    }
+}
+
+fn definition_completion_ty(member_index: &MemberIndex, definition: &Definition) -> Option<Ty> {
+    match definition.kind() {
+        DefKind::Annotation => None,
+        DefKind::Function | DefKind::ExternFunction | DefKind::Method => member_index
+            .callable(definition.id())
+            .map(|callable| callable.return_ty().clone()),
+        DefKind::Struct | DefKind::Enum | DefKind::TypeAlias => {
+            member_index.type_template(definition.id()).cloned()
+        }
+        DefKind::Field | DefKind::Variant => {
+            let owner = definition.owner()?;
+            let owner_ty = member_index.type_template(owner)?;
+            let candidates = if definition.kind() == DefKind::Field {
+                member_index.field_candidates(owner_ty)
+            } else {
+                member_index.associated_candidates(owner_ty)
+            };
+            let candidate = candidates.iter().find(|candidate| {
+                candidate.target() == crate::analysis::hir::MemberTarget::Definition(definition.id())
+            })?;
+            Some(match candidate.ty() {
+                Ty::Function(callable) | Ty::Closure(callable) => callable.return_ty().clone(),
+                ty => ty.clone(),
+            })
+        }
+        DefKind::Chunk | DefKind::Trait | DefKind::Impl | DefKind::Module => None,
+    }
+}
+
+fn member_target_range(def_map: &DefMap, target: crate::analysis::hir::MemberTarget) -> Option<FileRange> {
+    let crate::analysis::hir::MemberTarget::Definition(def_id) = target else {
+        return None;
+    };
+    let definition = def_map.definition(def_id)?;
+    Some(FileRange::new(
+        definition.file_id(),
+        definition.name_range(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Syntax navigation
+// ---------------------------------------------------------------------------
+
+pub(crate) fn token_at_offset(node: &crate::syntax::SyntaxNode, offset: u32) -> Option<SyntaxToken> {
+    let end: u32 = node.text_range().end().into();
+    match node.token_at_offset(offset.min(end).into()) {
+        rowan::TokenAtOffset::Single(token) => Some(token),
+        rowan::TokenAtOffset::Between(left, right) => {
+            // If exactly at the boundary between `.` and the field/method name,
+            // prefer the name token (right). This makes hover and goto-def
+            // work when the cursor lands on the first character of the member.
+            if matches!(left.kind(), SyntaxKind::Dot | SyntaxKind::QuestionDot) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_path_identifier(token: &SyntaxToken) -> bool {
+    matches!(token.kind(), SyntaxKind::Ident | SyntaxKind::KwSelf)
+}
+
+pub(crate) fn previous_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+    let mut token = token.prev_token();
+    while token.as_ref().is_some_and(|token| token.kind().is_trivia()) {
+        token = token.and_then(|token| token.prev_token());
+    }
+    token
+}
+
+fn next_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+    let mut token = token.next_token();
+    while token.as_ref().is_some_and(|token| token.kind().is_trivia()) {
+        token = token.and_then(|token| token.next_token());
+    }
+    token
+}
+
+/// If the cursor is inside a struct literal `Type { | }`, return the struct
+/// type so we can enumerate fields.
+fn struct_literal_type(
+    db: &BaseDb,
+    def_map: &DefMap,
+    position: FilePosition,
+    offset: u32,
+) -> Option<Ty> {
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
+    for (expr_id, expr) in body.exprs() {
+        let Expr::StructLiteral { path: _, .. } = expr else {
+            continue;
+        };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        // Get the struct type from inference.
+        let ty = inference.type_of_expr(expr_id)?.clone();
+        // Verify it's a struct (Named type with struct definition).
+        if let Ty::Named(named) = &ty {
+            let def = def_map.definition(named.definition())?;
+            if def.kind() == DefKind::Struct {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+/// Given an expression that is an enum scrutinee, return `(scrutinee_ty, type_template)`
+/// if the scrutinee is a named enum type. Used by if-let, while-let, and match
+/// pattern-scrutinee completions to enumerate variants.
+fn enum_type_template(
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    inference: &std::sync::Arc<crate::analysis::hir::InferenceResult>,
+    scrutinee: crate::analysis::hir::ExprId,
+) -> Option<(Ty, Ty)> {
+    let scrutinee_ty = inference.type_of_expr(scrutinee)?.clone();
+    if let Ty::Named(named) = &scrutinee_ty {
+        let def = def_map.definition(named.definition())?;
+        if def.kind() == DefKind::Enum {
+            let template = member_index.type_template(def.id())?.clone();
+            return Some((scrutinee_ty, template));
+        }
+    }
+    None
+}
+
+/// If the cursor is inside an if-let or while-let pattern with an enum
+/// scrutinee, return the scrutinee type and its enum template.
+fn pattern_scrutinee_enum(
+    db: &BaseDb,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+) -> Option<(Ty, Ty)> {
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
+
+    // 1. if-let: the entire `if` is an expression; check whether the cursor
+    //    falls inside one whose condition is `Condition::Let`.
+    for (expr_id, expr) in body.exprs() {
+        let scrutinee = match expr {
+            crate::analysis::hir::Expr::If {
+                condition: crate::analysis::hir::Condition::Let { scrutinee, .. },
+                ..
+            } => scrutinee,
+            _ => continue,
+        };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        if let Some(result) = enum_type_template(def_map, member_index, inference, *scrutinee) {
+            return Some(result);
+        }
+    }
+
+    // 2. while-let: `While` is a Statement, not an Expr, so it doesn't
+    //    appear in body.exprs(). Walk the blocks to find one whose
+    //    body expression range contains the cursor (the cursor is inside
+    //    the while body), then check whether the enclosing statement is a
+    //    `While` with `Condition::Let`.
+    for (_expr_id, expr) in body.exprs() {
+        let block = match expr {
+            crate::analysis::hir::Expr::Block(b) => b,
+            _ => continue,
+        };
+        for stmt in block.statements() {
+            let (scrutinee, body_expr) = match stmt {
+                crate::analysis::hir::Statement::While {
+                    condition: crate::analysis::hir::Condition::Let { scrutinee, .. },
+                    body,
+                } => (scrutinee, body),
+                _ => continue,
+            };
+            let Some(body_range) = source_map.expr_range(*body_expr) else {
+                continue;
+            };
+            // The pattern sits to the left of the body's opening brace.
+            // Accept any offset from a generous left margin up to the
+            // body start so we cover `while let |` and `while let Some(|`.
+            let left = body_range.range.start().saturating_sub(100);
+            if offset >= left
+                && offset <= body_range.range.start()
+                && let Some(result) =
+                    enum_type_template(def_map, member_index, inference, *scrutinee)
+            {
+                return Some(result);
+            }
+        }
+    }
+
+    None
+}
+
+/// If the cursor is inside a match expression body, return the scrutinee
+/// enum type and its type template so we can enumerate variants.
+fn match_scrutinee_enum(
+    db: &BaseDb,
+    def_map: &DefMap,
+    member_index: &MemberIndex,
+    position: FilePosition,
+    offset: u32,
+) -> Option<(Ty, Ty)> {
+    let ctx = find_containing_body_data(db, def_map, position, offset)?;
+    let body = &ctx.body;
+    let source_map = &ctx.source_map;
+    let inference = ctx.inference.as_ref()?;
+    for (expr_id, expr) in body.exprs() {
+        let Expr::Match { scrutinee, .. } = expr else {
+            continue;
+        };
+        let range = source_map.expr_range(expr_id)?;
+        if !range.range.contains(offset) {
+            continue;
+        }
+        if let Some(result) = enum_type_template(def_map, member_index, inference, *scrutinee) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Token kinds that indicate the cursor is in expression context.
+const EXPR_CONTEXT_TOKENS: &[SyntaxKind] = &[
+    SyntaxKind::Eq,
+    SyntaxKind::PlusEq,
+    SyntaxKind::MinusEq,
+    SyntaxKind::StarEq,
+    SyntaxKind::SlashEq,
+    SyntaxKind::PercentEq,
+    SyntaxKind::KwReturn,
+    SyntaxKind::LParen,
+    SyntaxKind::LBracket,
+    SyntaxKind::Comma,
+    SyntaxKind::Plus,
+    SyntaxKind::Minus,
+    SyntaxKind::Star,
+    SyntaxKind::Slash,
+    SyntaxKind::Amp,
+    SyntaxKind::Pipe,
+    SyntaxKind::Colon,
+    SyntaxKind::FatArrow,
+    SyntaxKind::KwIf,
+    SyntaxKind::KwWhile,
+    SyntaxKind::KwFor,
+    SyntaxKind::KwMatch,
+    SyntaxKind::KwIn,
+    SyntaxKind::Dot,
+    SyntaxKind::QuestionDot,
+    SyntaxKind::QuestionQuestion,
+];
+
+/// Check whether the cursor is in a type position (after `:` in a type
+/// annotation, not after `::`).
+fn is_type_position(token: &SyntaxToken) -> bool {
+    // Cursor on `:` itself (e.g. `let x:|`)
+    if token.kind() == SyntaxKind::Colon {
+        let before = previous_significant(token);
+        return before.is_none_or(|t| t.kind() != SyntaxKind::Colon);
+    }
+    // Cursor on whitespace after `:` (e.g. `let x: |`)
+    let Some(prev) = previous_significant(token) else {
+        return false;
+    };
+    if prev.kind() != SyntaxKind::Colon {
+        return false;
+    }
+    // Exclude `::` — the colon before another colon is a path separator.
+    let before_colon = previous_significant(&prev);
+    before_colon.is_none_or(|t| t.kind() != SyntaxKind::Colon)
+}
+
+/// Check whether the cursor is in an expression context (e.g. after `=`,
+/// `return`, `(`, `[`, `,`, operators) where declaration keywords like `fn`,
+/// `struct` shouldn't appear.
+//
+/// We check the token under the cursor, the preceding significant token,
+/// and the next significant token (for boundary cases where the cursor
+/// sits between whitespace and `=`).
+fn is_expression_context(token: &SyntaxToken) -> bool {
+    if EXPR_CONTEXT_TOKENS.contains(&token.kind()) {
+        return true;
+    }
+    if let Some(prev) = previous_significant(token)
+        && EXPR_CONTEXT_TOKENS.contains(&prev.kind())
+    {
+        return true;
+    }
+    // Boundary case: cursor is in trivia just before a context token
+    // (e.g. the space between `x` and `=`).
+    if token.kind().is_trivia()
+        && let Some(next) = next_significant(token)
+        && EXPR_CONTEXT_TOKENS.contains(&next.kind())
+    {
+        return true;
+    }
+    false
+}
