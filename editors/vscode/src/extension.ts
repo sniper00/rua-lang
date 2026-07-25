@@ -21,7 +21,6 @@ import {
 
 let client: LanguageClient | undefined;
 let clientResources: Disposable[] = [];
-let serverProcessClosed: Promise<void> | undefined;
 
 interface RuaInitializationSettings {
   trace: string;
@@ -147,7 +146,7 @@ async function startClient(ctx: ExtensionContext): Promise<void> {
     ctx.extensionPath,
   );
   const args = config.get<string[]>("server.args", []);
-  const outputChannel = window.createOutputChannel("Rua Language Server");
+  const outputChannel = window.createOutputChannel("Rua Language Server", { log: true });
   const fileWatcher = workspace.createFileSystemWatcher("**/*.{rua,ruai}");
   clientResources = [outputChannel, fileWatcher];
 
@@ -162,12 +161,9 @@ async function startClient(ctx: ExtensionContext): Promise<void> {
 
   // The server speaks stdio JSON-RPC (see crates/rua-ide). One process
   // serves every workspace folder; the server indexes each folder on init.
-  const serverOptions: ServerOptions = async () => {
-    const child = spawn(command, args, { stdio: "pipe" });
-    serverProcessClosed = new Promise((resolve) => {
-      child.once("close", () => resolve());
-    });
-    return child;
+  const serverOptions: ServerOptions = {
+    run: { command, args },
+    debug: { command, args },
   };
 
   const clientOptions: LanguageClientOptions = {
@@ -206,21 +202,13 @@ async function startClient(ctx: ExtensionContext): Promise<void> {
 
 async function stopClient(): Promise<void> {
   const running = client;
-  const processClosed = serverProcessClosed;
   client = undefined;
   try {
     if (running) {
       await running.stop();
-      // LanguageClient completes the protocol stop before every child stream
-      // callback has drained. Keep the output channel alive until the process
-      // emits its semantic `close` event.
-      await processClosed;
       testState.stops += 1;
     }
   } finally {
-    if (serverProcessClosed === processClosed) {
-      serverProcessClosed = undefined;
-    }
     disposeClientResources();
   }
 }

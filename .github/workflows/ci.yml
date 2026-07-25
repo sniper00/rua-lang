@@ -20,7 +20,8 @@ jobs:
           rustup component add rustfmt clippy
       - name: Build pinned Lua 5.5.0
         run: |
-          LUA_DIR="${RUNNER_TEMP:-/tmp}/lua-5.5.0"
+          LUA_DIR="${RUNNER_TEMP:-/tmp}"
+          cd "$LUA_DIR"
           curl --fail --location --proto '=https' --tlsv1.2 \
             https://www.lua.org/ftp/lua-5.5.0.tar.gz \
             --output lua-5.5.0.tar.gz
@@ -28,8 +29,8 @@ jobs:
             | sha256sum --check
           tar --extract --gzip --file lua-5.5.0.tar.gz
           make --directory lua-5.5.0
-          echo "RUA_LUA=${LUA_DIR}/src/lua" >> "$GITHUB_ENV"
-          "${LUA_DIR}/src/lua" -v
+          echo "RUA_LUA=${LUA_DIR}/lua-5.5.0/src/lua" >> "$GITHUB_ENV"
+          "${LUA_DIR}/lua-5.5.0/src/lua" -v
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Check every target and feature
