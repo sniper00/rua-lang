@@ -2,20 +2,19 @@
 
 use std::sync::Arc;
 
+use crate::syntax::{
+    AstNode, Named,
+    ast::{Block as SyntaxBlock, Item as SyntaxItem},
+};
 use crate::{
     analysis::BaseDb,
-    analysis::base::{FileRange, TextRange,
-},
+    analysis::base::{FileRange, TextRange},
     analysis::hir::{
         Body, BodyResolution, BodySourceMap, Condition, DefKind, DefMap, Expr, InferenceDiagnostic,
         LocalBindingId, LocalResolveResult, LocalUseKind, Statement, TypeMismatchContext,
     },
     analysis::semantic::ReferenceIndex,
     analysis::vfs::{FileId, FileKind},
-};
-use crate::syntax::{
-    AstNode, Named,
-    ast::{Block as SyntaxBlock, Item as SyntaxItem},
 };
 
 pub use rua_common::{DiagnosticCode, DiagnosticSeverity};
@@ -347,7 +346,9 @@ pub(crate) fn fast_diagnostics(
                         let name_ref = loop {
                             match body.expr(current) {
                                 Some(crate::analysis::hir::Expr::Field { base, .. })
-                                | Some(crate::analysis::hir::Expr::Index { base, .. }) => current = *base,
+                                | Some(crate::analysis::hir::Expr::Index { base, .. }) => {
+                                    current = *base
+                                }
                                 Some(crate::analysis::hir::Expr::Path(path)) if path.len() == 1 => {
                                     break Some(path[0]);
                                 }
@@ -375,7 +376,9 @@ pub(crate) fn fast_diagnostics(
                             };
                             // Check that the receiver path resolves to our binding.
                             let receiver_path = match body.expr(receiver) {
-                                Some(crate::analysis::hir::Expr::Path(path)) if path.len() == 1 => path[0],
+                                Some(crate::analysis::hir::Expr::Path(path)) if path.len() == 1 => {
+                                    path[0]
+                                }
                                 _ => return false,
                             };
                             if !matches!(
@@ -401,7 +404,8 @@ pub(crate) fn fast_diagnostics(
                             else {
                                 return false;
                             };
-                            method_res.receiver() == Some(crate::analysis::hir::ReceiverKind::MutRef)
+                            method_res.receiver()
+                                == Some(crate::analysis::hir::ReceiverKind::MutRef)
                         })
                     }));
                 if !has_mut_method_call && let Some(fr) = source_map.binding_range(binding_id) {
@@ -443,7 +447,10 @@ pub(crate) fn fast_diagnostics(
         if definition.kind() != DefKind::Function {
             continue;
         }
-        if matches!(definition.visibility(), crate::analysis::hir::Visibility::Public) {
+        if matches!(
+            definition.visibility(),
+            crate::analysis::hir::Visibility::Public
+        ) {
             continue;
         }
         let name = definition.name();
@@ -653,7 +660,10 @@ fn add_control_flow_lints(
     }
 }
 
-fn statement_by_id(body: &Body, statement: crate::analysis::hir::StatementId) -> Option<&Statement> {
+fn statement_by_id(
+    body: &Body,
+    statement: crate::analysis::hir::StatementId,
+) -> Option<&Statement> {
     let Expr::Block(block) = body.expr(statement.block())? else {
         return None;
     };
@@ -854,7 +864,9 @@ fn inference_source_range(
         crate::analysis::hir::InferenceSource::Binding(binding) => {
             source_map.binding_range(binding).map(|fr| fr.range)
         }
-        crate::analysis::hir::InferenceSource::Pattern(pat) => source_map.pat_range(pat).map(|fr| fr.range),
+        crate::analysis::hir::InferenceSource::Pattern(pat) => {
+            source_map.pat_range(pat).map(|fr| fr.range)
+        }
     }
 }
 

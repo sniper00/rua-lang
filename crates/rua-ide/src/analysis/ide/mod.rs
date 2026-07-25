@@ -9,13 +9,13 @@ mod symbol;
 
 use std::{path::Path, sync::Arc};
 
-use rua_common::{CfgOptions, StdSymbolId, expand_cfg_attributes};
 use crate::syntax::{
     AstNode, Named, Parse, SyntaxKind,
     ast::{
         Attribute as SyntaxAttribute, HasAttributes, Item as SyntaxItem, SourceFile, VariantKind,
     },
 };
+use rua_common::{CfgOptions, StdSymbolId, expand_cfg_attributes};
 
 use crate::{
     analysis::BaseDb,
@@ -23,7 +23,7 @@ use crate::{
         Body, BodyResolution, BodyScopes, BodySourceId, BodySourceMap, DefId, DefKind, DefMap,
         Definition, InferenceResult, ItemTree, MemberIndex, MemberResolution, MemberTarget,
         ResolveStrategy, StdFunction, StdLibraryIndex, StdMember, StdMemberKind, StdType, Ty,
-},
+    },
     analysis::semantic::Semantics,
     analysis::vfs::{Change, FileId, FileKind, SourceRootKind, VfsPath},
 };
@@ -57,10 +57,7 @@ impl AnalysisHost {
         Arc::make_mut(&mut self.db).apply_change(change);
     }
 
-    pub fn set_standard_library(
-        &mut self,
-        library: &rua_common::StdLibrary,
-    ) -> Result<(), String> {
+    pub fn set_standard_library(&mut self, library: &rua_common::StdLibrary) -> Result<(), String> {
         let index = StdLibraryIndex::build(library)?;
         Arc::make_mut(&mut self.db).set_standard_library(Arc::new(index));
         Ok(())
@@ -691,7 +688,9 @@ impl Analysis {
                     crate::analysis::hir::MemberTarget::Definition(def_id) => def_map
                         .definition(def_id)
                         .and_then(|def| {
-                            if let crate::analysis::hir::ItemSignature::Callable(sig) = def.signature() {
+                            if let crate::analysis::hir::ItemSignature::Callable(sig) =
+                                def.signature()
+                            {
                                 Some(
                                     sig.params()
                                         .iter()
@@ -734,7 +733,8 @@ impl Analysis {
             if range.range.contains(offset)
                 && matches!(
                     expr,
-                    crate::analysis::hir::Expr::Call { .. } | crate::analysis::hir::Expr::MethodCall { .. }
+                    crate::analysis::hir::Expr::Call { .. }
+                        | crate::analysis::hir::Expr::MethodCall { .. }
                 )
             {
                 let len = range.range.len();
@@ -1521,9 +1521,13 @@ impl Analysis {
                 .iter()
                 .map(|occurrence| {
                     let kind = match occurrence.kind() {
-                        crate::analysis::semantic::ReferenceOccurrenceKind::Write => ReferenceKind::Write,
+                        crate::analysis::semantic::ReferenceOccurrenceKind::Write => {
+                            ReferenceKind::Write
+                        }
                         crate::analysis::semantic::ReferenceOccurrenceKind::Read
-                        | crate::analysis::semantic::ReferenceOccurrenceKind::Call => ReferenceKind::Read,
+                        | crate::analysis::semantic::ReferenceOccurrenceKind::Call => {
+                            ReferenceKind::Read
+                        }
                     };
                     ReferenceResult::new(occurrence.range(), kind)
                 })
@@ -2138,7 +2142,8 @@ fn item_hover_text(
                 let fields = def_map
                     .members(definition.id())
                     .filter_map(|field| {
-                        let crate::analysis::hir::ItemSignature::Field(ty) = field.signature() else {
+                        let crate::analysis::hir::ItemSignature::Field(ty) = field.signature()
+                        else {
                             return None;
                         };
                         Some(format!("{}: {}", field.name(), ty.syntax().unwrap_or("?")))

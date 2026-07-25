@@ -15,8 +15,7 @@ use crate::syntax::{
 };
 
 use crate::{
-    analysis::base::{FileRange, TextRange,
-},
+    analysis::base::{FileRange, TextRange},
     analysis::hir::{DefId, TypeRef},
     analysis::vfs::FileId,
 };

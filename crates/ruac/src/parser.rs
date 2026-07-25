@@ -9,10 +9,10 @@ use crate::lexer::RuaLexer;
 use crate::token::{RuaTokenKind as T, SourceRange};
 use crate::tokenize::StrictTokenStream;
 use crate::tokenize::TokenizeError;
+use rua_common::LexErrorKind;
 use rua_common::{
     Attribute, DiagnosticCode, FileId, MetaItem, MetaValue, StructuredDiagnostic, TextRange,
 };
-use rua_common::LexErrorKind;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

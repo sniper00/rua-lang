@@ -836,7 +836,9 @@ fn builtin_payload(builtin: rua_common::BuiltinId, ty: &Ty) -> Option<Vec<Ty>> {
             Some(vec![(**inner).clone()])
         }
         (rua_common::BuiltinId::VariantResultOk, Ty::Result(ok, _)) => Some(vec![(**ok).clone()]),
-        (rua_common::BuiltinId::VariantResultErr, Ty::Result(_, err)) => Some(vec![(**err).clone()]),
+        (rua_common::BuiltinId::VariantResultErr, Ty::Result(_, err)) => {
+            Some(vec![(**err).clone()])
+        }
         _ => None,
     }
 }
@@ -3913,10 +3915,12 @@ impl<'hir> Tc<'hir> {
         let display = path.join("::");
         let valid = match target {
             crate::hir::ResolvedTarget::Builtin(builtin) => match builtin {
-                rua_common::BuiltinId::VariantOptionSome | rua_common::BuiltinId::VariantOptionNone => {
+                rua_common::BuiltinId::VariantOptionSome
+                | rua_common::BuiltinId::VariantOptionNone => {
                     matches!(scrutinee, Ty::Option(_))
                 }
-                rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr => {
+                rua_common::BuiltinId::VariantResultOk
+                | rua_common::BuiltinId::VariantResultErr => {
                     matches!(scrutinee, Ty::Result(_, _))
                 }
                 _ => true,

@@ -230,7 +230,9 @@ impl Attribute {
             .to_core()?;
         match item {
             rua_common::MetaItem::Word(name) => Ok(rua_common::Attribute::new(name, Vec::new())),
-            rua_common::MetaItem::List { name, items } => Ok(rua_common::Attribute::new(name, items)),
+            rua_common::MetaItem::List { name, items } => {
+                Ok(rua_common::Attribute::new(name, items))
+            }
             rua_common::MetaItem::NameValue { name, value } => Ok(rua_common::Attribute::new(
                 name,
                 vec![rua_common::MetaItem::Literal(value)],

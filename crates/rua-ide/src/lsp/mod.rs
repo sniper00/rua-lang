@@ -72,7 +72,9 @@ use crate::lsp::conversion::{
     LineIndexCache, find_import_insertion_point, normalize_physical_path, path_to_uri,
     range_from_bytes, uri_to_path,
 };
-use crate::lsp::filesystem::{LibraryConfig, LibraryScanRequest, WorkspaceScan, scan_workspace_roots};
+use crate::lsp::filesystem::{
+    LibraryConfig, LibraryScanRequest, WorkspaceScan, scan_workspace_roots,
+};
 #[cfg(test)]
 use crate::lsp::filesystem::{scan_library_root, scan_workspace_files};
 use crate::lsp::state::*;
@@ -1067,7 +1069,9 @@ impl Server {
         for diag in &params.context.diagnostics {
             if let Some(lsp_types::NumberOrString::String(code_str)) = diag.code.as_ref() {
                 match code_str.as_str() {
-                    code if code == crate::analysis::DiagnosticCode::LintUnusedVariable.as_str() => {
+                    code if code
+                        == crate::analysis::DiagnosticCode::LintUnusedVariable.as_str() =>
+                    {
                         // Unused variable → prefix with _
                         let diag_range = &diag.range;
                         let d_start = line_index.offset(
@@ -2340,14 +2344,16 @@ impl Server {
     }
 
     fn reload_configuration(&mut self, settings: &serde_json::Value) {
-        let settings =
-            match crate::lsp::filesystem::merge_project_configs(settings, &self.workspace_folders) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    eprintln!("rua-lsp: project configuration failed: {error}");
-                    return;
-                }
-            };
+        let settings = match crate::lsp::filesystem::merge_project_configs(
+            settings,
+            &self.workspace_folders,
+        ) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("rua-lsp: project configuration failed: {error}");
+                return;
+            }
+        };
         let Ok(request) = LibraryScanRequest::from_settings(&settings) else {
             return;
         };
@@ -3069,11 +3075,8 @@ fn render_signature_markdown(
 }
 
 fn to_lsp_hover(hover: &HoverResult) -> Hover {
-    let mut value = render_signature_markdown(
-        hover.context(),
-        hover.signature(),
-        hover.documentation(),
-    );
+    let mut value =
+        render_signature_markdown(hover.context(), hover.signature(), hover.documentation());
 
     // Footer with clickable command links (VS Code extension).
     value.push_str("\n\n---\n\n");
@@ -4387,7 +4390,10 @@ mod tests {
         let line_index = LineIndex::new(source);
         let tokens = [
             crate::analysis::SemanticToken::new(
-                crate::analysis::FileRange::new(FileId::new(0), crate::analysis::TextRange::new(4, 9)),
+                crate::analysis::FileRange::new(
+                    FileId::new(0),
+                    crate::analysis::TextRange::new(4, 9),
+                ),
                 crate::analysis::SemanticTokenKind::Variable,
                 crate::analysis::SemanticTokenModifiers::NONE,
             ),
@@ -4410,10 +4416,12 @@ mod tests {
     #[test]
     fn sort_text_higher_relevance_sorts_first() {
         // Locals (relevance 95) should sort before keywords (relevance 50).
-        let local =
-            crate::analysis::CompletionItem::new("my_var", crate::analysis::CompletionKind::Variable)
-                .with_detail("my_var: i64")
-                .with_relevance(crate::analysis::CompletionRelevance::local(0));
+        let local = crate::analysis::CompletionItem::new(
+            "my_var",
+            crate::analysis::CompletionKind::Variable,
+        )
+        .with_detail("my_var: i64")
+        .with_relevance(crate::analysis::CompletionRelevance::local(0));
         let keyword =
             crate::analysis::CompletionItem::new("fn", crate::analysis::CompletionKind::Keyword)
                 .with_detail("keyword fn")
@@ -4433,10 +4441,14 @@ mod tests {
 
     #[test]
     fn sort_text_falls_back_to_label_for_equal_relevance() {
-        let a = crate::analysis::CompletionItem::new("alpha", crate::analysis::CompletionKind::Variable)
-            .with_relevance(crate::analysis::CompletionRelevance::path_member());
-        let b = crate::analysis::CompletionItem::new("beta", crate::analysis::CompletionKind::Variable)
-            .with_relevance(crate::analysis::CompletionRelevance::path_member());
+        let a = crate::analysis::CompletionItem::new(
+            "alpha",
+            crate::analysis::CompletionKind::Variable,
+        )
+        .with_relevance(crate::analysis::CompletionRelevance::path_member());
+        let b =
+            crate::analysis::CompletionItem::new("beta", crate::analysis::CompletionKind::Variable)
+                .with_relevance(crate::analysis::CompletionRelevance::path_member());
 
         let li = empty_line_index();
         let lsp_a = completion_to_lsp(&a, &li, "", FileId::new(0));
@@ -4452,11 +4464,14 @@ mod tests {
 
     #[test]
     fn function_completion_has_call_snippet() {
-        let f = crate::analysis::CompletionItem::new("greet", crate::analysis::CompletionKind::Function)
-            .with_insert(crate::analysis::CompletionInsert::Call {
-                callee: "greet".to_string(),
-                params: vec![],
-            });
+        let f = crate::analysis::CompletionItem::new(
+            "greet",
+            crate::analysis::CompletionKind::Function,
+        )
+        .with_insert(crate::analysis::CompletionInsert::Call {
+            callee: "greet".to_string(),
+            params: vec![],
+        });
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&f, &li, "", FileId::new(0));
@@ -4469,12 +4484,14 @@ mod tests {
 
     #[test]
     fn function_completion_with_params_has_placeholder_snippets() {
-        let f =
-            crate::analysis::CompletionItem::new("translate", crate::analysis::CompletionKind::Method)
-                .with_insert(crate::analysis::CompletionInsert::Call {
-                    callee: "translate".to_string(),
-                    params: vec!["dx: i64".to_string(), "dy: i64".to_string()],
-                });
+        let f = crate::analysis::CompletionItem::new(
+            "translate",
+            crate::analysis::CompletionKind::Method,
+        )
+        .with_insert(crate::analysis::CompletionInsert::Call {
+            callee: "translate".to_string(),
+            params: vec!["dx: i64".to_string(), "dy: i64".to_string()],
+        });
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&f, &li, "", FileId::new(0));
@@ -4490,9 +4507,11 @@ mod tests {
 
     #[test]
     fn text_edit_converts_replacement_range() {
-        let item =
-            crate::analysis::CompletionItem::new("my_var", crate::analysis::CompletionKind::Variable)
-                .with_replacement_range(crate::analysis::TextRange::new(5, 7));
+        let item = crate::analysis::CompletionItem::new(
+            "my_var",
+            crate::analysis::CompletionKind::Variable,
+        )
+        .with_replacement_range(crate::analysis::TextRange::new(5, 7));
 
         let source = "abc def ghi";
         // replacement range 5..7 = "de"
@@ -4506,9 +4525,11 @@ mod tests {
 
     #[test]
     fn deprecated_item_has_deprecated_tag() {
-        let item =
-            crate::analysis::CompletionItem::new("old_fn", crate::analysis::CompletionKind::Function)
-                .deprecated(true);
+        let item = crate::analysis::CompletionItem::new(
+            "old_fn",
+            crate::analysis::CompletionKind::Function,
+        )
+        .deprecated(true);
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
@@ -4521,8 +4542,10 @@ mod tests {
 
     #[test]
     fn normal_item_has_no_deprecated_tag() {
-        let item =
-            crate::analysis::CompletionItem::new("new_fn", crate::analysis::CompletionKind::Function);
+        let item = crate::analysis::CompletionItem::new(
+            "new_fn",
+            crate::analysis::CompletionKind::Function,
+        );
 
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
@@ -4581,8 +4604,9 @@ mod tests {
     #[test]
     fn label_details_top_level_detail_is_none() {
         // label_details.detail supersedes the top-level detail field.
-        let item = crate::analysis::CompletionItem::new("x", crate::analysis::CompletionKind::Field)
-            .with_detail("i64");
+        let item =
+            crate::analysis::CompletionItem::new("x", crate::analysis::CompletionKind::Field)
+                .with_detail("i64");
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
         assert!(
@@ -4594,8 +4618,9 @@ mod tests {
     #[test]
     fn label_details_postfix_template_has_space_prefix() {
         // Postfix completions (.if, .match, etc.) use Keyword kind.
-        let item = crate::analysis::CompletionItem::new(".if", crate::analysis::CompletionKind::Keyword)
-            .with_detail("if expr { … }");
+        let item =
+            crate::analysis::CompletionItem::new(".if", crate::analysis::CompletionKind::Keyword)
+                .with_detail("if expr { … }");
         let li = empty_line_index();
         let lsp = completion_to_lsp(&item, &li, "", FileId::new(0));
         let ld = lsp

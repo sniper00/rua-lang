@@ -231,9 +231,10 @@ fn lua_result_extern_requires_non_variadic_builtin_result_return() {
     ] {
         let (diagnostics, _) = crate::check_diagnostics(source);
         assert!(
-            diagnostics.iter().any(
-                |diagnostic| diagnostic.code == rua_common::DiagnosticCode::TypeInvalidFfiAdapter
-            ),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code
+                    == rua_common::DiagnosticCode::TypeInvalidFfiAdapter),
             "missing invalid FFI adapter diagnostic for:\n{source}\n{diagnostics:#?}"
         );
     }

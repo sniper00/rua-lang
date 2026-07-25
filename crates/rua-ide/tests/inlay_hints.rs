@@ -14,10 +14,12 @@ fn inlay_hints_work_for_unattached_demo_file() {
     srv.open(&root_uri, "fn root() {}");
     let file_id = srv.open(&demo_uri, source);
 
-    let hints = srv.snapshot().inlay_hints(rua_ide::analysis::ProjectFile::new(
-        rua_ide::analysis::ProjectId::new(0),
-        file_id,
-    ));
+    let hints = srv
+        .snapshot()
+        .inlay_hints(rua_ide::analysis::ProjectFile::new(
+            rua_ide::analysis::ProjectId::new(0),
+            file_id,
+        ));
     let red_name_end = source.find("let red_name =").unwrap() as u32 + "let red_name".len() as u32;
     assert!(
         hints
@@ -92,10 +94,12 @@ fn inlay_hint_option_type_and_payload_are_hoverable_and_navigable() {
     let mut srv = TestServer::new();
     let file_id = srv.open(&uri, source);
 
-    let hints = srv.snapshot().inlay_hints(rua_ide::analysis::ProjectFile::new(
-        rua_ide::analysis::ProjectId::new(0),
-        file_id,
-    ));
+    let hints = srv
+        .snapshot()
+        .inlay_hints(rua_ide::analysis::ProjectFile::new(
+            rua_ide::analysis::ProjectId::new(0),
+            file_id,
+        ));
     let featured_end = source.find("featured").unwrap() as u32 + "featured".len() as u32;
     let hint = hints
         .iter()

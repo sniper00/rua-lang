@@ -14,7 +14,7 @@ use crate::{
     analysis::hir::{
         Body, BodyScopes, BodySourceMap, DefKind, DefMap, Definition, Expr, ExprId,
         InferenceResult, MemberIndex, ModuleId, ScopeKind, Ty,
-},
+    },
     analysis::vfs::FileId,
 };
 
@@ -445,7 +445,11 @@ fn complete_annotation_arguments(
     let segments = name.split("::").collect::<Vec<_>>();
     let Some(definition) = ctx
         .def_map
-        .resolve_path(module, &segments, crate::analysis::hir::ResolveStrategy::Lexical)
+        .resolve_path(
+            module,
+            &segments,
+            crate::analysis::hir::ResolveStrategy::Lexical,
+        )
         .filter(|definition| definition.kind() == DefKind::Annotation)
     else {
         return;
@@ -831,7 +835,10 @@ fn complete_cross_module_defs(
         if definition.module_id() == current_module {
             continue;
         }
-        if !matches!(definition.visibility(), crate::analysis::hir::Visibility::Public) {
+        if !matches!(
+            definition.visibility(),
+            crate::analysis::hir::Visibility::Public
+        ) {
             continue;
         }
         if !matches!(
@@ -1802,7 +1809,8 @@ pub(crate) fn definition_signature(
                     _ => unreachable!(),
                 };
                 if let Some(c) = candidates.iter().find(|candidate| {
-                    candidate.target() == crate::analysis::hir::MemberTarget::Definition(definition.id())
+                    candidate.target()
+                        == crate::analysis::hir::MemberTarget::Definition(definition.id())
                 }) {
                     return Some(format!("{}: {}", definition.name(), c.ty()));
                 }
@@ -1832,7 +1840,8 @@ fn definition_completion_ty(member_index: &MemberIndex, definition: &Definition)
                 member_index.associated_candidates(owner_ty)
             };
             let candidate = candidates.iter().find(|candidate| {
-                candidate.target() == crate::analysis::hir::MemberTarget::Definition(definition.id())
+                candidate.target()
+                    == crate::analysis::hir::MemberTarget::Definition(definition.id())
             })?;
             Some(match candidate.ty() {
                 Ty::Function(callable) | Ty::Closure(callable) => callable.return_ty().clone(),
@@ -1843,7 +1852,10 @@ fn definition_completion_ty(member_index: &MemberIndex, definition: &Definition)
     }
 }
 
-fn member_target_range(def_map: &DefMap, target: crate::analysis::hir::MemberTarget) -> Option<FileRange> {
+fn member_target_range(
+    def_map: &DefMap,
+    target: crate::analysis::hir::MemberTarget,
+) -> Option<FileRange> {
     let crate::analysis::hir::MemberTarget::Definition(def_id) = target else {
         return None;
     };
@@ -1858,7 +1870,10 @@ fn member_target_range(def_map: &DefMap, target: crate::analysis::hir::MemberTar
 // Syntax navigation
 // ---------------------------------------------------------------------------
 
-pub(crate) fn token_at_offset(node: &crate::syntax::SyntaxNode, offset: u32) -> Option<SyntaxToken> {
+pub(crate) fn token_at_offset(
+    node: &crate::syntax::SyntaxNode,
+    offset: u32,
+) -> Option<SyntaxToken> {
     let end: u32 = node.text_range().end().into();
     match node.token_at_offset(offset.min(end).into()) {
         rowan::TokenAtOffset::Single(token) => Some(token),

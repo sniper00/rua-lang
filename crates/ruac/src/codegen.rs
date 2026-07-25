@@ -3649,7 +3649,8 @@ impl Codegen<'_> {
             matches!(
                 self.root_pattern_target(pattern),
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr
+                    rua_common::BuiltinId::VariantResultOk
+                        | rua_common::BuiltinId::VariantResultErr
                 ))
             ) || self
                 .root_pattern_target(pattern)
@@ -3662,7 +3663,8 @@ impl Codegen<'_> {
             matches!(
                 self.root_pattern_target(pattern),
                 Some(crate::hir::ResolvedTarget::Builtin(
-                    rua_common::BuiltinId::VariantResultOk | rua_common::BuiltinId::VariantResultErr
+                    rua_common::BuiltinId::VariantResultOk
+                        | rua_common::BuiltinId::VariantResultErr
                 ))
             )
         })
@@ -3852,16 +3854,20 @@ impl Codegen<'_> {
             Pattern::Path { id, .. } => {
                 let target = self.pattern_target(*id);
                 match target {
-                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionNone) => {
+                    crate::hir::ResolvedTarget::Builtin(
+                        rua_common::BuiltinId::VariantOptionNone,
+                    ) => {
                         tests.push(subject.binary(LuaBinaryOp::Eq, LuaExpr::Nil));
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionSome) => {
-                        tests.push(subject.binary(LuaBinaryOp::Ne, LuaExpr::Nil))
-                    }
+                    crate::hir::ResolvedTarget::Builtin(
+                        rua_common::BuiltinId::VariantOptionSome,
+                    ) => tests.push(subject.binary(LuaBinaryOp::Ne, LuaExpr::Nil)),
                     crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultOk) => {
                         tests.push(cached_tag.cloned().unwrap_or_else(|| result_is_ok(subject)))
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultErr) => {
+                    crate::hir::ResolvedTarget::Builtin(
+                        rua_common::BuiltinId::VariantResultErr,
+                    ) => {
                         let tag = cached_tag.cloned().unwrap_or_else(|| result_is_ok(subject));
                         tests.push(LuaExpr::unary(LuaUnaryOp::Not, tag))
                     }
@@ -3884,7 +3890,9 @@ impl Codegen<'_> {
             Pattern::TupleVariant { id, elems, .. } => {
                 let target = self.pattern_target(*id);
                 match target {
-                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantOptionSome) => {
+                    crate::hir::ResolvedTarget::Builtin(
+                        rua_common::BuiltinId::VariantOptionSome,
+                    ) => {
                         // Some(x) is the bare value; None is nil.
                         tests.push(subject.clone().binary(LuaBinaryOp::Ne, LuaExpr::Nil));
                         if let Some(inner) = elems.first() {
@@ -3901,7 +3909,9 @@ impl Codegen<'_> {
                             self.pat_test(inner, result_payload(subject), None, tests, binds);
                         }
                     }
-                    crate::hir::ResolvedTarget::Builtin(rua_common::BuiltinId::VariantResultErr) => {
+                    crate::hir::ResolvedTarget::Builtin(
+                        rua_common::BuiltinId::VariantResultErr,
+                    ) => {
                         let tag = cached_tag
                             .cloned()
                             .unwrap_or_else(|| result_is_ok(subject.clone()));

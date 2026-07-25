@@ -4,9 +4,9 @@ use std::{
     sync::Arc,
 };
 
-use lsp_types::{Position, Range, Uri};
 use crate::analysis::{Analysis, FileId, TextRange};
 use crate::syntax::LineIndex;
+use lsp_types::{Position, Range, Uri};
 
 struct CachedLineIndex {
     revision: u64,

@@ -9,8 +9,8 @@
 //! `syntax`, `analysis`, and `lsp` each define hundreds of public items, and
 //! namespace collisions are likely without explicit module boundaries.
 
-pub mod syntax;
 pub mod analysis;
+pub mod syntax;
 
 #[cfg(feature = "lsp")]
 pub mod lsp;

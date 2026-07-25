@@ -44,10 +44,6 @@ pub use ide::{
     TextEdit, TextRange, TypeHierarchyItem, TypeHint, TypeHintLabelPart, TypeHintTarget,
     TypeHintTooltip, WorkspaceSymbol,
 };
+pub use rua_common::{FileId, SourceRootId, SourceRootKind};
 pub use semantic::{LocalReference, Semantics};
-pub use rua_common::{
-    FileId, SourceRootId, SourceRootKind,
-};
-pub use vfs::{
-    Change, FileKind, ProjectData, ProjectRoot, SourceRoot, VfsPath,
-};
+pub use vfs::{Change, FileKind, ProjectData, ProjectRoot, SourceRoot, VfsPath};

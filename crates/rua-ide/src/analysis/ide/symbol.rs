@@ -1,8 +1,7 @@
 //! Protocol-neutral document and workspace symbol projections.
 
 use crate::{
-    analysis::hir::{DefKind, DefMap, Definition, ModuleId, TextRange,
-},
+    analysis::hir::{DefKind, DefMap, Definition, ModuleId, TextRange},
     analysis::vfs::FileId,
 };
 
@@ -136,13 +135,8 @@ fn workspace_symbol(map: &DefMap, definition: &Definition) -> WorkspaceSymbol {
 #[cfg(test)]
 mod tests {
     use crate::{
-        analysis::AnalysisHost,
-        analysis::Change,
-        analysis::DefKind,
-        analysis::FileId,
-        analysis::FileKind,
-        analysis::SourceRootId,
-        analysis::SourceRootKind,
+        analysis::AnalysisHost, analysis::Change, analysis::DefKind, analysis::FileId,
+        analysis::FileKind, analysis::SourceRootId, analysis::SourceRootKind,
     };
 
     fn analysis_with_symbols() -> (crate::analysis::Analysis, FileId, FileId, &'static str) {

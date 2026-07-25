@@ -10,7 +10,9 @@ use rua_ide::syntax::ast::{
     ClosureExpr as SyntaxClosureExpr, FieldExpr as SyntaxFieldExpr, Item as SyntaxItem,
     MethodCallExpr as SyntaxMethodCallExpr, PathExpr as SyntaxPathExpr, Stmt as SyntaxStmt,
 };
-use rua_ide::syntax::{AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken, lex, parse_source_file};
+use rua_ide::syntax::{
+    AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken, lex, parse_source_file,
+};
 use ruac::ast::{ClosureBody, Expr, ExprKind, Item as CompilerItem, Stmt as CompilerStmt};
 use ruac::token::{RuaTokenKind, SourceRange};
 use ruac::tokenize::RuaTokenize;

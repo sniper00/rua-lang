@@ -9,8 +9,8 @@ use std::{
     sync::Arc,
 };
 
-pub use rua_common::{CfgOptions, FileId, ProjectId, SourceRootId};
 pub use rua_common::SourceRootKind;
+pub use rua_common::{CfgOptions, FileId, ProjectId, SourceRootId};
 
 /// Logical path within a source root. Construction is lexical and performs no
 /// filesystem access, so virtual and unsaved files follow the same rules.

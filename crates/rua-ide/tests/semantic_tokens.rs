@@ -18,7 +18,8 @@ fn semantic_tokens_include_variable_and_function_kinds() {
     let tokens = srv.snapshot().semantic_tokens(file_id);
 
     // Should have tokens for functions, parameters, variables, keywords
-    let kinds: Vec<rua_ide::analysis::SemanticTokenKind> = tokens.iter().map(|t| t.kind()).collect();
+    let kinds: Vec<rua_ide::analysis::SemanticTokenKind> =
+        tokens.iter().map(|t| t.kind()).collect();
 
     let has_variable = kinds
         .iter()

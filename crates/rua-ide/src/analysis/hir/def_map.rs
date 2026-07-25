@@ -8,8 +8,7 @@ use std::{
 
 use crate::{
     analysis::BaseDb,
-    analysis::base::{FileRange, TextRange,
-},
+    analysis::base::{FileRange, TextRange},
     analysis::hir::{
         Import, ItemKind, ItemSignature, ItemSourceKind, ItemTreeItem, SignatureFingerprint,
         Visibility,
@@ -1245,14 +1244,8 @@ fn syntax_range(node: &crate::syntax::SyntaxNode) -> TextRange {
 mod tests {
     use super::ResolveStrategy;
     use crate::{
-        analysis::AnalysisHost,
-        analysis::Change,
-        analysis::DefKind,
-        analysis::FileId,
-        analysis::FileKind,
-        analysis::SourceRootId,
-        analysis::SourceRootKind,
-        analysis::Visibility,
+        analysis::AnalysisHost, analysis::Change, analysis::DefKind, analysis::FileId,
+        analysis::FileKind, analysis::SourceRootId, analysis::SourceRootKind, analysis::Visibility,
     };
 
     fn host_with_module_tree() -> (AnalysisHost, FileId, FileId) {

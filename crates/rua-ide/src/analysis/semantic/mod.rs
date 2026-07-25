@@ -15,7 +15,7 @@ use crate::{
     analysis::hir::{
         Body, BodyResolution, BodySourceId, BodySourceMap, DefMap, Definition, LocalBindingId,
         LocalResolveResult, LocalUseKind, ModuleId, NameRefKind,
-},
+    },
     analysis::vfs::FileId,
 };
 
@@ -391,13 +391,8 @@ fn resolve_lexical_name<'map>(
 #[cfg(test)]
 mod tests {
     use crate::{
-        analysis::AnalysisHost,
-        analysis::Change,
-        analysis::DefKind,
-        analysis::FileId,
-        analysis::FileKind,
-        analysis::FilePosition,
-        analysis::SourceRootId,
+        analysis::AnalysisHost, analysis::Change, analysis::DefKind, analysis::FileId,
+        analysis::FileKind, analysis::FilePosition, analysis::SourceRootId,
         analysis::SourceRootKind,
     };
 

@@ -2,7 +2,6 @@
 
 use std::hash::{Hash, Hasher};
 
-use rua_common::{CfgOptions, expand_cfg_attributes};
 use crate::syntax::{
     AstNode, Named, SyntaxKind, SyntaxNode, SyntaxToken,
     ast::{
@@ -11,6 +10,7 @@ use crate::syntax::{
         TraitMethod, Type, VariantKind as AstVariantKind, WhereClause,
     },
 };
+use rua_common::{CfgOptions, expand_cfg_attributes};
 
 use crate::analysis::base::TextRange;
 use crate::analysis::vfs::FileKind;
@@ -1329,8 +1329,8 @@ fn token_range(token: &SyntaxToken) -> TextRange {
 
 #[cfg(test)]
 mod tests {
-    use rua_common::CfgOptions;
     use crate::syntax::parse_source_file;
+    use rua_common::CfgOptions;
 
     use super::{
         ItemKind, ItemSignature, ItemSourceKind, ItemTree, ReceiverKind, VariantKind, Visibility,

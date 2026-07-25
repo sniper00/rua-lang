@@ -253,11 +253,9 @@ fn check_extern_adapters(
                             "`lua-result` adapters cannot be variadic".to_string(),
                         ));
                     }
-                    if function
-                        .ret
-                        .as_ref()
-                        .is_none_or(|ty| !hir.type_is_builtin(ty, rua_common::BuiltinId::TypeResult))
-                    {
+                    if function.ret.as_ref().is_none_or(|ty| {
+                        !hir.type_is_builtin(ty, rua_common::BuiltinId::TypeResult)
+                    }) {
                         errors.push(at_code(
                             rua_common::DiagnosticCode::TypeInvalidFfiAdapter,
                             function.name_span,

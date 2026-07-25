@@ -9,8 +9,7 @@ use crate::syntax::{
 
 use crate::{
     analysis::BaseDb,
-    analysis::hir::{BindingKind, DefMap, Expr, LocalBindingId,
-},
+    analysis::hir::{BindingKind, DefMap, Expr, LocalBindingId},
     analysis::semantic::Semantics,
     analysis::vfs::FileId,
 };

@@ -2,8 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     analysis::BaseDb,
-    analysis::base::{FilePosition, FileRange,
-},
+    analysis::base::{FilePosition, FileRange},
     analysis::hir::{CallTarget, DefId, DefMap, Expr, LocalResolveResult, MemberTarget, NameRefId},
 };
 
