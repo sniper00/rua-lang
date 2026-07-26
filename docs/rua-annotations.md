@@ -78,8 +78,8 @@ annotation name、validated arguments 和 source order。IO-free host 直接从 
 artifact 查询；CLI 可以输出 TOML：
 
 ```bash
-ruac metadata src/main.rua --format toml
-ruac metadata src/main.rua \
+ruac metadata src/main.rua -p src/ --format toml
+ruac metadata src/main.rua -p src/ \
   --annotation moon::web::Route --format toml
 ```
 

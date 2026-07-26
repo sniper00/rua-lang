@@ -234,11 +234,15 @@ iterator 是惰性、可组合的运行时协议。range、`Vec` 和 adapter 可
 ## 4. 模块与接口文件
 
 Rua 使用 path-as-module：源码不包含 `mod` 声明，文件相对 source root 的路径就是
-模块路径。`src/main.rua` 作为入口时，`src/domain/order.rua` 映射为
-`domain::order`；缺少实体文件的中间目录仍形成虚拟 namespace。
-`name.rua` 与 `name/mod.rua` 表示同一模块，`.ruai` 也遵循相同规则；同一优先级
-同时存在多个映射会产生歧义错误。logical path 必须是合法 Rua identifier 序列，
+模块路径。`ruac build src/main.rua -p src/` 以 `src/` 为 source root，
+`src/domain/order.rua` 映射为 `domain::order`；缺少实体文件的中间目录仍形成虚拟
+namespace。`name.rua` 与 `name/mod.rua` 表示同一模块，`.ruai` 也遵循相同规则；同一
+优先级同时存在多个映射会产生歧义错误。logical path 必须是合法 Rua identifier 序列，
 不得逃离 source root。源码级 `mod name;` 和 inline `mod name { ... }` 均为语法错误。
+
+不带 `-p` 或 `.ruarc.toml` 时，compiler 进入单文件模式，仅编译入口文件本身。
+带 `-p <dir>` 时扫描指定目录；带 `-c <.ruarc.toml>` 时以配置文件所在目录为
+source root。两者同时指定时 `-p` 优先。
 
 filesystem compiler、IO-free `ProjectSpec` 与 native analysis 都调用
 `rua_common::module_path_from_relative_file`，因此 build、diagnostics、completion、
@@ -250,8 +254,9 @@ hover 和 goto definition 看到同一模块图。workspace source 优先于共�
 - 非空函数、impl method 或 trait method body。
 - 文件顶层 executable statement。
 
-编译器递归发现入口目录中的 `.rua`/`.ruai`；LSP 对同一 project source root 建立
-相同 DefMap。模块本身按路径可达，模块内 item 是否能跨模块访问仍由 `pub` 控制。
+编译器按 source root 递归发现 `.rua`/`.ruai`；LSP 对同一 source root 建立相同
+DefMap。source root 由 `-p`、`.ruarc.toml` 或 library API 显式指定。模块本身按
+路径可达，模块内 item 是否能跨模块访问仍由 `pub` 控制。
 
 ### 4.1 外部 Lua 库
 
@@ -319,7 +324,7 @@ let artifact = ruac::compile_project_with_diagnostics(
 ### 6.1 Lua 输出模式
 
 `bundle` 是默认模式：所有 resolved module 共享一个 Lua chunk。`modules`
-模式通过 `ruac build <root> --emit modules --out-dir <dir>` 启用，root 输出
+模式通过 `ruac build <entry> -p <source_root> --emit modules --out-dir <dir>` 启用，root 输出
 保留输入文件名，其他 module 按逻辑路径输出，例如 `domain::order` 对应
 `domain/order.lua`。每个输出文件在顶部用 `require("domain.order")` 加载其
 identity-resolved 依赖，随后定义并初始化当前 module。仅有一个公开

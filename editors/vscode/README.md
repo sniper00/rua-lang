@@ -95,7 +95,7 @@ tag push. A manual workflow run only builds and uploads the VSIX.
 | `rua.server.path` | empty | Path to the server; empty selects the bundled platform binary. |
 | `rua.server.args` | `[]` | Extra args passed to the server. |
 | `rua.compiler.path` | empty | Path to the compiler; empty selects the bundled platform binary. |
-| `rua.compiler.args` | `[]` | Extra args appended to `ruac build <file>`. |
+| `rua.compiler.args` | `[]` | Extra args appended to `ruac build <file> [-p <dir>]`. |
 | `rua.trace.server` | `off` | Trace JSON-RPC traffic (`off`/`messages`/`verbose`). |
 
 To make the context-menu command emit a project module tree when it is invoked

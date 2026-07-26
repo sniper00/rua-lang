@@ -3382,6 +3382,7 @@ fn external_library_file_resolves_and_local_module_takes_precedence() {
     .unwrap();
     let options = crate::CompileOptions {
         library: vec![declaration],
+        source_root: Some(workspace.clone()),
         ..crate::CompileOptions::default()
     };
     let lua = crate::compile_path_with_options(&input, &options).unwrap();

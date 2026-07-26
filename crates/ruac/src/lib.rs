@@ -47,6 +47,9 @@ pub struct CompileOptions {
     pub lua_path: Vec<PathBuf>,
     /// Active compile-time flags and keyed values used by `cfg`/`cfg_attr`.
     pub cfg: rua_common::CfgOptions,
+    /// When set, scan this directory for sibling `.rua`/`.ruai` module files.
+    /// When `None`, only the root file is compiled (single-file mode).
+    pub source_root: Option<PathBuf>,
 }
 
 /// Load builtin `.ruai` declarations into a declaration-only semantic module.
@@ -401,12 +404,24 @@ pub fn compile_path_with_options(
     compile_path_artifact_with_options(path, options).map(|artifact| artifact.source)
 }
 
+/// Build default options with the source root set to the input file's parent
+/// directory, so module discovery works for the convenience API.
+fn default_options_with_source_root(path: &Path) -> CompileOptions {
+    CompileOptions {
+        source_root: path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf),
+        ..CompileOptions::default()
+    }
+}
+
 /// Validate a source project and export its resolved annotation metadata as TOML.
 pub fn compile_path_metadata(
     path: &Path,
     annotation: Option<&str>,
 ) -> Result<String, CompileFailure> {
-    compile_path_metadata_with_options(path, &CompileOptions::default(), annotation)
+    compile_path_metadata_with_options(path, &default_options_with_source_root(path), annotation)
 }
 
 /// Export annotation metadata with explicit project/compiler inputs.
@@ -439,7 +454,7 @@ pub fn compile_path_with_std(path: &Path, std_path: &Path) -> Result<String, Com
 
 /// Compile a Rua source file and retain generated-to-source mappings.
 pub fn compile_path_artifact(path: &Path) -> Result<codegen::GeneratedLua, CompileFailure> {
-    compile_path_artifact_with_options(path, &CompileOptions::default())
+    compile_path_artifact_with_options(path, &default_options_with_source_root(path))
 }
 
 /// Like [`compile_path_artifact`] but with an explicit builtins directory.
@@ -463,6 +478,10 @@ pub fn compile_path_artifact_with_std(
             library_mounts: BTreeMap::new(),
             lua_path: Vec::new(),
             cfg: rua_common::CfgOptions::default(),
+            source_root: path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf),
         },
     )
 }
@@ -491,7 +510,7 @@ pub fn compile_path_artifact_with_options(
 pub fn compile_path_modules_artifact(
     path: &Path,
 ) -> Result<codegen::GeneratedLuaModules, CompileFailure> {
-    compile_path_modules_artifact_with_options(path, &CompileOptions::default())
+    compile_path_modules_artifact_with_options(path, &default_options_with_source_root(path))
 }
 
 /// Compile a source tree into Lua modules with explicit standard/external
@@ -540,6 +559,7 @@ fn check_path_with_options(
         &options.library,
         &options.library_mounts,
         &options.cfg,
+        options.source_root.as_deref(),
     )?;
     load_builtins(&mut program, options.std_path.as_deref())
         .map_err(|error| CompileFailure::single(error, files.clone()))?;
@@ -567,11 +587,16 @@ pub fn parse_and_resolve(path: &Path) -> Result<(ast::Program, Vec<String>), Com
 }
 
 pub fn parse_and_load_modules(path: &Path) -> Result<(ast::Program, Vec<String>), CompileFailure> {
+    let source_root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     parse_and_load_modules_with_libraries(
         path,
         &[],
         &BTreeMap::new(),
         &rua_common::CfgOptions::default(),
+        Some(source_root),
     )
 }
 
@@ -580,6 +605,7 @@ fn parse_and_load_modules_with_libraries(
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
     cfg: &rua_common::CfgOptions,
+    source_root: Option<&Path>,
 ) -> Result<(ast::Program, Vec<String>), CompileFailure> {
     let files = vec![path.display().to_string()];
     let src = std::fs::read_to_string(path).map_err(|error| {
@@ -614,6 +640,7 @@ fn parse_and_load_modules_with_libraries(
     let mut files = files;
     resolve::discover_modules_from_filesystem(
         &mut program,
+        source_root,
         path,
         library,
         library_mounts,

@@ -42,18 +42,20 @@ fn print_usage() {
     println!("ruac — Rua -> Lua 5.5 compiler\n");
     println!("USAGE:");
     println!(
-        "    ruac build <file.rua> [-o <out.lua>] [--emit bundle] [--features <a,b>] [--cfg <key[=value]>] [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
+        "    ruac build <file.rua> [-o <out.lua>] [--emit bundle] [-p <dir>] [--features <a,b>] [--cfg <key[=value]>] [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
     );
     println!(
-        "    ruac build <file.rua> --emit modules --out-dir <dir> [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
+        "    ruac build <file.rua> --emit modules --out-dir <dir> [-p <dir>] [--lua-path <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
     );
     println!(
-        "    ruac check <file.rua> [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
+        "    ruac check <file.rua> [-p <dir>] [-c <.ruarc.toml>] [--library <path>] [--library-mount <name>=<path>]"
     );
     println!(
-        "    ruac metadata <file.rua> [--annotation <path>] [--format toml] [-c <.ruarc.toml>]"
+        "    ruac metadata <file.rua> [--annotation <path>] [--format toml] [-p <dir>] [-c <.ruarc.toml>]"
     );
-    println!("\nWithout `-c`, ruac searches parent directories for `.ruarc.toml`.");
+    println!("\nWithout `-c` or `-p`, ruac checks only the given file (single-file mode).");
+    println!("Use `-p <dir>` to enable module discovery from a project directory.");
+    println!("Use `-c <.ruarc.toml>` to load module discovery and library config from a file.");
 }
 
 fn build(args: &[String]) -> Result<(), String> {
@@ -164,6 +166,7 @@ struct CommandOptions {
     output_dir: Option<PathBuf>,
     emit: EmitMode,
     config: Option<PathBuf>,
+    source_root: Option<PathBuf>,
     std_path: Option<PathBuf>,
     library: Vec<PathBuf>,
     library_mounts: BTreeMap<String, PathBuf>,
@@ -190,6 +193,7 @@ fn parse_command_args(
     let mut output_dir: Option<PathBuf> = None;
     let mut emit = EmitMode::Bundle;
     let mut config: Option<PathBuf> = None;
+    let mut source_root: Option<PathBuf> = None;
     let mut std_path: Option<PathBuf> = None;
     let mut library = Vec::new();
     let mut library_mounts = BTreeMap::new();
@@ -233,6 +237,13 @@ fn parse_command_args(
                     .get(i)
                     .ok_or_else(|| format!("{command}: `--config` requires a path"))?;
                 config = Some(PathBuf::from(path));
+            }
+            "-p" | "--project" => {
+                i += 1;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| format!("{command}: `--project` requires a directory"))?;
+                source_root = Some(PathBuf::from(path));
             }
             "--std-path" | "--builtins-dir" => {
                 i += 1;
@@ -332,6 +343,7 @@ fn parse_command_args(
         output_dir,
         emit,
         config,
+        source_root,
         std_path,
         library,
         library_mounts,
@@ -374,6 +386,12 @@ fn load_compile_options(command: &CommandOptions) -> Result<ruac::CompileOptions
         .map(|config| parse_project_config(&config))
         .transpose()?
         .unwrap_or_default();
+
+    // Explicit `--project` flag takes precedence over the config file's
+    // source root and enables module discovery for standalone files.
+    if let Some(path) = &command.source_root {
+        options.source_root = Some(absolute_from_cwd(path.clone())?);
+    }
 
     if let Some(path) = &command.std_path {
         options.std_path = Some(absolute_from_cwd(path.clone())?);
@@ -451,6 +469,7 @@ fn parse_project_config(path: &Path) -> Result<ruac::CompileOptions, String> {
         library_mounts: resolved.library_mounts,
         lua_path: resolved.lua_path,
         cfg: resolved.cfg,
+        source_root: Some(base.to_path_buf()),
     })
 }
 

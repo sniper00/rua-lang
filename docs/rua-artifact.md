@@ -7,7 +7,7 @@ versioned, and independent of the compiler process.
 ## Bundle
 
 ```bash
-ruac build src/main.rua -o dist/main.lua
+ruac build src/main.rua -p src/ -o dist/main.lua
 ```
 
 This writes:
@@ -23,7 +23,7 @@ generated-source hash, source-file table, and generated-to-Rua mappings.
 ## Modules
 
 ```bash
-ruac build src/main.rua --emit modules --out-dir dist/modules
+ruac build src/main.rua -p src/ --emit modules --out-dir dist/modules
 ```
 
 This writes one Lua file per runtime module and one shared manifest:

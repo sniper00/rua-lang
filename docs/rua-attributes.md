@@ -95,7 +95,7 @@ disabled = false
 CLI 可以为单次 compiler 调用补充配置：
 
 ```bash
-ruac build src/main.rua --features http,metrics \
+ruac build src/main.rua -p src/ --features http,metrics \
   --cfg runtime=moon --cfg embedded
 ```
 

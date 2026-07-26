@@ -35,18 +35,19 @@ impl<S> Default for DiscoveredModule<S> {
 /// Discover every project source and declaration file by path. User-authored
 /// `mod` declarations are not part of this model; the resulting `ModDecl`s are
 /// compiler-internal nodes consumed by the existing semantic pipeline.
+///
+/// When `source_root` is `Some(dir)`, `dir` is scanned recursively for sibling
+/// `.rua`/`.ruai` files. When `None`, only explicit `library` and
+/// `library_mounts` are loaded (single-file mode).
 pub fn discover_modules_from_filesystem(
     program: &mut Program,
+    source_root: Option<&Path>,
     root_file: &Path,
     library: &[PathBuf],
     library_mounts: &BTreeMap<String, PathBuf>,
     cfg: &rua_common::CfgOptions,
     files: &mut Vec<String>,
 ) -> Result<(), Diag> {
-    let source_root = root_file
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     let root_canonical = root_file.canonicalize().map_err(|error| {
         module_error(
             DiagnosticCode::HostSourceRead,
@@ -54,22 +55,24 @@ pub fn discover_modules_from_filesystem(
         )
     })?;
     let mut discovered = DiscoveredModule::default();
-    collect_filesystem_root(
-        &mut discovered,
-        source_root,
-        &[],
-        "rua",
-        0,
-        Some(&root_canonical),
-    )?;
-    collect_filesystem_root(
-        &mut discovered,
-        source_root,
-        &[],
-        "ruai",
-        1,
-        Some(&root_canonical),
-    )?;
+    if let Some(source_root) = source_root {
+        collect_filesystem_root(
+            &mut discovered,
+            source_root,
+            &[],
+            "rua",
+            0,
+            Some(&root_canonical),
+        )?;
+        collect_filesystem_root(
+            &mut discovered,
+            source_root,
+            &[],
+            "ruai",
+            1,
+            Some(&root_canonical),
+        )?;
+    }
     for (index, root) in library.iter().enumerate() {
         collect_library_input(&mut discovered, root, &[], index + 2)?;
     }
@@ -354,10 +357,21 @@ fn collect_source_files(
             )
         })?;
         if file_type.is_dir() {
-            if matches!(
-                entry.file_name().to_str(),
-                Some(".git" | "node_modules" | "target" | "dist")
-            ) {
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
+            };
+            if matches!(dir_name, ".git" | "node_modules" | "target" | "dist") {
+                continue;
+            }
+            // A directory name that is not a valid Rua identifier can
+            // never be a module path component — skip it.
+            if !is_valid_module_component(dir_name) {
+                continue;
+            }
+            // A directory that contains its own `.ruarc.toml` is an
+            // independent project, not a sub-module of this one.
+            if path.join(".ruarc.toml").is_file() {
                 continue;
             }
             collect_source_files(&path, extension, files, visited)?;
@@ -368,6 +382,15 @@ fn collect_source_files(
         }
     }
     Ok(())
+}
+
+/// Returns `true` when `name` is a valid Rua module-path component (identifier).
+fn is_valid_module_component(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn materialize_filesystem_modules(
@@ -407,7 +430,26 @@ fn materialize_filesystem_module(
             let file = files.len() as u32;
             files.push(source.source.display().to_string());
             let mut program =
-                crate::parser::parse_with_semantic_file(&text, file).map_err(parser_diagnostic)?;
+                match crate::parser::parse_with_semantic_file(&text, file) {
+                    Ok(program) => program,
+                    Err(error) => {
+                        eprintln!(
+                            "warning: skipping module `{name}`: parse error: {}",
+                            error.message()
+                        );
+                        return Ok(ModDecl {
+                            name,
+                            attributes: Vec::new(),
+                            documentation: None,
+                            items: Vec::new(),
+                            chunk: empty_block(),
+                            source_order: Vec::new(),
+                            is_pub: true,
+                            is_file: false,
+                            is_decl: false,
+                        });
+                    }
+                };
             set_file_program(&mut program, file);
             crate::attributes::apply_cfg(&mut program, cfg)
                 .map_err(|error| module_error(DiagnosticCode::ParseUnexpectedToken, error))?;
