@@ -46,6 +46,31 @@ for frame in converted.frames {
 Rua 源文件路径。宿主应直接使用 artifact 提供的表，不要按 module 名称或 traceback 文本
 重新推断源文件身份。
 
+## 高频位置映射
+
+日志、采样 profiler 和调试器会反复查询同一个 generated chunk。此类调用不应为每个位置
+重新遍历 `LuaSourceMapping`。宿主应在加载 chunk 时构建一次 `LuaSourceMapIndex`：
+
+```rust
+use ruac::stacktrace::LuaSourceMapIndex;
+
+let index = LuaSourceMapIndex::new(&artifact.source, &artifact.source_map);
+
+// Hot path: O(1), no allocation.
+if let Some(range) = index.map_line(generated_lua_line) {
+    let rua_file = &artifact.source_files[range.file as usize];
+    println!("{}:{}", rua_file, range.line);
+}
+```
+
+`LuaSourceMapIndex::new` 保持普通转换相同的重叠规则：优先选择 generated span 最小的
+mapping，span 相同时选择 `generated_start` 更小的 mapping。索引只属于 host 的运行时状态，
+不写入 artifact，也不改变 artifact 版本或序列化格式。
+
+`convert_lua_traceback` 会为一次 traceback 构建一个索引并供其中所有 frame 共享。
+`convert_lua_frame` 是一次性便利接口；高频调用应改用缓存索引配合
+`convert_lua_frame_with_index`，或直接调用 `map_line`。
+
 ## Bundle 与 modules
 
 bundle 输出只有一个 generated source 和 source map，直接调用一次转换即可。modules 输出

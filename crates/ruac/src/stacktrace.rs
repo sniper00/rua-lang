@@ -52,6 +52,74 @@ pub struct RuaTraceback {
     pub frames: Vec<RuaStackFrame>,
 }
 
+/// Reusable generated-Lua-line to Rua-source index.
+///
+/// Build this once for a generated chunk and retain it at the host boundary.
+/// Lookups are O(1) and allocate nothing, which makes this suitable for hot
+/// paths such as source-aware logging and sampling profilers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LuaSourceMapIndex {
+    by_line: Vec<Option<SourceRange>>,
+}
+
+impl LuaSourceMapIndex {
+    pub fn new(generated_source: &str, source_map: &[LuaSourceMapping]) -> Self {
+        if source_map.is_empty() {
+            return Self::default();
+        }
+
+        let line_starts = generated_line_starts(generated_source);
+        let mut candidates: Vec<Option<IndexedMapping>> = vec![None; line_starts.len()];
+        for mapping in source_map {
+            if mapping.generated_start >= mapping.generated_end {
+                continue;
+            }
+            let start_line = generated_line_at(
+                &line_starts,
+                generated_source.len(),
+                mapping.generated_start,
+            );
+            let end_line = generated_line_at(
+                &line_starts,
+                generated_source.len(),
+                mapping.generated_end.saturating_sub(1),
+            );
+            let candidate = IndexedMapping {
+                priority: (
+                    mapping
+                        .generated_end
+                        .saturating_sub(mapping.generated_start),
+                    mapping.generated_start,
+                ),
+                source: mapping.source,
+            };
+            for slot in &mut candidates[start_line - 1..end_line] {
+                if slot.is_none_or(|current| candidate.priority < current.priority) {
+                    *slot = Some(candidate);
+                }
+            }
+        }
+
+        Self {
+            by_line: candidates
+                .into_iter()
+                .map(|candidate| candidate.map(|candidate| candidate.source))
+                .collect(),
+        }
+    }
+
+    /// Resolve a 1-based generated Lua line to its original Rua range.
+    pub fn map_line(&self, line: usize) -> Option<SourceRange> {
+        self.by_line.get(line.checked_sub(1)?)?.as_ref().copied()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IndexedMapping {
+    priority: (usize, usize),
+    source: SourceRange,
+}
+
 /// Parse Lua's default traceback format.
 ///
 /// This accepts both the initial error location (`lua: file.lua:12: message`)
@@ -128,37 +196,39 @@ pub fn convert_lua_traceback(
     source_files: &[String],
 ) -> RuaTraceback {
     let parsed = parse_lua_traceback(traceback);
+    let source_index = LuaSourceMapIndex::new(generated_source, source_map);
     RuaTraceback {
         message: parsed.message,
         frames: parsed
             .frames
             .into_iter()
-            .map(|lua| convert_lua_frame(lua, generated_source, source_map, source_files))
+            .map(|lua| convert_lua_frame_with_index(lua, &source_index, source_files))
             .collect(),
     }
 }
 
 /// Convert one parsed Lua frame through a generated source map.
+///
+/// This convenience function builds a temporary [`LuaSourceMapIndex`]. Hosts
+/// that convert locations repeatedly should retain an index and call
+/// [`convert_lua_frame_with_index`] or [`LuaSourceMapIndex::map_line`].
 pub fn convert_lua_frame(
     lua: LuaStackFrame,
     generated_source: &str,
     source_map: &[LuaSourceMapping],
     source_files: &[String],
 ) -> RuaStackFrame {
-    let rua_range = lua.line.and_then(|line| {
-        source_map
-            .iter()
-            .filter(|mapping| mapping_contains_line(generated_source, mapping, line))
-            .min_by_key(|mapping| {
-                (
-                    mapping
-                        .generated_end
-                        .saturating_sub(mapping.generated_start),
-                    mapping.generated_start,
-                )
-            })
-            .map(|mapping| mapping.source)
-    });
+    let source_index = LuaSourceMapIndex::new(generated_source, source_map);
+    convert_lua_frame_with_index(lua, &source_index, source_files)
+}
+
+/// Convert one Lua frame with an index retained by the host.
+pub fn convert_lua_frame_with_index(
+    lua: LuaStackFrame,
+    source_index: &LuaSourceMapIndex,
+    source_files: &[String],
+) -> RuaStackFrame {
+    let rua_range = lua.line.and_then(|line| source_index.map_line(line));
     let rua_file_id = rua_range.map(|range| range.file);
     let rua_file = rua_file_id.map(|file| {
         source_files
@@ -174,16 +244,55 @@ pub fn convert_lua_frame(
     }
 }
 
-fn mapping_contains_line(source: &str, mapping: &LuaSourceMapping, line: usize) -> bool {
+fn generated_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(source.bytes().filter(|byte| *byte == b'\n').count() + 1);
+    starts.push(0);
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset + 1)),
+    );
+    starts
+}
+
+fn generated_line_at(line_starts: &[usize], source_len: usize, offset: usize) -> usize {
+    let offset = offset.min(source_len);
+    line_starts.partition_point(|start| *start <= offset)
+}
+
+#[cfg(test)]
+fn reference_mapping_for_line(
+    source: &str,
+    source_map: &[LuaSourceMapping],
+    line: usize,
+) -> Option<SourceRange> {
+    source_map
+        .iter()
+        .filter(|mapping| reference_mapping_contains_line(source, mapping, line))
+        .min_by_key(|mapping| {
+            (
+                mapping
+                    .generated_end
+                    .saturating_sub(mapping.generated_start),
+                mapping.generated_start,
+            )
+        })
+        .map(|mapping| mapping.source)
+}
+
+#[cfg(test)]
+fn reference_mapping_contains_line(source: &str, mapping: &LuaSourceMapping, line: usize) -> bool {
     if mapping.generated_start >= mapping.generated_end || line == 0 {
         return false;
     }
-    let start = line_at(source, mapping.generated_start);
-    let end = line_at(source, mapping.generated_end.saturating_sub(1));
+    let start = reference_line_at(source, mapping.generated_start);
+    let end = reference_line_at(source, mapping.generated_end.saturating_sub(1));
     start <= line && line <= end
 }
 
-fn line_at(source: &str, offset: usize) -> usize {
+#[cfg(test)]
+fn reference_line_at(source: &str, offset: usize) -> usize {
     let end = offset.min(source.len());
     1 + source.as_bytes()[..end]
         .iter()
@@ -260,6 +369,36 @@ mod tests {
         assert_eq!(parsed.message, "status:42");
         assert_eq!(parsed.frames[0].source, "main.lua");
         assert_eq!(parsed.frames[0].line, Some(7));
+    }
+
+    #[test]
+    fn source_map_index_matches_reference_lookup_for_every_line() {
+        let source = "alpha\nbeta\ngamma\ndelta\n";
+        let beta = source.find("beta").unwrap();
+        let gamma = source.find("gamma").unwrap();
+        let maps = [
+            mapping(0, source.len(), 10, 0),
+            mapping(beta, source.len(), 20, 1),
+            mapping(beta, gamma - 1, 30, 2),
+            mapping(gamma, gamma, 40, 3),
+        ];
+        let index = LuaSourceMapIndex::new(source, &maps);
+
+        for line in 0..=source.lines().count() + 2 {
+            assert_eq!(
+                index.map_line(line),
+                reference_mapping_for_line(source, &maps, line),
+                "generated line {line}",
+            );
+        }
+    }
+
+    #[test]
+    fn empty_source_map_index_has_no_locations() {
+        let index = LuaSourceMapIndex::new("line one\nline two\n", &[]);
+        assert_eq!(index.map_line(0), None);
+        assert_eq!(index.map_line(1), None);
+        assert_eq!(index.map_line(usize::MAX), None);
     }
 
     #[test]
